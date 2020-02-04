@@ -179,6 +179,7 @@ static struct sk_buff *macvlan_handle_frame(struct sk_buff *skb)
 
 	skb->dev = dev;
 	skb->pkt_type = PACKET_HOST;
+	skb->cvm_reserved |= SKB_CVM_RESERVED_0;
 
 	netif_rx(skb);
 	return NULL;

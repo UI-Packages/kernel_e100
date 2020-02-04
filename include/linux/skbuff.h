@@ -332,16 +332,53 @@ struct iphdr_new {
         /*The options start here. */
 };
 
+struct ipv6hdr_new {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	__u8		priority:4,
+			version:4;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+	__u8		version:4,
+			priority:4;
+#else
+#error "Please fix <asm/byteorder.h>"
+#endif
+	__u8		flow_lbl[3];
+
+	__be16		payload_len;
+	__u8		nexthdr;
+	__u8		hop_limit;
+
+	uint64_t	saddrhi;
+	uint64_t	saddrlo;
+	uint64_t	daddrhi;
+	uint64_t	daddrlo;
+};
+
 typedef struct {
 	uint64_t	cookie;		/* magic number */
 	void		*bucket;	/* bucket ptr */
+	void		*frag_bucket;	/* Frag bucket ptr */
 	uint32_t	seq;		/* TCP sequence number (if present) */
 	uint32_t	ack_seq;	/* TCP acknowledge number (if present) */
-	uint32_t	reserved1;
-	struct iphdr_new ip;		/* IP header */
-	uint64_t	reserved2[4];	/* L4 ports and reserved */
+	union {
+		struct {
+			uint32_t old_reserved1;
+			struct iphdr_new cvm_ip; /* IP header */
+			uint64_t reserved2[2];
+		} cvm_ip4;
+		struct ipv6hdr_new cvm_ip6;
+	} cvm_ip4_ip6_u;
+#define cvmip	cvm_ip4_ip6_u.cvm_ip4.cvm_ip
+#define cvmip6	cvm_ip4_ip6_u.cvm_ip6
+	uint64_t	reserved2[2];	/* L4 ports and reserved */
 } cvm_packet_info_t;
 #endif
+
+enum {
+	SKB_CVM_RESERVED_0 = (1 << 0),
+	SKB_CVM_RESERVED_1 = (1 << 1),
+	SKB_CVM_RESERVED_2 = (1 << 2),
+};
 
 struct sk_buff {
 	/* These two members must be first. */
@@ -433,6 +470,8 @@ struct sk_buff {
 #ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
 	cvm_packet_info_t	cvm_info;
 #endif
+	__u16			cvm_reserved;
+
 	/* These elements must be at the end, see alloc_skb() for details.  */
 	sk_buff_data_t		tail;
 	sk_buff_data_t		end;

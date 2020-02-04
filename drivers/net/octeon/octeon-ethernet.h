@@ -55,7 +55,7 @@ struct octeon_ethernet {
 	unsigned int rx_strip_fcs:1;
 
 	/* Flags controlling aspects of the device */
-	int flags;
+	int flags:16;
 #define OCTEON_ETHERNET_FLAG_TX_TIMESTAMP_SW (1<<0)
 #define OCTEON_ETHERNET_FLAG_TX_TIMESTAMP_HW (1<<1)
 #define OCTEON_ETHERNET_FLAG_RX_TIMESTAMP_SW (1<<2)

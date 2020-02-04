@@ -71,6 +71,16 @@ static int cvm_oct_set_settings(struct net_device *dev, struct ethtool_cmd *cmd)
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
 
+	if (cmd->autoneg == AUTONEG_DISABLE) {
+		union cvmx_ipd_sub_port_fcs ipd_sub_port_fcs;
+		/* Disable FCS stripping */
+		ipd_sub_port_fcs.u64 = cvmx_read_csr(CVMX_IPD_SUB_PORT_FCS);
+		ipd_sub_port_fcs.s.port_bit &= 0xffffffffull
+		                               ^ (1ull << priv->port);
+		cvmx_write_csr(CVMX_IPD_SUB_PORT_FCS, ipd_sub_port_fcs.u64);
+		priv->rx_strip_fcs = 1;
+	}
+
 	if (priv->phydev)
 		return phy_ethtool_sset(priv->phydev, cmd);
 

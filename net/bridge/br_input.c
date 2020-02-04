@@ -145,6 +145,11 @@ struct sk_buff *br_handle_frame(struct net_bridge_port *p, struct sk_buff *skb)
 			return skb;	/* continue processing */
 	}
 
+
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+    skb->cvm_reserved |= SKB_CVM_RESERVED_2;
+#endif
+
 forward:
 	switch (p->state) {
 	case BR_STATE_FORWARDING:

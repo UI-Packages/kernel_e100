@@ -821,7 +821,7 @@ static const struct {
 };
 
 static bool
-ipp2p_mt(const struct sk_buff *skb, struct xt_match_param *par)
+ipp2p_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 {
 	const struct ipt_p2p_info *info = par->matchinfo;
 	const unsigned char  *haystack;
@@ -829,6 +829,8 @@ ipp2p_mt(const struct sk_buff *skb, struct xt_match_param *par)
 	bool p2p_result = false;
 	int i = 0;
 	unsigned int hlen = ntohs(ip->tot_len) - ip_hdrlen(skb);	/* hlen = packet-data length */
+
+	*par->cvm_reserved |= SKB_CVM_RESERVED_1;
 
 	/* must not be a fragment */
 	if (par->fragoff != 0) {

@@ -198,6 +198,7 @@ struct xt_match_param {
 	unsigned int hooknum;
 	u_int8_t family;
 	bool *hotdrop;
+	u_int16_t *cvm_reserved;
 };
 
 /**

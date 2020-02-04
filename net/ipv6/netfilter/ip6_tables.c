@@ -350,6 +350,7 @@ ip6t_do_table(struct sk_buff *skb,
 	struct xt_table_info *private;
 	struct xt_match_param mtpar;
 	struct xt_target_param tgpar;
+	u_int16_t cvm_reserved = 0;
 
 	/* Initialization */
 	indev = in ? in->name : nulldevname;
@@ -365,6 +366,7 @@ ip6t_do_table(struct sk_buff *skb,
 	mtpar.out     = tgpar.out = out;
 	mtpar.family  = tgpar.family = NFPROTO_IPV6;
 	mtpar.hooknum = tgpar.hooknum = hook;
+	mtpar.cvm_reserved = &cvm_reserved;
 
 	IP_NF_ASSERT(table->valid_hooks & (1 << hook));
 
@@ -379,12 +381,19 @@ ip6t_do_table(struct sk_buff *skb,
 
 	do {
 		struct ip6t_entry_target *t;
+		bool r;
 
 		IP_NF_ASSERT(e);
 		IP_NF_ASSERT(back);
 		if (!ip6_packet_match(skb, indev, outdev, &e->ipv6,
-		    &mtpar.thoff, &mtpar.fragoff, &hotdrop) ||
-		    IP6T_MATCH_ITERATE(e, do_match, skb, &mtpar) != 0) {
+		    &mtpar.thoff, &mtpar.fragoff, &hotdrop)) {
+			r = true;
+		} else {
+			cvm_reserved = 0;
+			r = (IP6T_MATCH_ITERATE(e, do_match, skb, &mtpar) != 0);
+			skb->cvm_reserved |= cvm_reserved;
+		}
+		if (r) {
 			e = ip6t_next_entry(e);
 			continue;
 		}
