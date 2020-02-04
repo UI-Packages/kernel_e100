@@ -87,6 +87,7 @@ static struct cvm_oct_core_state core_state __cacheline_aligned_in_smp;
 #ifdef CONFIG_SMP
 static int cvm_oct_enable_one_message;
 #endif
+static int old_max_rx_cpus = -1;
 
 static void cvm_oct_enable_napi(void)
 {
@@ -200,6 +201,21 @@ static irqreturn_t cvm_oct_do_interrupt(int cpl, void *dev_id)
 
 	/* There better be cores available...  */
 	core_state.active_cores++;
+
+	/* Update number of baseline cores */
+	if (unlikely(max_rx_cpus != old_max_rx_cpus)) {
+		if (max_rx_cpus >= 1 && max_rx_cpus < num_online_cpus()) {
+			if (core_state.active_cores <= max_rx_cpus) {
+				core_state.baseline_cores = max_rx_cpus;
+				old_max_rx_cpus = max_rx_cpus;
+			}
+			/* else delay update */
+		} else {
+			core_state.baseline_cores = num_online_cpus();
+			old_max_rx_cpus = max_rx_cpus;
+		}
+	}
+
 	BUG_ON(core_state.active_cores > core_state.baseline_cores);
 
 	spin_unlock_irqrestore(&core_state.lock, flags);

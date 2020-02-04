@@ -89,12 +89,12 @@ MODULE_PARM_DESC(disable_core_queueing, "\n"
 		"\t\tresulting in some cases in improved throughput.");
 
 int max_rx_cpus = -1;
-module_param(max_rx_cpus, int, 0444);
+module_param(max_rx_cpus, int, S_IRUGO | S_IWUSR | S_IWGRP);
 MODULE_PARM_DESC(max_rx_cpus, "\n"
 	"\t\tThe maximum number of CPUs to use for packet reception.\n"
 	"\t\tUse -1 to use all available CPUs.");
 
-int rx_napi_weight = 32;
+int rx_napi_weight = 64;
 module_param(rx_napi_weight, int, 0444);
 MODULE_PARM_DESC(rx_napi_weight, "The NAPI WEIGHT parameter.");
 

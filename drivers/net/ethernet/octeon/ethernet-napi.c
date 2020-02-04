@@ -113,7 +113,7 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 		pskb = cvm_oct_packet_to_skb(cvm_oct_get_buffer_ptr(packet_ptr));
 		prefetch(pskb);
 
-		if (unlikely(rx_count == 0)) {
+		if (unlikely(rx_count == 0 && core_state.baseline_cores != 1)) {
 			/* First time through, see if there is enough
 			 * work waiting to merit waking another
 			 * CPU.
