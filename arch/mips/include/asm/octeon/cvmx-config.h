@@ -44,10 +44,21 @@ static inline int octeon_pko_lockless(void)
 #define CVMX_LLM_NUM_PORTS 1
 #define CVMX_NULL_POINTER_PROTECT 1
 #define CVMX_ENABLE_DEBUG_PRINTS 1
+#if 0
 /* PKO queues per port for interface 0 (ports 0-15) */
 #define CVMX_PKO_QUEUES_PER_PORT_INTERFACE0 (octeon_pko_lockless() ? 16 : 1)
 /* PKO queues per port for interface 1 (ports 16-31) */
 #define CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 (octeon_pko_lockless() ? 16 : 1)
+#else
+/* Modified as 8 to add OUTPUT_QOS support in ipfwd-offload module.
+ * Modified CVMX_HELPER_PKO_MAX_PORTS_INTERFACE0 and
+ * CVMX_HELPER_PKO_MAX_PORTS_INTERFACE1 as well.
+ */ 
+/* PKO queues per port for interface 0 (ports 0-15) */
+#define CVMX_PKO_QUEUES_PER_PORT_INTERFACE0 (octeon_pko_lockless() ? 16 : 8)
+/* PKO queues per port for interface 1 (ports 16-31) */
+#define CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 (octeon_pko_lockless() ? 16 : 8)
+#endif
 #ifdef CONFIG_OCTEON_ETHERNET_LOCKED
 #define CVMX_PKO_MAX_PORTS_INTERFACE0 CVMX_HELPER_PKO_MAX_PORTS_INTERFACE0
 #define CVMX_PKO_MAX_PORTS_INTERFACE1 CVMX_HELPER_PKO_MAX_PORTS_INTERFACE1

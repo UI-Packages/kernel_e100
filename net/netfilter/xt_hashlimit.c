@@ -571,6 +571,8 @@ hashlimit_mt_v0(const struct sk_buff *skb, const struct xt_match_param *par)
 	struct dsthash_ent *dh;
 	struct dsthash_dst dst;
 
+	*par->cvm_reserved |= SKB_CVM_RESERVED_1;
+
 	if (hashlimit_init_dst(hinfo, &dst, skb, par->thoff) < 0)
 		goto hotdrop;
 
@@ -621,6 +623,8 @@ hashlimit_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 	unsigned long now = jiffies;
 	struct dsthash_ent *dh;
 	struct dsthash_dst dst;
+
+	*par->cvm_reserved |= SKB_CVM_RESERVED_1;
 
 	if (hashlimit_init_dst(hinfo, &dst, skb, par->thoff) < 0)
 		goto hotdrop;

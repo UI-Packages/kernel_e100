@@ -24,6 +24,7 @@
  * This file may also be available under a different license from Cavium.
  * Contact Cavium Networks for more information
 *********************************************************************/
+#include "ethernet-proc.h"
 
 #undef CVM_OCT_XMIT
 #undef CVM_OCT_PKO_LOCK_TYPE
@@ -96,6 +97,11 @@ CVM_OCT_XMIT
 	 */
 	if ((CVMX_PKO_QUEUES_PER_PORT_INTERFACE0 > 1) ||
 		(CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 > 1)) {
+#ifdef CVM_QOS_OUTPUT_QOS
+		if (cvm_oct_output_qos)
+			qos = GET_SKBUFF_OUTPUT_QOS(skb);
+		else
+#endif
 		qos = GET_SKBUFF_QOS(skb);
 		if (qos <= 0)
 			qos = 0;

@@ -28,6 +28,8 @@ string_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 	struct ts_state state;
 	int invert;
 
+	*par->cvm_reserved |= SKB_CVM_RESERVED_1;
+
 	memset(&state, 0, sizeof(struct ts_state));
 
 	invert = (par->match->revision == 0 ? conf->u.v0.invert :

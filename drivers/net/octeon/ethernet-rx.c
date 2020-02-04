@@ -572,13 +572,20 @@ static int cvm_oct_napi_poll(struct napi_struct *napi, int budget)
 					atomic64_add(skb->len, (atomic64_t *)&priv->netdev->stats.rx_bytes);
 				}
 				rx_count++;
-				if (priv->intercept_cb) {
-					callback_result = priv->intercept_cb(priv->netdev, work, skb);
+
+				callback_result = CVM_OCT_PASS;
+
+				if (priv->intercept_cb)
+                                        callback_result = priv->intercept_cb(priv->netdev, work, skb);
+
+				if (priv->intercept_cb2 && (callback_result == CVM_OCT_PASS)) {
+					callback_result = priv->intercept_cb2(priv->netdev, work, skb);
 
 					if (unlikely(priv->rx_strip_fcs))
 						work->len += 4;
+				}
 
-					switch (callback_result) {
+				switch (callback_result) {
 					case CVM_OCT_PASS:
 						netif_receive_skb(skb);
 						break;
@@ -606,10 +613,6 @@ static int cvm_oct_napi_poll(struct napi_struct *napi, int budget)
 					case CVM_OCT_TAKE_OWNERSHIP_SKB:
 						/* Interceptor took our packet */
 						break;
-					}
-				} else {
-					netif_receive_skb(skb);
-					callback_result = CVM_OCT_PASS;
 				}
 			} else {
 				/* Drop any packet received for a device that isn't up */

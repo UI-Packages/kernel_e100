@@ -64,6 +64,7 @@ struct octeon_ethernet {
 
 	/* Optional intecept callback defined above */
 	cvm_oct_callback_t      intercept_cb;
+	cvm_oct_callback_t      intercept_cb2;
 
 	/* Number of elements in tx_queue below */
 	int                     num_tx_queues;

@@ -38,3 +38,6 @@
 void cvm_oct_proc_initialize(void);
 void cvm_oct_proc_shutdown(void);
 
+#ifdef CVM_QOS_OUTPUT_QOS
+extern int cvm_oct_output_qos;
+#endif

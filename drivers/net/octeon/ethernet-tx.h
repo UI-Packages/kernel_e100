@@ -29,3 +29,28 @@ int cvm_oct_xmit(struct sk_buff *skb, struct net_device *dev);
 int cvm_oct_xmit_lockless(struct sk_buff *skb, struct net_device *dev);
 int cvm_oct_xmit_pow(struct sk_buff *skb, struct net_device *dev);
 
+/* OUTPUT QOS support. Prioritizing TX traffic by selecting an output 
+ * queue base on the packet's DSCP/TOS value.
+ */
+#ifndef CVM_QOS_OUTPUT_QOS
+#define CVM_QOS_OUTPUT_QOS
+#endif
+
+/* As the ethernet interfaces come under INTERFACE1, 
+ * CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 is referred. 
+ * TBD: The same queue selection logic exists in cavium-ipfwd-offload 
+ * module as well. Need to do code cleanup.
+ */
+#ifdef CVM_QOS_OUTPUT_QOS
+#define QOS_OUTPUT_MAP ((CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 >= 8) ? 0x01234567 : \
+                        ((CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 == 7) ? 0x01234556 : \
+                        ((CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 == 6) ? 0x01233445 : \
+                        ((CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 == 5) ? 0x01122334 : \
+                        ((CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 == 4) ? 0x00112233 : \
+                        ((CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 == 3) ? 0x00011122 : \
+                        ((CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 == 2) ? 0x00001111 : \
+                        0x00000000)))))))
+
+#define GET_SKBUFF_OUTPUT_QOS(skb) ((QOS_OUTPUT_MAP >> \
+                        ((((ip_hdr(skb)->tos) >> 5) & 0x07) * 4)) & 0x07)
+#endif

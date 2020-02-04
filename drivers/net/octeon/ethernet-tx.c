@@ -31,11 +31,13 @@
 #include <linux/etherdevice.h>
 #include <linux/ip.h>
 #include <linux/string.h>
+#include <linux/if_vlan.h>
 #include <net/dst.h>
 #ifdef CONFIG_XFRM
 #include <linux/xfrm.h>
 #include <net/xfrm.h>
 #endif /* CONFIG_XFRM */
+#include <linux/if_ether.h>
 
 #include <asm/octeon/octeon.h>
 #include <asm/octeon/cvmx-wqe.h>
@@ -318,9 +320,12 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 	/* Check if we can use the hardware checksumming */
 	if (unlikely(work->word2.s.not_IP || work->word2.s.IP_exc))
 		pko_command.s.ipoffp1 = 0;
-	else
+	else {
 		pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1;
 
+		if (work->unused == 0x2)
+			pko_command.s.ipoffp1 += VLAN_HLEN;
+	}
 	/* Send the packet to the output queue */
 	if (unlikely(cvmx_pko_send_packet_finish(priv->port, priv->tx_queue[qos].queue, pko_command, hw_buffer, lock_type))) {
 		DEBUGPRINT("%s: Failed to send the packet\n", dev->name);
@@ -340,3 +345,148 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 }
 EXPORT_SYMBOL(cvm_oct_transmit_qos);
 
+/**
+ * cvm_oct_transmit_qos_not_free - transmit a work queue entry out of the ethernet port.
+ *
+ * Both the work queue entry and the packet data can optionally be
+ * freed. The work will be freed on error as well.
+ *
+ * @dev: Device to transmit out.
+ * @work_queue_entry: Work queue entry to send
+ * @skb: socket buffer
+ * @qos: Index into the queues for this port to transmit on. This is
+ *       used to implement QoS if their are multiple queues per
+ *       port. This parameter must be between 0 and the number of
+ *       queues per port minus 1. Values outside of this range will be
+ *       change to zero.
+ *
+ * Returns Zero on success, negative on failure.
+ */
+int cvm_oct_transmit_qos_not_free(struct net_device *dev,
+			 	void *work_queue_entry,
+			 	struct sk_buff *skb,
+			 	int qos)
+{
+	unsigned long			flags;
+	cvmx_buf_ptr_t			hw_buffer;
+	cvmx_pko_command_word0_t	pko_command;
+	int				dropped;
+	struct octeon_ethernet		*priv = netdev_priv(dev);
+	cvmx_wqe_t			*work = work_queue_entry;
+	cvmx_wqe_t			*rcv_work = NULL;
+	cvmx_pko_lock_t lock_type;
+	u64 word2;
+
+	if (!(dev->flags & IFF_UP)) {
+		DEBUGPRINT("%s: Device not up\n", dev->name);
+		if (work)
+			cvm_oct_free_work(work);
+		return -1;
+	}
+
+	if (priv->flags & OCTEON_ETHERNET_FLAG_TX_LOCKLESS) {
+		qos = cvmx_get_core_num();
+		lock_type = CVMX_PKO_LOCK_NONE;
+	} else {
+		/*
+		 * The check on CVMX_PKO_QUEUES_PER_PORT_* is designed to
+		 * completely remove "qos" in the event neither interface
+		 * supports multiple queues per port
+		 */
+		if ((CVMX_PKO_QUEUES_PER_PORT_INTERFACE0 > 1) ||
+			(CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 > 1)) {
+			if (qos <= 0)
+				qos = 0;
+			else if (qos >= priv->num_tx_queues)
+				qos = 0;
+		} else
+			qos = 0;
+		lock_type = CVMX_PKO_LOCK_CMD_QUEUE;
+	}
+
+	/* Start off assuming no drop */
+	dropped = 0;
+
+	/* Build the PKO buffer pointer */
+	hw_buffer.u64 = 0;
+	hw_buffer.s.addr = virt_to_phys(skb->data);
+	hw_buffer.s.pool = CVMX_FPA_PACKET_POOL;
+	hw_buffer.s.size = CVMX_FPA_PACKET_POOL_SIZE;
+	hw_buffer.s.back = work->packet_ptr.s.back;
+
+	/* Build the PKO command */
+	pko_command.u64 = 0;
+	pko_command.s.n2 = 0; /* pollute L2 with the outgoing packet */
+	pko_command.s.dontfree = 1;
+	pko_command.s.segs = work->word2.s.bufs;
+	pko_command.s.total_bytes = skb->len;
+
+	/* Use fau0 to decrement the number of packets queued */
+	pko_command.s.size0 = CVMX_FAU_OP_SIZE_32;
+	pko_command.s.subone0 = 1;
+
+	pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1;
+	if (skb->protocol == ETH_P_8021Q)
+		pko_command.s.ipoffp1 += VLAN_HLEN;
+		
+	rcv_work = cvmx_fpa_alloc(CVMX_FPA_TX_WQE_POOL);
+	if (unlikely(!work)) {
+		printk("failed to allocate rcv work\n");
+		dropped = -1;
+		goto skip_xmit;
+	}
+
+	pko_command.s.rsp = 1;
+	pko_command.s.wqp = 1;
+
+	pko_command.s.reg0 = 0;
+	rcv_work->hw_chksum = 0;
+	rcv_work->unused = (u8)qos;
+
+	rcv_work->next_ptr = 0;
+	rcv_work->len = 0;
+	rcv_work->tag_type = CVMX_POW_TAG_TYPE_NULL;	
+	rcv_work->tag = 0;
+	rcv_work->word2.u64 = 0;
+	rcv_work->word2.s.software = 1;
+	rcv_work->qos = (~priv->port) & 7;
+	rcv_work->grp = pow_receive_group;
+	rcv_work->packet_ptr.u64 = (unsigned long)skb;
+
+	local_irq_save(flags);
+
+	cvmx_pko_send_packet_prepare(priv->port, priv->tx_queue[qos].queue, CVM_OCT_PKO_LOCK_TYPE);
+
+	word2 = virt_to_phys(rcv_work);
+	if (priv->flags & OCTEON_ETHERNET_FLAG_TX_TIMESTAMP_SW) {
+		/* The first 8 bytes work->packet_data will get the timestamp */
+		*(uint64_t *)rcv_work->packet_data = ktime_to_ns(ktime_get_real());
+	}
+	if (priv->flags & OCTEON_ETHERNET_FLAG_TX_TIMESTAMP_HW) {
+		/* The first 8 bytes work->packet_data will get the timestamp */
+		*(uint64_t *)rcv_work->packet_data = 0;
+		word2 |= 1ull<<40; /* Bit 40 controls timestamps */
+	}
+
+	/* Send the packet to the output queue */
+	if (unlikely(cvmx_pko_send_packet_finish3(priv->port, priv->tx_queue[qos].queue,
+							pko_command, hw_buffer, word2, CVM_OCT_PKO_LOCK_TYPE))) {
+		printk("%s: Failed to send the packet\n", dev->name);
+		dropped = -1;
+	}
+	local_irq_restore(flags);
+
+skip_xmit:
+	if (unlikely(dropped)) {
+		cvmx_fau_atomic_add32(priv->tx_queue[qos].fau, -1);
+		dev_kfree_skb_any(skb);
+		dev->stats.tx_dropped++;
+		if (work)
+			cvmx_fpa_free(work, CVMX_FPA_PACKET_POOL, 0);
+		if (rcv_work)
+			cvmx_fpa_free(rcv_work, CVMX_FPA_TX_WQE_POOL, 0);
+	}
+
+	return NETDEV_TX_OK;
+}
+EXPORT_SYMBOL(cvm_oct_transmit_qos_not_free);

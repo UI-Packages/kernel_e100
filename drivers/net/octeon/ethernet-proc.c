@@ -42,6 +42,14 @@
 
 #include "octeon-ethernet.h"
 #include "ethernet-proc.h"
+#include "ethernet-tx.h"
+
+
+#ifdef CVM_QOS_OUTPUT_QOS
+struct proc_dir_entry *cvm_oct_op_qos;
+int cvm_oct_output_qos;
+EXPORT_SYMBOL(cvm_oct_output_qos);
+#endif
 
 static unsigned long long cvm_oct_stats_read_switch(struct mii_bus *mii_bus, int phy_id, int offset)
 {
@@ -232,16 +240,57 @@ static const struct file_operations cvm_oct_stats_operations = {
 	.release	= single_release,
 };
 
+#ifdef CVM_QOS_OUTPUT_QOS
+static int cvm_oct_op_qos_read(char *page, char **start, off_t off,
+				int count, int *eof, void *data)
+{
+	int len = 0;
+	
+	if (off > 0) {
+                *eof = 1;
+                return 0;
+        }
+
+	len += sprintf(page + len, "cvm_oct_output_qos:%d \n",
+			cvm_oct_output_qos);
+	return len;
+}
+
+static int cvm_oct_op_qos_write(struct file *filp, const char __user *buff,
+				unsigned long len, void *data )
+{
+	char val;
+
+	if (copy_from_user(&val, buff, 1))
+                return -EFAULT;
+
+	cvm_oct_output_qos = (int)val - '0';
+	return len;
+}
+#endif
 
 void cvm_oct_proc_initialize(void)
 {
 	struct proc_dir_entry *entry = create_proc_entry("octeon_ethernet_stats", 0, NULL);
 	if (entry)
 		entry->proc_fops = &cvm_oct_stats_operations;
+
+#ifdef CVM_QOS_OUTPUT_QOS
+	cvm_oct_op_qos = create_proc_entry("octeon_output_qos", 0644, NULL);
+	if (!cvm_oct_op_qos) {
+		pr_err("Failed to create /proc/octeon_output_qos entry\n");
+		return;
+	}
+	cvm_oct_op_qos->read_proc = cvm_oct_op_qos_read;
+	cvm_oct_op_qos->write_proc = cvm_oct_op_qos_write;
+#endif
 }
 
 void cvm_oct_proc_shutdown(void)
 {
 	remove_proc_entry("octeon_ethernet_stats", NULL);
+#ifdef CVM_QOS_OUTPUT_QOS
+	remove_proc_entry("octeon_output_qos", NULL);
+#endif
 }
 

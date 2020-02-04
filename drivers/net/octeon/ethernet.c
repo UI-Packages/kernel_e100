@@ -244,6 +244,20 @@ struct net_device *cvm_oct_register_callback(const char *device_name, cvm_oct_ca
 	return NULL;
 }
 EXPORT_SYMBOL(cvm_oct_register_callback);
+struct net_device *cvm_oct_register_callback2(const char *device_name, cvm_oct_callback_t callback)
+{
+	struct octeon_ethernet *priv;
+
+	list_for_each_entry(priv, &cvm_oct_list, list) {
+		if (strcmp(device_name, priv->netdev->name) == 0) {
+			priv->intercept_cb2 = callback;
+			wmb();
+			return priv->netdev;
+		}
+	}
+	return NULL;
+}
+EXPORT_SYMBOL(cvm_oct_register_callback2);
 
 /**
  * cvm_oct_free_work- Free a work queue entry
@@ -391,8 +405,19 @@ static int cvm_oct_common_change_mtu(struct net_device *dev, int new_mtu)
 				 * GMX instead.
 				 */
 				port_cfg.s.maxerr_en = 0;
-				cvmx_write_csr(CVMX_PIP_PRT_CFGX(index), port_cfg.u64);
+				cvmx_write_csr(CVMX_PIP_PRT_CFGX(index),
+				               port_cfg.u64);
 			}
+
+			/*
+			 * Set the hardware to truncate packets larger
+			 * than the MTU and smaller the 64 bytes.
+			 */
+			union cvmx_pip_frm_len_chkx frm_len_chk;
+			frm_len_chk.u64 = 0;
+			frm_len_chk.s.minlen = 64;
+			frm_len_chk.s.maxlen = max_packet;
+			cvmx_write_csr(CVMX_PIP_FRM_LEN_CHKX(interface), frm_len_chk.u64);
 		}
 		/*
 		 * Set the hardware to truncate packets larger than

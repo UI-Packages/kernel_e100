@@ -560,6 +560,8 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
 #endif
 	new->vlan_tci		= old->vlan_tci;
 
+	new->cvm_reserved	= old->cvm_reserved;
+
 	skb_copy_secmark(new, old);
 }
 

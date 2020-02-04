@@ -28,7 +28,7 @@
 #include <asm/octeon/cvmx-pip.h>
 
 #define DEBUGPRINT(format, ...) do { if (printk_ratelimit()) 		\
-					printk(format, ##__VA_ARGS__);	\
+					printk(KERN_DEBUG format, ##__VA_ARGS__);	\
 				} while (0)
 
 /**

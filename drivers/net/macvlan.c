@@ -135,6 +135,8 @@ static void macvlan_broadcast(struct sk_buff *skb,
 			else
 				nskb->pkt_type = PACKET_MULTICAST;
 
+			nskb->cvm_reserved |= SKB_CVM_RESERVED_0;
+
 			netif_rx(nskb);
 		}
 	}

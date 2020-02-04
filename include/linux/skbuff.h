@@ -360,6 +360,10 @@ typedef struct {
 	void		*frag_bucket;	/* Frag bucket ptr */
 	uint32_t	seq;		/* TCP sequence number (if present) */
 	uint32_t	ack_seq;	/* TCP acknowledge number (if present) */
+	struct {
+		u32     vlan_id;
+		u32     reserved3;
+	} cvm_vlan;
 	union {
 		struct {
 			uint32_t old_reserved1;

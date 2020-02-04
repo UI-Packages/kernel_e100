@@ -4368,6 +4368,14 @@ static struct addrconf_sysctl_table
 			.proc_handler	=	proc_dointvec,
 		},
 		{
+			.ctl_name	=	CTL_UNNUMBERED,
+			.procname	=	"link_filter",
+			.data		=	&ipv6_devconf.link_filter,
+			.maxlen		=	sizeof(int),
+			.mode		=	0644,
+			.proc_handler	=	proc_dointvec,
+		},
+		{
 			.ctl_name	=	0,	/* sentinel */
 		}
 	},
