@@ -336,7 +336,7 @@ static inline void netdev_set_addr_lockdep_class(struct net_device *dev)
 }
 #endif
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 /* Cavium fast-path rx/tx hooks */
 u32 (*cvm_br_rx_hook) (struct sk_buff *);
 u32 (*cvm_ipfwd_rx_hook) (struct sk_buff *);
@@ -2819,7 +2819,7 @@ int dev_queue_xmit(struct sk_buff *skb)
 	txq = netdev_pick_tx(dev, skb);
 	q = rcu_dereference_bh(txq->qdisc);
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 	if (cvm_ipfwd_tx_hook && (!q->enqueue || q->ops == &pfifo_fast_ops)) {
 		if (cvm_ipfwd_tx_hook(skb) == (-ENOMEM))
 			goto out_kfree_skb;
@@ -2883,7 +2883,7 @@ recursion_alert:
 
 	rc = -ENETDOWN;
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 out_kfree_skb:
 #endif
 	rcu_read_unlock_bh();
@@ -3488,7 +3488,7 @@ static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc)
 	int ret = NET_RX_DROP;
 	__be16 type;
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
        if (cvm_br_rx_hook)
                if (!cvm_br_rx_hook(skb))
                         return NET_RX_SUCCESS;
@@ -6438,8 +6438,8 @@ out:
 
 subsys_initcall(net_dev_init);
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 EXPORT_SYMBOL(cvm_br_rx_hook);
 EXPORT_SYMBOL(cvm_ipfwd_rx_hook);
 EXPORT_SYMBOL(cvm_ipfwd_tx_hook);
-#endif 
+#endif

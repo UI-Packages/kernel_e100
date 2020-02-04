@@ -50,7 +50,7 @@
 
 #include <asm/octeon/cvmx-gmxx-defs.h>
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 #include "ipfwd_config.h"
 #endif
 
@@ -62,7 +62,7 @@
  * GET_SKBUFF_QOS as: #define GET_SKBUFF_QOS(skb) ((skb)->priority)
  */
 #ifndef GET_SKBUFF_QOS
-#if CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD && IPFWD_OUTPUT_QOS
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD) && IPFWD_OUTPUT_QOS
 #define GET_SKBUFF_QOS(skb) ((skb)->cvm_info.qos_level)
 #else
 #define GET_SKBUFF_QOS(skb) 0
@@ -206,11 +206,7 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 
 	/* Build the PKO command */
 	pko_command.u64 = 0;
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
-	pko_command.s.n2 = 0; /* pollute L2 with the outgoing packet */
-#else 
 	pko_command.s.n2 = 1; /* Don't pollute L2 with the outgoing packet */
-#endif
 	pko_command.s.dontfree = !do_free;
 	pko_command.s.segs = work->word2.s.bufs;
 	pko_command.s.total_bytes = work->word1.len;
@@ -219,7 +215,7 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 	if (unlikely(work->word2.s.not_IP || work->word2.s.IP_exc))
 		pko_command.s.ipoffp1 = 0;
 	else
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 		pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1 + cvmx_wqe_get_unused8(work);
 #else
 		pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1;
@@ -243,7 +239,7 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 	return dropped;
 }
 EXPORT_SYMBOL(cvm_oct_transmit_qos);
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 /**
  * cvm_oct_transmit_qos_not_free - transmit a work queue entry out of the ethernet port.
  *

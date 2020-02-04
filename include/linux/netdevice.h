@@ -2962,7 +2962,7 @@ do {								\
 #define PTYPE_HASH_SIZE	(16)
 #define PTYPE_HASH_MASK	(PTYPE_HASH_SIZE - 1)
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 /* Cavium fast-path rx/tx hooks */
 extern u32 (*cvm_br_rx_hook) (struct sk_buff *);
 extern u32 (*cvm_ipfwd_rx_hook)(struct sk_buff *);

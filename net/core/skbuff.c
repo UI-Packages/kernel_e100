@@ -199,10 +199,14 @@ static const struct pipe_buf_operations sock_pipe_buf_ops = {
 static void skb_panic(struct sk_buff *skb, unsigned int sz, void *addr,
 		      const char msg[])
 {
-	pr_emerg("%s: text:%p len:%d put:%d head:%p data:%p tail:%#lx end:%#lx dev:%s\n",
-		 msg, addr, skb->len, sz, skb->head, skb->data,
+	pr_emerg("%s: text:%p len:%d len2:%d put:%x head:%p data:%p net:%#lx tail:%#lx end:%#lx dev:%s, proto %d\n",
+		 msg, addr, skb->len, skb->data_len, sz, skb->head, skb->data,
+                 skb->network_header,
 		 (unsigned long)skb->tail, (unsigned long)skb->end,
-		 skb->dev ? skb->dev->name : "<NULL>");
+		 skb->dev ? skb->dev->name : "<NULL>", skb->protocol);
+        pr_emerg("mac %#lx, trans %#lx\n", 
+                 skb->mac_header, skb->transport_header);
+        dump_stack();
 	BUG();
 }
 
@@ -1393,8 +1397,11 @@ unsigned char *skb_put(struct sk_buff *skb, unsigned int len)
 	SKB_LINEAR_ASSERT(skb);
 	skb->tail += len;
 	skb->len  += len;
-	if (unlikely(skb->tail > skb->end))
+	if (unlikely(skb->tail > skb->end)) {
+                pr_emerg("skb_put calling panic %p %p, len %x\n", 
+                         skb->head, skb->data, len);
 		skb_over_panic(skb, len, __builtin_return_address(0));
+        }
 	return tmp;
 }
 EXPORT_SYMBOL(skb_put);
@@ -1410,10 +1417,23 @@ EXPORT_SYMBOL(skb_put);
  */
 unsigned char *skb_push(struct sk_buff *skb, unsigned int len)
 {
+
+    if ((skb->data - len) < skb->head) {
+        if (printk_ratelimit()) {
+            pr_err("Gotcha2 %p %p %d\n", 
+                   skb->head, skb->data, len);
+            dump_stack();
+        }
+        return skb->data;
+    }
+
 	skb->data -= len;
 	skb->len  += len;
-	if (unlikely(skb->data<skb->head))
+	if (unlikely(skb->data<skb->head)) {
+                pr_emerg("skb_push calling panic %p %p, len %x\n", 
+                         skb->head, skb->data, len);
 		skb_under_panic(skb, len, __builtin_return_address(0));
+        }
 	return skb->data;
 }
 EXPORT_SYMBOL(skb_push);

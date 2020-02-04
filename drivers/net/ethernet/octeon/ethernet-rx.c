@@ -64,6 +64,7 @@
 struct cvm_napi_wrapper {
 	struct napi_struct napi;
 	int available;
+	int index;
 } ____cacheline_aligned_in_smp;
 
 static struct cvm_napi_wrapper cvm_oct_napi[NR_CPUS] __cacheline_aligned_in_smp;
@@ -457,6 +458,7 @@ void cvm_oct_rx_initialize(int num_wqe)
 
 	for_each_possible_cpu(i) {
 		cvm_oct_napi[i].available = 1;
+		cvm_oct_napi[i].index = i;
 		netif_napi_add(dev_for_napi, &cvm_oct_napi[i].napi,
 			       cvm_oct_napi_poll, rx_napi_weight);
 		napi_enable(&cvm_oct_napi[i].napi);

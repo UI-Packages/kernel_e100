@@ -48,11 +48,11 @@
 static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 {
 	const int	coreid = cvmx_get_core_num();
-	int		no_work_count = 0;
 	u64		old_group_mask;
 	u64		old_scratch;
 	int		rx_count = 0;
 	bool		did_work_request = false;
+	bool		early_exit = false;
 	bool		packet_copied;
 
 	char		*p = (char *)cvm_oct_by_pkind;
@@ -86,7 +86,7 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 		did_work_request = true;
 	}
 
-	while (rx_count < budget) {
+	while (rx_count < budget && !early_exit) {
 		struct sk_buff *skb = NULL;
 		struct sk_buff **pskb = NULL;
 		struct octeon_ethernet *priv;
@@ -105,29 +105,15 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 		else
 			work = cvmx_pow_work_request_sync(CVMX_POW_NO_WAIT);
 
-		prefetch(work);
 		did_work_request = false;
-		if (unlikely(work == NULL)) {
-			/* It takes so long to get here, so lets wait
-			 * around a little to see if another packet
-			 * comes in.
-			 */
-			if (no_work_count >= 2)
-				break;
-			no_work_count++;
-			ndelay(500);
-			continue;
-		}
+		if (unlikely(work == NULL))
+			break;
+
 		packet_ptr = work->packet_ptr;
 		pskb = cvm_oct_packet_to_skb(cvm_oct_get_buffer_ptr(packet_ptr));
 		prefetch(pskb);
 
-		if (USE_ASYNC_IOBDMA && rx_count < (budget - 1)) {
-			cvmx_pow_work_request_async_nocheck(CVMX_SCR_SCRATCH, CVMX_POW_NO_WAIT);
-			did_work_request = true;
-		}
-
-		if (rx_count == 0) {
+		if (unlikely(rx_count == 0)) {
 			/* First time through, see if there is enough
 			 * work waiting to merit waking another
 			 * CPU.
@@ -143,19 +129,29 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 				counts.u64 = cvmx_read_csr(CVMX_POW_WQ_INT_CNTX(pow_receive_group));
 				backlog = counts.s.iq_cnt + counts.s.ds_cnt;
 			}
-			if (backlog > rx_cpu_factor * cores_in_use &&
-			    napi != NULL &&
-			    cores_in_use < core_state.baseline_cores)
-				cvm_oct_enable_one_cpu();
+			if (napi) {
+				if (backlog > rx_cpu_factor * cores_in_use &&
+				    cores_in_use < core_state.baseline_cores) {
+					cvm_oct_enable_one_cpu();
+				} else {
+					struct cvm_napi_wrapper *w = container_of(napi, struct cvm_napi_wrapper, napi);
+					if (backlog < rx_cpu_factor * w->index)
+						early_exit = true;
+				}
+			}
 		}
-#ifndef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
-					rx_count++;
-#endif
+
+		if (likely(USE_ASYNC_IOBDMA && rx_count < (budget - 1) && !early_exit)) {
+			cvmx_pow_work_request_async_nocheck(CVMX_SCR_SCRATCH, CVMX_POW_NO_WAIT);
+			did_work_request = true;
+		}
+
+		rx_count++;
 
 		/* If WORD2[SOFTWARE] then this WQE is a complete for
 		 * a TX packet.
 		 */
-		if (work->word2.s.software) {
+		if (unlikely(work->word2.s.software)) {
 			struct octeon_ethernet *priv;
 			int packet_qos = work->word0.raw.unused;
 
@@ -184,17 +180,20 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 		segments = work->word2.s.bufs;
 		skb_in_hw = USE_SKBUFFS_IN_HW && segments > 0;
 		if (likely(skb_in_hw)) {
+			char *jjj;
+
 			skb = *pskb;
-			prefetch(&skb->head);
-			prefetch(&skb->len);
+			jjj = (char *)&skb->tail;
+			prefetch(jjj);
+			prefetch(jjj - (3 * 128));
+			prefetch(jjj - (2 * 128));
+			prefetch(jjj - (1 * 128));
 		}
 
 		if (CVM_OCT_NAPI_HAS_CN68XX_SSO)
 			port = work->word0.pip.cn68xx.pknd;
 		else
 			port = work->word1.cn38xx.ipprt;
-
-		prefetch(cvm_oct_by_pkind[port]);
 
 		/* Immediately throw away all packets with receive errors */
 		if (unlikely(work->word2.snoip.rcv_error)) {
@@ -337,6 +336,7 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 			}
 			packet_copied = true;
 		}
+#ifdef CONFIG_RAPIDIO
 		/* srio priv is based on mbox, not port */
 		if (!CVM_OCT_NAPI_HAS_CN68XX_SSO && unlikely(priv == NULL)) {
 			const struct cvmx_srio_rx_message_header *rx_header =
@@ -344,7 +344,7 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 			*(u64 *)rx_header = be64_to_cpu(*(u64 *)rx_header);
 			priv = cvm_oct_by_srio_mbox[(port - 40) >> 1][rx_header->word0.s.mbox];
 		}
-
+#endif
 		if (likely(priv)) {
 #ifdef CONFIG_RAPIDIO
 			if (unlikely(priv->imode == CVMX_HELPER_INTERFACE_MODE_SRIO)) {
@@ -416,15 +416,9 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 						/* Interceptor took our packet */
 						break;
 					}
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
-					rx_count++;
-#endif
 				} else {
 					netif_receive_skb(skb);
 					callback_result = CVM_OCT_PASS;
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
-					rx_count++;
-#endif
 				}
 			} else {
 				/* Drop any packet received for a device that isn't up */

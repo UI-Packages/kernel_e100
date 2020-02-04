@@ -54,7 +54,7 @@
 #include <asm/octeon/cvmx-gmxx-defs.h>
 #include <asm/octeon/cvmx-smix-defs.h>
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 #include "ipfwd_config.h"
 #endif
 
@@ -104,7 +104,7 @@ MODULE_PARM_DESC(disable_lockless_pko, "Disable lockless PKO access (use locking
 
 extern void (*ubnt_netdev_name_hook)(int interface, int port, char *name);
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD && IPFWD_OUTPUT_QOS
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD) && IPFWD_OUTPUT_QOS
 /* internal ports count for each port in a interface */
 int iport_count = 1;
 #include <asm/octeon/cvmx-helper.h>
@@ -256,7 +256,7 @@ static bool cvm_oct_pko_lockless(void)
 	return queues <= cvm_oct_get_total_pko_queues();
 }
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD && IPFWD_OUTPUT_QOS
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD) && IPFWD_OUTPUT_QOS
 static void cvm_oct_set_pko_multiqueue(void)
 {
 	int interface, num_interfaces, rv;
@@ -329,7 +329,7 @@ static void cvm_oct_set_pko_multiqueue(void)
 
 static int cvm_oct_configure_common_hw(void)
 {
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD && IPFWD_OUTPUT_QOS
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD) && IPFWD_OUTPUT_QOS
 //#error "output qos defined"
 	cvmx_override_pko_queue_priority = ipfwd_pko_queue_priority;
 #endif

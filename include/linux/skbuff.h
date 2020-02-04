@@ -341,7 +341,7 @@ typedef unsigned char *sk_buff_data_t;
 #endif
 
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 
 struct iphdr_new {
 #if defined(__LITTLE_ENDIAN_BITFIELD)
@@ -414,6 +414,13 @@ struct cvm_vlan_hdr {
 	__be16 h_vlan_encapsulated_proto;
 };
 
+struct gre_hdr_info {
+        __be16 flags;
+        __be16 protocol;
+	__be32 key;
+	__be32 headroom;
+};
+
 typedef struct {
 	unsigned long		rx_pkt_flags;
 	unsigned long		tx_pkt_flags;
@@ -425,6 +432,7 @@ typedef struct {
 	int			qos_level;
 	struct cvm_vlan_hdr	vlan;
 	struct cvm_pppoe_hdr	pppoe;
+	struct gre_hdr_info	gre;
 	union {
 		struct iphdr_new	outer_ip4;	/* IP header */
 		struct ipv6hdr_new	outer_ip6;
@@ -645,7 +653,7 @@ struct sk_buff {
 	sk_buff_data_t		transport_header;
 	sk_buff_data_t		network_header;
 	sk_buff_data_t		mac_header;
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
 	cvm_packet_info_t	cvm_info;
 #endif
 	__u16			cvm_reserved;
@@ -1584,6 +1592,10 @@ extern unsigned char *skb_pull(struct sk_buff *skb, unsigned int len);
 static inline unsigned char *__skb_pull(struct sk_buff *skb, unsigned int len)
 {
 	skb->len -= len;
+        if (skb->len < skb->data_len) {
+            pr_err("skb_pull %d %d %d, %p %p\n", 
+                   len, skb->len, skb->data_len, skb->head, skb->data);
+        }
 	BUG_ON(skb->len < skb->data_len);
 	return skb->data += len;
 }

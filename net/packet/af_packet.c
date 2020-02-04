@@ -1621,8 +1621,17 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 		 * structure, so that corresponding packet head is
 		 * never delivered to user.
 		 */
-		if (sk->sk_type != SOCK_DGRAM)
-			skb_push(skb, skb->data - skb_mac_header(skb));
+            if (sk->sk_type != SOCK_DGRAM) {
+                if ((skb->data - (skb->data - (skb->head + skb->mac_header))) < skb->head) {
+                    pr_err("Gotcha %p %p %x\n", 
+                           skb->head, skb->data, skb->mac_header);
+                    print_hex_dump(KERN_ERR, "skb->data", DUMP_PREFIX_ADDRESS, 
+                                   32, 1, (skb->data - 4), skb->len + 4, 0);
+                    dump_stack();
+                    goto drop;
+                }
+                skb_push(skb, skb->data - skb_mac_header(skb));
+            }
 		else if (skb->pkt_type == PACKET_OUTGOING) {
 			/* Special case: outgoing packets have ll header at head */
 			skb_pull(skb, skb_network_offset(skb));
