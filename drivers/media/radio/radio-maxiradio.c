@@ -61,7 +61,7 @@ MODULE_PARM_DESC(radio_nr, "Radio device number");
 /* TEA5757 pin mappings */
 static const int clk = 1, data = 2, wren = 4, mo_st = 8, power = 16;
 
-static atomic_t maxiradio_instance = ATOMIC_INIT(0);
+static atomic_unchecked_t maxiradio_instance = ATOMIC_INIT(0);
 
 #define PCI_VENDOR_ID_GUILLEMOT 0x5046
 #define PCI_DEVICE_ID_GUILLEMOT_MAXIRADIO 0x1001
@@ -114,7 +114,8 @@ static struct snd_tea575x_ops maxiradio_tea_ops = {
 	.set_direction = maxiradio_tea575x_set_direction,
 };
 
-static int __devinit maxiradio_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int maxiradio_probe(struct pci_dev *pdev,
+			   const struct pci_device_id *ent)
 {
 	struct maxiradio *dev;
 	struct v4l2_device *v4l2_dev;
@@ -157,7 +158,7 @@ static int __devinit maxiradio_probe(struct pci_dev *pdev, const struct pci_devi
 		goto err_out_free_region;
 
 	dev->io = pci_resource_start(pdev, 0);
-	if (snd_tea575x_init(&dev->tea)) {
+	if (snd_tea575x_init(&dev->tea, THIS_MODULE)) {
 		printk(KERN_ERR "radio-maxiradio: Unable to detect TEA575x tuner\n");
 		goto err_out_free_region;
 	}
@@ -172,7 +173,7 @@ errfr:
 	return retval;
 }
 
-static void __devexit maxiradio_remove(struct pci_dev *pdev)
+static void maxiradio_remove(struct pci_dev *pdev)
 {
 	struct v4l2_device *v4l2_dev = dev_get_drvdata(&pdev->dev);
 	struct maxiradio *dev = to_maxiradio(v4l2_dev);
@@ -196,7 +197,7 @@ static struct pci_driver maxiradio_driver = {
 	.name		= "radio-maxiradio",
 	.id_table	= maxiradio_pci_tbl,
 	.probe		= maxiradio_probe,
-	.remove		= __devexit_p(maxiradio_remove),
+	.remove		= maxiradio_remove,
 };
 
 static int __init maxiradio_init(void)

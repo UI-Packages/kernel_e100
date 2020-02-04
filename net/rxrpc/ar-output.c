@@ -242,7 +242,7 @@ int rxrpc_kernel_send_data(struct rxrpc_call *call, struct msghdr *msg,
 
 EXPORT_SYMBOL(rxrpc_kernel_send_data);
 
-/*
+/**
  * rxrpc_kernel_abort_call - Allow a kernel service to abort a call
  * @call: The call to be aborted
  * @abort_code: The abort code to stick into the ABORT packet
@@ -682,9 +682,9 @@ static int rxrpc_send_data(struct kiocb *iocb,
 			sp->hdr.cid = call->cid;
 			sp->hdr.callNumber = call->call_id;
 			sp->hdr.seq =
-				htonl(atomic_inc_return(&call->sequence));
+				htonl(atomic_inc_return_unchecked(&call->sequence));
 			sp->hdr.serial =
-				htonl(atomic_inc_return(&conn->serial));
+				htonl(atomic_inc_return_unchecked(&conn->serial));
 			sp->hdr.type = RXRPC_PACKET_TYPE_DATA;
 			sp->hdr.userStatus = 0;
 			sp->hdr.securityIndex = conn->security_ix;

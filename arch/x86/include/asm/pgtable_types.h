@@ -16,13 +16,12 @@
 #define _PAGE_BIT_PSE		7	/* 4 MB (or 2MB) page */
 #define _PAGE_BIT_PAT		7	/* on 4KB pages */
 #define _PAGE_BIT_GLOBAL	8	/* Global TLB entry PPro+ */
-#define _PAGE_BIT_UNUSED1	9	/* available for programmer */
+#define _PAGE_BIT_SPECIAL	9	/* special mappings, no associated struct page */
 #define _PAGE_BIT_IOMAP		10	/* flag used to indicate IO mapping */
 #define _PAGE_BIT_HIDDEN	11	/* hidden by kmemcheck */
 #define _PAGE_BIT_PAT_LARGE	12	/* On 2MB or 1GB pages */
-#define _PAGE_BIT_SPECIAL	_PAGE_BIT_UNUSED1
-#define _PAGE_BIT_CPA_TEST	_PAGE_BIT_UNUSED1
-#define _PAGE_BIT_SPLITTING	_PAGE_BIT_UNUSED1 /* only valid on a PSE pmd */
+#define _PAGE_BIT_CPA_TEST	_PAGE_BIT_SPECIAL
+#define _PAGE_BIT_SPLITTING	_PAGE_BIT_SPECIAL /* only valid on a PSE pmd */
 #define _PAGE_BIT_NX           63       /* No execute: only valid after cpuid check */
 
 /* If _PAGE_BIT_PRESENT is clear, we use these: */
@@ -40,7 +39,6 @@
 #define _PAGE_DIRTY	(_AT(pteval_t, 1) << _PAGE_BIT_DIRTY)
 #define _PAGE_PSE	(_AT(pteval_t, 1) << _PAGE_BIT_PSE)
 #define _PAGE_GLOBAL	(_AT(pteval_t, 1) << _PAGE_BIT_GLOBAL)
-#define _PAGE_UNUSED1	(_AT(pteval_t, 1) << _PAGE_BIT_UNUSED1)
 #define _PAGE_IOMAP	(_AT(pteval_t, 1) << _PAGE_BIT_IOMAP)
 #define _PAGE_PAT	(_AT(pteval_t, 1) << _PAGE_BIT_PAT)
 #define _PAGE_PAT_LARGE (_AT(pteval_t, 1) << _PAGE_BIT_PAT_LARGE)
@@ -57,12 +55,34 @@
 
 #if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
 #define _PAGE_NX	(_AT(pteval_t, 1) << _PAGE_BIT_NX)
-#else
+#elif defined(CONFIG_KMEMCHECK)
 #define _PAGE_NX	(_AT(pteval_t, 0))
+#else
+#define _PAGE_NX	(_AT(pteval_t, 1) << _PAGE_BIT_HIDDEN)
 #endif
 
 #define _PAGE_FILE	(_AT(pteval_t, 1) << _PAGE_BIT_FILE)
 #define _PAGE_PROTNONE	(_AT(pteval_t, 1) << _PAGE_BIT_PROTNONE)
+
+/*
+ * _PAGE_NUMA indicates that this page will trigger a numa hinting
+ * minor page fault to gather numa placement statistics (see
+ * pte_numa()). The bit picked (8) is within the range between
+ * _PAGE_FILE (6) and _PAGE_PROTNONE (8) bits. Therefore, it doesn't
+ * require changes to the swp entry format because that bit is always
+ * zero when the pte is not present.
+ *
+ * The bit picked must be always zero when the pmd is present and not
+ * present, so that we don't lose information when we set it while
+ * atomically clearing the present bit.
+ *
+ * Because we shared the same bit (8) with _PAGE_PROTNONE this can be
+ * interpreted as _PAGE_NUMA only in places that _PAGE_PROTNONE
+ * couldn't reach, like handle_mm_fault() (see access_error in
+ * arch/x86/mm/fault.c, the vma protection must not be PROT_NONE for
+ * handle_mm_fault() to be invoked).
+ */
+#define _PAGE_NUMA	_PAGE_PROTNONE
 
 #define _PAGE_TABLE	(_PAGE_PRESENT | _PAGE_RW | _PAGE_USER |	\
 			 _PAGE_ACCESSED | _PAGE_DIRTY)
@@ -96,6 +116,9 @@
 #define PAGE_READONLY_EXEC	__pgprot(_PAGE_PRESENT | _PAGE_USER |	\
 					 _PAGE_ACCESSED)
 
+#define PAGE_READONLY_NOEXEC PAGE_READONLY
+#define PAGE_SHARED_NOEXEC PAGE_SHARED
+
 #define __PAGE_KERNEL_EXEC						\
 	(_PAGE_PRESENT | _PAGE_RW | _PAGE_DIRTY | _PAGE_ACCESSED | _PAGE_GLOBAL)
 #define __PAGE_KERNEL		(__PAGE_KERNEL_EXEC | _PAGE_NX)
@@ -106,7 +129,7 @@
 #define __PAGE_KERNEL_WC		(__PAGE_KERNEL | _PAGE_CACHE_WC)
 #define __PAGE_KERNEL_NOCACHE		(__PAGE_KERNEL | _PAGE_PCD | _PAGE_PWT)
 #define __PAGE_KERNEL_UC_MINUS		(__PAGE_KERNEL | _PAGE_PCD)
-#define __PAGE_KERNEL_VSYSCALL		(__PAGE_KERNEL_RX | _PAGE_USER)
+#define __PAGE_KERNEL_VSYSCALL		(__PAGE_KERNEL_RO | _PAGE_USER)
 #define __PAGE_KERNEL_VVAR		(__PAGE_KERNEL_RO | _PAGE_USER)
 #define __PAGE_KERNEL_VVAR_NOCACHE	(__PAGE_KERNEL_VVAR | _PAGE_PCD | _PAGE_PWT)
 #define __PAGE_KERNEL_LARGE		(__PAGE_KERNEL | _PAGE_PSE)
@@ -168,15 +191,15 @@
  * bits are combined, this will alow user to access the high address mapped
  * VDSO in the presence of CONFIG_COMPAT_VDSO
  */
-#define PTE_IDENT_ATTR	 0x003		/* PRESENT+RW */
-#define PDE_IDENT_ATTR	 0x067		/* PRESENT+RW+USER+DIRTY+ACCESSED */
+#define PTE_IDENT_ATTR	 0x063		/* PRESENT+RW+DIRTY+ACCESSED */
+#define PDE_IDENT_ATTR	 0x063		/* PRESENT+RW+DIRTY+ACCESSED */
 #define PGD_IDENT_ATTR	 0x001		/* PRESENT (no other attributes) */
 #endif
 
 #ifdef CONFIG_X86_32
-# include "pgtable_32_types.h"
+# include <asm/pgtable_32_types.h>
 #else
-# include "pgtable_64_types.h"
+# include <asm/pgtable_64_types.h>
 #endif
 
 #ifndef __ASSEMBLY__
@@ -207,7 +230,17 @@ static inline pgdval_t pgd_flags(pgd_t pgd)
 {
 	return native_pgd_val(pgd) & PTE_FLAGS_MASK;
 }
+#endif
 
+#if PAGETABLE_LEVELS == 3
+#include <asm-generic/pgtable-nopud.h>
+#endif
+
+#if PAGETABLE_LEVELS == 2
+#include <asm-generic/pgtable-nopmd.h>
+#endif
+
+#ifndef __ASSEMBLY__
 #if PAGETABLE_LEVELS > 3
 typedef struct { pudval_t pud; } pud_t;
 
@@ -221,8 +254,6 @@ static inline pudval_t native_pud_val(pud_t pud)
 	return pud.pud;
 }
 #else
-#include <asm-generic/pgtable-nopud.h>
-
 static inline pudval_t native_pud_val(pud_t pud)
 {
 	return native_pgd_val(pud.pgd);
@@ -242,8 +273,6 @@ static inline pmdval_t native_pmd_val(pmd_t pmd)
 	return pmd.pmd;
 }
 #else
-#include <asm-generic/pgtable-nopmd.h>
-
 static inline pmdval_t native_pmd_val(pmd_t pmd)
 {
 	return native_pgd_val(pmd.pud.pgd);
@@ -283,7 +312,6 @@ typedef struct page *pgtable_t;
 
 extern pteval_t __supported_pte_mask;
 extern void set_nx(void);
-extern int nx_enabled;
 
 #define pgprot_writecombine	pgprot_writecombine
 extern pgprot_t pgprot_writecombine(pgprot_t prot);
@@ -301,19 +329,16 @@ int phys_mem_access_prot_allowed(struct file *file, unsigned long pfn,
 /* Install a pte for a particular vaddr in kernel space. */
 void set_pte_vaddr(unsigned long vaddr, pte_t pte);
 
-extern void native_pagetable_reserve(u64 start, u64 end);
 #ifdef CONFIG_X86_32
-extern void native_pagetable_setup_start(pgd_t *base);
-extern void native_pagetable_setup_done(pgd_t *base);
+extern void native_pagetable_init(void);
 #else
-#define native_pagetable_setup_start x86_init_pgd_noop
-#define native_pagetable_setup_done  x86_init_pgd_noop
+#define native_pagetable_init        paging_init
 #endif
 
 struct seq_file;
 extern void arch_report_meminfo(struct seq_file *m);
 
-enum {
+enum pg_level {
 	PG_LEVEL_NONE,
 	PG_LEVEL_4K,
 	PG_LEVEL_2M,
@@ -334,6 +359,7 @@ static inline void update_page_count(int level, unsigned long pages) { }
  * as a pte too.
  */
 extern pte_t *lookup_address(unsigned long address, unsigned int *level);
+extern phys_addr_t slow_virt_to_phys(void *__address);
 
 #endif	/* !__ASSEMBLY__ */
 

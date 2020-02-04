@@ -798,6 +798,7 @@ static int __init octeon_rio_init(void)
 		rio_init_mbox_res(&srio_ports[srio_port].mport.riores[
 			RIO_OUTB_MBOX_RESOURCE], 0, 0);
 		sprintf(srio_ports[srio_port].mport.name, "SRIO%d", srio_port);
+		spin_lock_init(&srio_ports[srio_port].lock);
 		RIO_PRINTK(&srio_ports[srio_port].mport, "Registering port\n");
 		if (cvmx_srio_initialize(srio_port, 0) == 0) {
 			count++;

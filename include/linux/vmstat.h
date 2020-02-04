@@ -52,13 +52,8 @@ static inline void count_vm_events(enum vm_event_item item, long delta)
 }
 
 extern void all_vm_events(unsigned long *);
-#ifdef CONFIG_HOTPLUG
+
 extern void vm_events_fold_cpu(int cpu);
-#else
-static inline void vm_events_fold_cpu(int cpu)
-{
-}
-#endif
 
 #else
 
@@ -84,6 +79,14 @@ static inline void vm_events_fold_cpu(int cpu)
 
 #endif /* CONFIG_VM_EVENT_COUNTERS */
 
+#ifdef CONFIG_NUMA_BALANCING
+#define count_vm_numa_event(x)     count_vm_event(x)
+#define count_vm_numa_events(x, y) count_vm_events(x, y)
+#else
+#define count_vm_numa_event(x) do {} while (0)
+#define count_vm_numa_events(x, y) do { (void)(y); } while (0)
+#endif /* CONFIG_NUMA_BALANCING */
+
 #define __count_zone_vm_events(item, zone, delta) \
 		__count_vm_events(item##_NORMAL - ZONE_NORMAL + \
 		zone_idx(zone), delta)
@@ -91,18 +94,18 @@ static inline void vm_events_fold_cpu(int cpu)
 /*
  * Zone based page accounting with per cpu differentials.
  */
-extern atomic_long_t vm_stat[NR_VM_ZONE_STAT_ITEMS];
+extern atomic_long_unchecked_t vm_stat[NR_VM_ZONE_STAT_ITEMS];
 
 static inline void zone_page_state_add(long x, struct zone *zone,
 				 enum zone_stat_item item)
 {
-	atomic_long_add(x, &zone->vm_stat[item]);
-	atomic_long_add(x, &vm_stat[item]);
+	atomic_long_add_unchecked(x, &zone->vm_stat[item]);
+	atomic_long_add_unchecked(x, &vm_stat[item]);
 }
 
 static inline unsigned long global_page_state(enum zone_stat_item item)
 {
-	long x = atomic_long_read(&vm_stat[item]);
+	long x = atomic_long_read_unchecked(&vm_stat[item]);
 #ifdef CONFIG_SMP
 	if (x < 0)
 		x = 0;
@@ -113,7 +116,7 @@ static inline unsigned long global_page_state(enum zone_stat_item item)
 static inline unsigned long zone_page_state(struct zone *zone,
 					enum zone_stat_item item)
 {
-	long x = atomic_long_read(&zone->vm_stat[item]);
+	long x = atomic_long_read_unchecked(&zone->vm_stat[item]);
 #ifdef CONFIG_SMP
 	if (x < 0)
 		x = 0;
@@ -130,7 +133,7 @@ static inline unsigned long zone_page_state(struct zone *zone,
 static inline unsigned long zone_page_state_snapshot(struct zone *zone,
 					enum zone_stat_item item)
 {
-	long x = atomic_long_read(&zone->vm_stat[item]);
+	long x = atomic_long_read_unchecked(&zone->vm_stat[item]);
 
 #ifdef CONFIG_SMP
 	int cpu;
@@ -183,11 +186,6 @@ extern void zone_statistics(struct zone *, struct zone *, gfp_t gfp);
 #define add_zone_page_state(__z, __i, __d) mod_zone_page_state(__z, __i, __d)
 #define sub_zone_page_state(__z, __i, __d) mod_zone_page_state(__z, __i, -(__d))
 
-static inline void zap_zone_vm_stats(struct zone *zone)
-{
-	memset(zone->vm_stat, 0, sizeof(zone->vm_stat));
-}
-
 extern void inc_zone_state(struct zone *, enum zone_stat_item);
 
 #ifdef CONFIG_SMP
@@ -207,6 +205,8 @@ extern void __dec_zone_state(struct zone *, enum zone_stat_item);
 void refresh_cpu_vm_stats(int);
 void refresh_zone_stat_thresholds(void);
 
+void drain_zonestat(struct zone *zone, struct per_cpu_pageset *);
+
 int calculate_pressure_threshold(struct zone *zone);
 int calculate_normal_threshold(struct zone *zone);
 void set_pgdat_percpu_threshold(pg_data_t *pgdat,
@@ -225,8 +225,8 @@ static inline void __mod_zone_page_state(struct zone *zone,
 
 static inline void __inc_zone_state(struct zone *zone, enum zone_stat_item item)
 {
-	atomic_long_inc(&zone->vm_stat[item]);
-	atomic_long_inc(&vm_stat[item]);
+	atomic_long_inc_unchecked(&zone->vm_stat[item]);
+	atomic_long_inc_unchecked(&vm_stat[item]);
 }
 
 static inline void __inc_zone_page_state(struct page *page,
@@ -237,8 +237,8 @@ static inline void __inc_zone_page_state(struct page *page,
 
 static inline void __dec_zone_state(struct zone *zone, enum zone_stat_item item)
 {
-	atomic_long_dec(&zone->vm_stat[item]);
-	atomic_long_dec(&vm_stat[item]);
+	atomic_long_dec_unchecked(&zone->vm_stat[item]);
+	atomic_long_dec_unchecked(&vm_stat[item]);
 }
 
 static inline void __dec_zone_page_state(struct page *page,
@@ -260,7 +260,17 @@ static inline void __dec_zone_page_state(struct page *page,
 static inline void refresh_cpu_vm_stats(int cpu) { }
 static inline void refresh_zone_stat_thresholds(void) { }
 
+static inline void drain_zonestat(struct zone *zone,
+			struct per_cpu_pageset *pset) { }
 #endif		/* CONFIG_SMP */
+
+static inline void __mod_zone_freepage_state(struct zone *zone, int nr_pages,
+					     int migratetype)
+{
+	__mod_zone_page_state(zone, NR_FREE_PAGES, nr_pages);
+	if (is_migrate_cma(migratetype))
+		__mod_zone_page_state(zone, NR_FREE_CMA_PAGES, nr_pages);
+}
 
 extern const char * const vmstat_text[];
 

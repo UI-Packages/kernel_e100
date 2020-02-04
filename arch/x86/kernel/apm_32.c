@@ -232,6 +232,7 @@
 #include <linux/acpi.h>
 #include <linux/syscore_ops.h>
 #include <linux/i8253.h>
+#include <linux/cpuidle.h>
 
 #include <asm/uaccess.h>
 #include <asm/desc.h>
@@ -360,12 +361,33 @@ struct apm_user {
  * idle percentage above which bios idle calls are done
  */
 #ifdef CONFIG_APM_CPU_IDLE
-#warning deprecated CONFIG_APM_CPU_IDLE will be deleted in 2012
 #define DEFAULT_IDLE_THRESHOLD	95
 #else
 #define DEFAULT_IDLE_THRESHOLD	100
 #endif
 #define DEFAULT_IDLE_PERIOD	(100 / 3)
+
+static int apm_cpu_idle(struct cpuidle_device *dev,
+			struct cpuidle_driver *drv, int index);
+
+static struct cpuidle_driver apm_idle_driver = {
+	.name = "apm_idle",
+	.owner = THIS_MODULE,
+	.states = {
+		{ /* entry 0 is for polling */ },
+		{ /* entry 1 is for APM idle */
+			.name = "APM",
+			.desc = "APM idle",
+			.flags = CPUIDLE_FLAG_TIME_VALID,
+			.exit_latency = 250,	/* WAG */
+			.target_residency = 500,	/* WAG */
+			.enter = &apm_cpu_idle
+		},
+	},
+	.state_count = 2,
+};
+
+static struct cpuidle_device apm_cpuidle_device;
 
 /*
  * Local variables
@@ -377,7 +399,6 @@ static struct {
 static int clock_slowed;
 static int idle_threshold __read_mostly = DEFAULT_IDLE_THRESHOLD;
 static int idle_period __read_mostly = DEFAULT_IDLE_PERIOD;
-static int set_pm_idle;
 static int suspends_pending;
 static int standbys_pending;
 static int ignore_sys_suspend;
@@ -412,7 +433,7 @@ static DEFINE_MUTEX(apm_mutex);
  * This is for buggy BIOS's that refer to (real mode) segment 0x40
  * even though they are called in protected mode.
  */
-static struct desc_struct bad_bios_desc = GDT_ENTRY_INIT(0x4092,
+static const struct desc_struct bad_bios_desc = GDT_ENTRY_INIT(0x4093,
 			(unsigned long)__va(0x400UL), PAGE_SIZE - 0x400 - 1);
 
 static const char driver_version[] = "1.16ac";	/* no spaces */
@@ -590,7 +611,10 @@ static long __apm_bios_call(void *_call)
 	BUG_ON(cpu != 0);
 	gdt = get_cpu_gdt_table(cpu);
 	save_desc_40 = gdt[0x40 / 8];
+
+	pax_open_kernel();
 	gdt[0x40 / 8] = bad_bios_desc;
+	pax_close_kernel();
 
 	apm_irq_save(flags);
 	APM_DO_SAVE_SEGS;
@@ -599,7 +623,11 @@ static long __apm_bios_call(void *_call)
 			  &call->esi);
 	APM_DO_RESTORE_SEGS;
 	apm_irq_restore(flags);
+
+	pax_open_kernel();
 	gdt[0x40 / 8] = save_desc_40;
+	pax_close_kernel();
+
 	put_cpu();
 
 	return call->eax & 0xff;
@@ -666,7 +694,10 @@ static long __apm_bios_call_simple(void *_call)
 	BUG_ON(cpu != 0);
 	gdt = get_cpu_gdt_table(cpu);
 	save_desc_40 = gdt[0x40 / 8];
+
+	pax_open_kernel();
 	gdt[0x40 / 8] = bad_bios_desc;
+	pax_close_kernel();
 
 	apm_irq_save(flags);
 	APM_DO_SAVE_SEGS;
@@ -674,7 +705,11 @@ static long __apm_bios_call_simple(void *_call)
 					 &call->eax);
 	APM_DO_RESTORE_SEGS;
 	apm_irq_restore(flags);
+
+	pax_open_kernel();
 	gdt[0x40 / 8] = save_desc_40;
+	pax_close_kernel();
+
 	put_cpu();
 	return error;
 }
@@ -884,8 +919,6 @@ static void apm_do_busy(void)
 #define IDLE_CALC_LIMIT	(HZ * 100)
 #define IDLE_LEAKY_MAX	16
 
-static void (*original_pm_idle)(void) __read_mostly;
-
 /**
  * apm_cpu_idle		-	cpu idling for APM capable Linux
  *
@@ -894,34 +927,35 @@ static void (*original_pm_idle)(void) __read_mostly;
  * Furthermore it calls the system default idle routine.
  */
 
-static void apm_cpu_idle(void)
+static int apm_cpu_idle(struct cpuidle_device *dev,
+	struct cpuidle_driver *drv, int index)
 {
 	static int use_apm_idle; /* = 0 */
 	static unsigned int last_jiffies; /* = 0 */
 	static unsigned int last_stime; /* = 0 */
+	cputime_t stime;
 
 	int apm_idle_done = 0;
 	unsigned int jiffies_since_last_check = jiffies - last_jiffies;
 	unsigned int bucket;
 
-	WARN_ONCE(1, "deprecated apm_cpu_idle will be deleted in 2012");
 recalc:
+	task_cputime(current, NULL, &stime);
 	if (jiffies_since_last_check > IDLE_CALC_LIMIT) {
 		use_apm_idle = 0;
-		last_jiffies = jiffies;
-		last_stime = current->stime;
 	} else if (jiffies_since_last_check > idle_period) {
 		unsigned int idle_percentage;
 
-		idle_percentage = current->stime - last_stime;
+		idle_percentage = stime - last_stime;
 		idle_percentage *= 100;
 		idle_percentage /= jiffies_since_last_check;
 		use_apm_idle = (idle_percentage > idle_threshold);
 		if (apm_info.forbid_idle)
 			use_apm_idle = 0;
-		last_jiffies = jiffies;
-		last_stime = current->stime;
 	}
+
+	last_jiffies = jiffies;
+	last_stime = stime;
 
 	bucket = IDLE_LEAKY_MAX;
 
@@ -950,10 +984,7 @@ recalc:
 				break;
 			}
 		}
-		if (original_pm_idle)
-			original_pm_idle();
-		else
-			default_idle();
+		default_idle();
 		local_irq_disable();
 		jiffies_since_last_check = jiffies - last_jiffies;
 		if (jiffies_since_last_check > idle_period)
@@ -963,7 +994,7 @@ recalc:
 	if (apm_idle_done)
 		apm_do_busy();
 
-	local_irq_enable();
+	return index;
 }
 
 /**
@@ -2345,12 +2376,15 @@ static int __init apm_init(void)
 	 * code to that CPU.
 	 */
 	gdt = get_cpu_gdt_table(0);
+
+	pax_open_kernel();
 	set_desc_base(&gdt[APM_CS >> 3],
 		 (unsigned long)__va((unsigned long)apm_info.bios.cseg << 4));
 	set_desc_base(&gdt[APM_CS_16 >> 3],
 		 (unsigned long)__va((unsigned long)apm_info.bios.cseg_16 << 4));
 	set_desc_base(&gdt[APM_DS >> 3],
 		 (unsigned long)__va((unsigned long)apm_info.bios.dseg << 4));
+	pax_close_kernel();
 
 	proc_create("apm", 0, NULL, &apm_file_ops);
 
@@ -2381,9 +2415,9 @@ static int __init apm_init(void)
 	if (HZ != 100)
 		idle_period = (idle_period * HZ) / 100;
 	if (idle_threshold < 100) {
-		original_pm_idle = pm_idle;
-		pm_idle  = apm_cpu_idle;
-		set_pm_idle = 1;
+		if (!cpuidle_register_driver(&apm_idle_driver))
+			if (cpuidle_register_device(&apm_cpuidle_device))
+				cpuidle_unregister_driver(&apm_idle_driver);
 	}
 
 	return 0;
@@ -2393,15 +2427,9 @@ static void __exit apm_exit(void)
 {
 	int error;
 
-	if (set_pm_idle) {
-		pm_idle = original_pm_idle;
-		/*
-		 * We are about to unload the current idle thread pm callback
-		 * (pm_idle), Wait for all processors to update cached/local
-		 * copies of pm_idle before proceeding.
-		 */
-		cpu_idle_wait();
-	}
+	cpuidle_unregister_device(&apm_cpuidle_device);
+	cpuidle_unregister_driver(&apm_idle_driver);
+
 	if (((apm_info.bios.flags & APM_BIOS_DISENGAGED) == 0)
 	    && (apm_info.connection_version > 0x0100)) {
 		error = apm_engage_power_management(APM_DEVICE_ALL, 0);

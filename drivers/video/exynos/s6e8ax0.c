@@ -1,9 +1,9 @@
-/* linux/drivers/video/exynos/s6e8ax0.c
+/* linux/drivers/video/exynos/s6e8aa0.c
  *
- * MIPI-DSI based s6e8ax0 AMOLED lcd 4.65 inch panel driver.
+ * MIPI-DSI based s6e8aa0 AMOLED lcd 4.65 inch panel driver.
+ * This driver is implemented according to the s6e8ax0 panel driver.
  *
- * Inki Dae, <inki.dae@samsung.com>
- * Donghwa Lee, <dh09.lee@samsung.com>
+ * Shaik Ameer Basha <shaik.ameer@samsung.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -24,6 +24,7 @@
 #include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/regulator/consumer.h>
+#include <linux/of_gpio.h>
 
 #include <video/mipi_display.h>
 #include <video/exynos_mipi_dsim.h>
@@ -31,7 +32,7 @@
 #define LDI_MTP_LENGTH		24
 #define DSIM_PM_STABLE_TIME	10
 #define MIN_BRIGHTNESS		0
-#define MAX_BRIGHTNESS		24
+#define MAX_BRIGHTNESS		26
 #define GAMMA_TABLE_COUNT	26
 
 #define POWER_IS_ON(pwr)	((pwr) == FB_BLANK_UNBLANK)
@@ -40,6 +41,7 @@
 
 #define lcd_to_master(a)	(a->dsim_dev->master)
 #define lcd_to_master_ops(a)	((lcd_to_master(a))->master_ops)
+#define lcd_to_master_ver(a)	((lcd_to_master(a))->version)
 
 enum {
 	DSIM_NONE_STATE = 0,
@@ -47,13 +49,14 @@ enum {
 	DSIM_FRAME_DONE = 2,
 };
 
-struct s6e8ax0 {
+struct s6e8aa0 {
 	struct device	*dev;
+	unsigned int			gpio_reset;
+	unsigned int			gpio_power;
+	unsigned int			gpio_bl;
 	unsigned int			power;
 	unsigned int			id;
 	unsigned int			gamma;
-	unsigned int			acl_enable;
-	unsigned int			cur_acl;
 
 	struct lcd_device	*ld;
 	struct backlight_device	*bd;
@@ -64,13 +67,15 @@ struct s6e8ax0 {
 	bool  enabled;
 };
 
+static struct s6e8aa0 *lcd_global;
+
 
 static struct regulator_bulk_data supplies[] = {
 	{ .supply = "vdd3", },
 	{ .supply = "vci", },
 };
 
-static void s6e8ax0_regulator_enable(struct s6e8ax0 *lcd)
+static void s6e8aa0_regulator_enable(struct s6e8aa0 *lcd)
 {
 	int ret = 0;
 	struct lcd_platform_data *pd = NULL;
@@ -89,7 +94,7 @@ out:
 	mutex_unlock(&lcd->lock);
 }
 
-static void s6e8ax0_regulator_disable(struct s6e8ax0 *lcd)
+static void s6e8aa0_regulator_disable(struct s6e8aa0 *lcd)
 {
 	int ret = 0;
 
@@ -105,226 +110,325 @@ out:
 	mutex_unlock(&lcd->lock);
 }
 
-static const unsigned char s6e8ax0_22_gamma_30[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xf5, 0x00, 0xff, 0xad, 0xaf,
-	0xbA, 0xc3, 0xd8, 0xc5, 0x9f, 0xc6, 0x9e, 0xc1, 0xdc, 0xc0,
-	0x00, 0x61, 0x00, 0x5a, 0x00, 0x74,
+
+static const unsigned char gamma22_30[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xDF, 0x86, 0xF5,
+	0xD5, 0xC7, 0xCF, 0xDF, 0xE0, 0xE0,
+	0xC9, 0xC9, 0xCC, 0xD7, 0xD6, 0xD5,
+	0x00, 0x68, 0x00, 0x68, 0x00, 0x75,
 };
 
-static const unsigned char s6e8ax0_22_gamma_50[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xe8, 0x1f, 0xf7, 0xad, 0xc0,
-	0xb5, 0xc4, 0xdc, 0xc4, 0x9e, 0xc6, 0x9c, 0xbb, 0xd8, 0xbb,
-	0x00, 0x70, 0x00, 0x68, 0x00, 0x86,
+static const unsigned char gamma22_40[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xE5, 0xAA, 0xF2,
+	0xD6, 0xCC, 0xCF, 0xE0, 0xE2, 0xE2,
+	0xC8, 0xC9, 0xCA, 0xD2, 0xD2, 0xCF,
+	0x00, 0x71, 0x00, 0x70, 0x00, 0x80,
 };
 
-static const unsigned char s6e8ax0_22_gamma_60[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xde, 0x1f, 0xef, 0xad, 0xc4,
-	0xb3, 0xc3, 0xdd, 0xc4, 0x9e, 0xc6, 0x9c, 0xbc, 0xd6, 0xba,
-	0x00, 0x75, 0x00, 0x6e, 0x00, 0x8d,
+static const unsigned char gamma22_50[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xE7, 0xBB, 0xEE,
+	0xD6, 0xCE, 0xD0, 0xE0, 0xE3, 0xE4,
+	0xC5, 0xC4, 0xC5, 0xD2, 0xD2, 0xCF,
+	0x00, 0x78, 0x00, 0x78, 0x00, 0x88,
 };
 
-static const unsigned char s6e8ax0_22_gamma_70[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xd8, 0x1f, 0xe7, 0xaf, 0xc8,
-	0xb4, 0xc4, 0xdd, 0xc3, 0x9d, 0xc6, 0x9c, 0xbb, 0xd6, 0xb9,
-	0x00, 0x7a, 0x00, 0x72, 0x00, 0x93,
+static const unsigned char gamma22_60[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xE9, 0xC4, 0xEB,
+	0xD6, 0xD0, 0xD1, 0xE0, 0xE3, 0xE4,
+	0xC3, 0xC2, 0xC2, 0xD2, 0xD1, 0xCF,
+	0x00, 0x7E, 0x00, 0x7E, 0x00, 0x8F,
 };
 
-static const unsigned char s6e8ax0_22_gamma_80[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xc9, 0x1f, 0xde, 0xae, 0xc9,
-	0xb1, 0xc3, 0xdd, 0xc2, 0x9d, 0xc5, 0x9b, 0xbc, 0xd6, 0xbb,
-	0x00, 0x7f, 0x00, 0x77, 0x00, 0x99,
+static const unsigned char gamma22_70[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEA, 0xC9, 0xEA,
+	0xD6, 0xD2, 0xD2, 0xDF, 0xE1, 0xE3,
+	0xC2, 0xC1, 0xC0, 0xD1, 0xD0, 0xCE,
+	0x00, 0x84, 0x00, 0x84, 0x00, 0x96,
 };
 
-static const unsigned char s6e8ax0_22_gamma_90[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xc7, 0x1f, 0xd9, 0xb0, 0xcc,
-	0xb2, 0xc3, 0xdc, 0xc1, 0x9c, 0xc6, 0x9c, 0xbc, 0xd4, 0xb9,
-	0x00, 0x83, 0x00, 0x7b, 0x00, 0x9e,
+static const unsigned char gamma22_80[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEB, 0xCC, 0xE9,
+	0xD5, 0xD4, 0xD3, 0xDE, 0xE1, 0xE2,
+	0xC2, 0xBF, 0xBF, 0xCF, 0xCF, 0xCC,
+	0x00, 0x89, 0x00, 0x89, 0x00, 0x9C,
 };
 
-static const unsigned char s6e8ax0_22_gamma_100[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xbd, 0x80, 0xcd, 0xba, 0xce,
-	0xb3, 0xc4, 0xde, 0xc3, 0x9c, 0xc4, 0x9, 0xb8, 0xd3, 0xb6,
-	0x00, 0x88, 0x00, 0x80, 0x00, 0xa5,
+static const unsigned char gamma22_90[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEB, 0xD0, 0xE9,
+	0xD4, 0xD5, 0xD4, 0xDF, 0xE0, 0xE1,
+	0xC1, 0xBE, 0xBD, 0xCD, 0xCD, 0xCA,
+	0x00, 0x8E, 0x00, 0x8F, 0x00, 0xA2,
 };
 
-static const unsigned char s6e8ax0_22_gamma_120[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb9, 0x95, 0xc8, 0xb1, 0xcf,
-	0xb2, 0xc6, 0xdf, 0xc5, 0x9b, 0xc3, 0x99, 0xb6, 0xd2, 0xb6,
-	0x00, 0x8f, 0x00, 0x86, 0x00, 0xac,
+static const unsigned char gamma22_100[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEA, 0xD2, 0xE7,
+	0xD7, 0xD6, 0xD6, 0xDF, 0xDF, 0xE2,
+	0xBF, 0xBD, 0xBC, 0xCD, 0xCD, 0xC9,
+	0x00, 0x92, 0x00, 0x93, 0x00, 0xA7,
 };
 
-static const unsigned char s6e8ax0_22_gamma_130[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb7, 0xa0, 0xc7, 0xb1, 0xd0,
-	0xb2, 0xc4, 0xdd, 0xc3, 0x9a, 0xc3, 0x98, 0xb6, 0xd0, 0xb4,
-	0x00, 0x92, 0x00, 0x8a, 0x00, 0xb1,
+static const unsigned char gamma22_110[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEB, 0xD4, 0xE5,
+	0xD6, 0xD6, 0xD7, 0xDE, 0xDF, 0xE0,
+	0xBE, 0xBC, 0xBB, 0xCE, 0xCC, 0xC9,
+	0x00, 0x96, 0x00, 0x97, 0x00, 0xAC,
 };
 
-static const unsigned char s6e8ax0_22_gamma_140[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb7, 0xa0, 0xc5, 0xb2, 0xd0,
-	0xb3, 0xc3, 0xde, 0xc3, 0x9b, 0xc2, 0x98, 0xb6, 0xd0, 0xb4,
-	0x00, 0x95, 0x00, 0x8d, 0x00, 0xb5,
+static const unsigned char gamma22_120[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xD6, 0xE6,
+	0xD6, 0xD7, 0xD8, 0xDE, 0xDE, 0xE0,
+	0xBC, 0xBC, 0xB9, 0xCD, 0xCA, 0xC8,
+	0x00, 0x9A, 0x00, 0x9C, 0x00, 0xB1,
 };
 
-static const unsigned char s6e8ax0_22_gamma_150[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb3, 0xa0, 0xc2, 0xb2, 0xd0,
-	0xb2, 0xc1, 0xdd, 0xc2, 0x9b, 0xc2, 0x98, 0xb4, 0xcf, 0xb1,
-	0x00, 0x99, 0x00, 0x90, 0x00, 0xba,
+static const unsigned char gamma22_130[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEC, 0xD7, 0xE6,
+	0xD3, 0xD8, 0xD7, 0xDE, 0xDD, 0xDF,
+	0xBD, 0xBB, 0xB8, 0xCA, 0xC9, 0xC6,
+	0x00, 0x9F, 0x00, 0xA0, 0x00, 0xB7,
 };
 
-static const unsigned char s6e8ax0_22_gamma_160[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xaf, 0xa5, 0xbf, 0xb0, 0xd0,
-	0xb1, 0xc3, 0xde, 0xc2, 0x99, 0xc1, 0x97, 0xb4, 0xce, 0xb1,
-	0x00, 0x9c, 0x00, 0x93, 0x00, 0xbe,
+static const unsigned char gamma22_140[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEC, 0xD9, 0xE5,
+	0xD4, 0xD8, 0xD9, 0xDE, 0xDD, 0xDF,
+	0xBB, 0xB9, 0xB7, 0xCA, 0xC9, 0xC5,
+	0x00, 0xA3, 0x00, 0xA4, 0x00, 0xBB,
 };
 
-static const unsigned char s6e8ax0_22_gamma_170[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xaf, 0xb5, 0xbf, 0xb1, 0xd1,
-	0xb1, 0xc3, 0xde, 0xc3, 0x99, 0xc0, 0x96, 0xb4, 0xce, 0xb1,
-	0x00, 0x9f, 0x00, 0x96, 0x00, 0xc2,
+static const unsigned char gamma22_150[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEC, 0xDA, 0xE5,
+	0xD4, 0xD8, 0xD9, 0xDD, 0xDD, 0xDD,
+	0xBB, 0xB9, 0xB6, 0xC9, 0xC7, 0xC5,
+	0x00, 0xA6, 0x00, 0xA8, 0x00, 0xBF,
 };
 
-static const unsigned char s6e8ax0_22_gamma_180[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xaf, 0xb7, 0xbe, 0xb3, 0xd2,
-	0xb3, 0xc3, 0xde, 0xc2, 0x97, 0xbf, 0x95, 0xb4, 0xcd, 0xb1,
-	0x00, 0xa2, 0x00, 0x99, 0x00, 0xc5,
+static const unsigned char gamma22_160[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xDB, 0xE6,
+	0xD4, 0xD7, 0xD9, 0xDC, 0xDD, 0xDD,
+	0xB9, 0xB8, 0xB4, 0xC9, 0xC6, 0xC4,
+	0x00, 0xAA, 0x00, 0xAC, 0x00, 0xC4,
 };
 
-static const unsigned char s6e8ax0_22_gamma_190[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xaf, 0xb9, 0xbe, 0xb2, 0xd2,
-	0xb2, 0xc3, 0xdd, 0xc3, 0x98, 0xbf, 0x95, 0xb2, 0xcc, 0xaf,
-	0x00, 0xa5, 0x00, 0x9c, 0x00, 0xc9,
+static const unsigned char gamma22_170[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEC, 0xDC, 0xE5,
+	0xD5, 0xD8, 0xD9, 0xDD, 0xDC, 0xDD,
+	0xBA, 0xB7, 0xB5, 0xC7, 0xC6, 0xC3,
+	0x00, 0xAD, 0x00, 0xAF, 0x00, 0xC7,
 };
 
-static const unsigned char s6e8ax0_22_gamma_200[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xaf, 0xb9, 0xbc, 0xb2, 0xd2,
-	0xb1, 0xc4, 0xdd, 0xc3, 0x97, 0xbe, 0x95, 0xb1, 0xcb, 0xae,
-	0x00, 0xa8, 0x00, 0x9f, 0x00, 0xcd,
+static const unsigned char gamma22_180[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEE, 0xDD, 0xE6,
+	0xD4, 0xD7, 0xD9, 0xDB, 0xDC, 0xDB,
+	0xB9, 0xB7, 0xB4, 0xC6, 0xC4, 0xC2,
+	0x00, 0xB1, 0x00, 0xB3, 0x00, 0xCC,
 };
 
-static const unsigned char s6e8ax0_22_gamma_210[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb1, 0xc1, 0xbd, 0xb1, 0xd1,
-	0xb1, 0xc2, 0xde, 0xc2, 0x97, 0xbe, 0x94, 0xB0, 0xc9, 0xad,
-	0x00, 0xae, 0x00, 0xa4, 0x00, 0xd4,
+static const unsigned char gamma22_190[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xDE, 0xE6,
+	0xD3, 0xD8, 0xD8, 0xDD, 0xDB, 0xDC,
+	0xB9, 0xB6, 0xB4, 0xC5, 0xC4, 0xC0,
+	0x00, 0xB4, 0x00, 0xB6, 0x00, 0xD0,
 };
 
-static const unsigned char s6e8ax0_22_gamma_220[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb1, 0xc7, 0xbd, 0xb1, 0xd1,
-	0xb1, 0xc2, 0xdd, 0xc2, 0x97, 0xbd, 0x94, 0xb0, 0xc9, 0xad,
-	0x00, 0xad, 0x00, 0xa2, 0x00, 0xd3,
+static const unsigned char gamma22_200[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xDF, 0xE6,
+	0xD3, 0xD7, 0xD8, 0xDB, 0xDB, 0xDA,
+	0xB8, 0xB6, 0xB3, 0xC4, 0xC3, 0xC0,
+	0x00, 0xB8, 0x00, 0xB9, 0x00, 0xD4,
 };
 
-static const unsigned char s6e8ax0_22_gamma_230[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb1, 0xc3, 0xbd, 0xb2, 0xd1,
-	0xb1, 0xc3, 0xdd, 0xc1, 0x96, 0xbd, 0x94, 0xb0, 0xc9, 0xad,
-	0x00, 0xb0, 0x00, 0xa7, 0x00, 0xd7,
+static const unsigned char gamma22_210[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEC, 0xE0, 0xE5,
+	0xD5, 0xD7, 0xD9, 0xDB, 0xDA, 0xDA,
+	0xB7, 0xB5, 0xB1, 0xC4, 0xC2, 0xC0,
+	0x00, 0xBA, 0x00, 0xBD, 0x00, 0xD7,
 };
 
-static const unsigned char s6e8ax0_22_gamma_240[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb1, 0xcb, 0xbd, 0xb1, 0xd2,
-	0xb1, 0xc3, 0xdD, 0xc2, 0x95, 0xbd, 0x93, 0xaf, 0xc8, 0xab,
-	0x00, 0xb3, 0x00, 0xa9, 0x00, 0xdb,
+static const unsigned char gamma22_220[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xE0, 0xE6,
+	0xD4, 0xD7, 0xD9, 0xDA, 0xDA, 0xD9,
+	0xB7, 0xB4, 0xB1, 0xC2, 0xC2, 0xBE,
+	0x00, 0xBE, 0x00, 0xC0, 0x00, 0xDC,
 };
 
-static const unsigned char s6e8ax0_22_gamma_250[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb3, 0xcc, 0xbe, 0xb0, 0xd2,
-	0xb0, 0xc3, 0xdD, 0xc2, 0x94, 0xbc, 0x92, 0xae, 0xc8, 0xab,
-	0x00, 0xb6, 0x00, 0xab, 0x00, 0xde,
+static const unsigned char gamma22_230[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEC, 0xE2, 0xE6,
+	0xD3, 0xD6, 0xD8, 0xDC, 0xD9, 0xD9,
+	0xB6, 0xB4, 0xB1, 0xC1, 0xC1, 0xBD,
+	0x00, 0xC1, 0x00, 0xC3, 0x00, 0xDF,
 };
 
-static const unsigned char s6e8ax0_22_gamma_260[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb3, 0xd0, 0xbe, 0xaf, 0xd1,
-	0xaf, 0xc2, 0xdd, 0xc1, 0x96, 0xbc, 0x93, 0xaf, 0xc8, 0xac,
-	0x00, 0xb7, 0x00, 0xad, 0x00, 0xe0,
+static const unsigned char gamma22_240[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xE2, 0xE6,
+	0xD4, 0xD6, 0xD8, 0xDA, 0xDA, 0xDA,
+	0xB6, 0xB3, 0xB0, 0xC1, 0xBF, 0xBC,
+	0x00, 0xC4, 0x00, 0xC7, 0x00, 0xE3,
 };
 
-static const unsigned char s6e8ax0_22_gamma_270[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb2, 0xcF, 0xbd, 0xb0, 0xd2,
-	0xaf, 0xc2, 0xdc, 0xc1, 0x95, 0xbd, 0x93, 0xae, 0xc6, 0xaa,
-	0x00, 0xba, 0x00, 0xb0, 0x00, 0xe4,
+static const unsigned char gamma22_250[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xE3, 0xE7,
+	0xD4, 0xD6, 0xD8, 0xDB, 0xD9, 0xD9,
+	0xB3, 0xB2, 0xAE, 0xC1, 0xC0, 0xBC,
+	0x00, 0xC7, 0x00, 0xC9, 0x00, 0xE7,
 };
 
-static const unsigned char s6e8ax0_22_gamma_280[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb2, 0xd0, 0xbd, 0xaf, 0xd0,
-	0xad, 0xc4, 0xdd, 0xc3, 0x95, 0xbd, 0x93, 0xac, 0xc5, 0xa9,
-	0x00, 0xbd, 0x00, 0xb2, 0x00, 0xe7,
+static const unsigned char gamma22_260[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xE4, 0xE7,
+	0xD4, 0xD5, 0xD7, 0xDA, 0xD9, 0xD9,
+	0xB3, 0xB2, 0xAD, 0xC1, 0xBE, 0xBC,
+	0x00, 0xC9, 0x00, 0xCD, 0x00, 0xEA,
 };
 
-static const unsigned char s6e8ax0_22_gamma_300[] = {
-	0xfa, 0x01, 0x60, 0x10, 0x60, 0xb5, 0xd3, 0xbd, 0xb1, 0xd2,
-	0xb0, 0xc0, 0xdc, 0xc0, 0x94, 0xba, 0x91, 0xac, 0xc5, 0xa9,
-	0x00, 0xc2, 0x00, 0xb7, 0x00, 0xed,
+static const unsigned char gamma22_270[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xE5, 0xE8,
+	0xD3, 0xD5, 0xD5, 0xDB, 0xD9, 0xD9,
+	0xB3, 0xB1, 0xAE, 0xBF, 0xBE, 0xBA,
+	0x00, 0xCC, 0x00, 0xD0, 0x00, 0xEE,
 };
 
-static const unsigned char *s6e8ax0_22_gamma_table[] = {
-	s6e8ax0_22_gamma_30,
-	s6e8ax0_22_gamma_50,
-	s6e8ax0_22_gamma_60,
-	s6e8ax0_22_gamma_70,
-	s6e8ax0_22_gamma_80,
-	s6e8ax0_22_gamma_90,
-	s6e8ax0_22_gamma_100,
-	s6e8ax0_22_gamma_120,
-	s6e8ax0_22_gamma_130,
-	s6e8ax0_22_gamma_140,
-	s6e8ax0_22_gamma_150,
-	s6e8ax0_22_gamma_160,
-	s6e8ax0_22_gamma_170,
-	s6e8ax0_22_gamma_180,
-	s6e8ax0_22_gamma_190,
-	s6e8ax0_22_gamma_200,
-	s6e8ax0_22_gamma_210,
-	s6e8ax0_22_gamma_220,
-	s6e8ax0_22_gamma_230,
-	s6e8ax0_22_gamma_240,
-	s6e8ax0_22_gamma_250,
-	s6e8ax0_22_gamma_260,
-	s6e8ax0_22_gamma_270,
-	s6e8ax0_22_gamma_280,
-	s6e8ax0_22_gamma_300,
+static const unsigned char gamma22_280[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEC, 0xE5, 0xE6,
+	0xD2, 0xD4, 0xD6, 0xDA, 0xD9, 0xD8,
+	0xB3, 0xB1, 0xAD, 0xBF, 0xBD, 0xBA,
+	0x00, 0xCF, 0x00, 0xD3, 0x00, 0xF1,
 };
 
-static void s6e8ax0_panel_cond(struct s6e8ax0 *lcd)
+static const unsigned char gamma22_290[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xEC, 0xE6, 0xE7,
+	0xD2, 0xD4, 0xD5, 0xDB, 0xD8, 0xD8,
+	0xB1, 0xB0, 0xAC, 0xBE, 0xBD, 0xB9,
+	0x00, 0xD3, 0x00, 0xD6, 0x00, 0xF5,
+};
+
+static const unsigned char gamma22_300[] = {
+	0xFA, 0x01,
+	0x1F, 0x1F, 0x1F, 0xED, 0xE6, 0xE7,
+	0xD1, 0xD3, 0xD4, 0xDA, 0xD8, 0xD7,
+	0xB1, 0xAF, 0xAB, 0xBD, 0xBB, 0xB8,
+	0x00, 0xD6, 0x00, 0xDA, 0x00, 0xFA,
+};
+
+
+static const unsigned char *s6e8aa0_22_gamma_table[] = {
+	gamma22_30,
+	gamma22_40,
+	gamma22_50,
+	gamma22_60,
+	gamma22_70,
+	gamma22_80,
+	gamma22_90,
+	gamma22_100,
+	gamma22_110,
+	gamma22_120,
+	gamma22_130,
+	gamma22_140,
+	gamma22_150,
+	gamma22_160,
+	gamma22_170,
+	gamma22_180,
+	gamma22_190,
+	gamma22_200,
+	gamma22_210,
+	gamma22_220,
+	gamma22_230,
+	gamma22_240,
+	gamma22_250,
+	gamma22_260,
+	gamma22_270,
+	gamma22_280,
+	gamma22_290,
+};
+
+static void s6e8aa0_panel_cond(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 
 	static const unsigned char data_to_send[] = {
-		0xf8, 0x3d, 0x35, 0x00, 0x00, 0x00, 0x93, 0x00, 0x3c, 0x7d,
+		0xF8,
+		0x25, 0x34, 0x00, 0x00, 0x00, 0x95, 0x00, 0x3c, 0x7d, 0x08,
+		0x27, 0x00, 0x00, 0x10, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x02, 0x08, 0x08, 0x23, 0x63, 0xc0, 0xc1,
+		0x01, 0x81, 0xc1, 0x00, 0xc8, 0xc1, 0xd3, 0x01
+
+	};
+
+	static const unsigned char data_to_send_panel_reverse[] = {
+		0xf8, 0x19, 0x35, 0x00, 0x00, 0x00, 0x93, 0x00, 0x3c, 0x7d,
 		0x08, 0x27, 0x7d, 0x3f, 0x00, 0x00, 0x00, 0x20, 0x04, 0x08,
 		0x6e, 0x00, 0x00, 0x00, 0x02, 0x08, 0x08, 0x23, 0x23, 0xc0,
-		0xc8, 0x08, 0x48, 0xc1, 0x00, 0xc1, 0xff, 0xff, 0xc8
+		0xc1, 0x01, 0x41, 0xc1, 0x00, 0xc1, 0xf6, 0xf6, 0xc1
 	};
 
-	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
-		data_to_send, ARRAY_SIZE(data_to_send));
+	if (lcd->dsim_dev->panel_reverse) {
+		pr_err("Panel Reverse Called\n");
+		ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
+				data_to_send_panel_reverse,
+				ARRAY_SIZE(data_to_send_panel_reverse));
+	} else {
+		ops->cmd_write(lcd_to_master(lcd),
+		MIPI_DSI_DCS_LONG_WRITE, data_to_send,
+		ARRAY_SIZE(data_to_send));
+	}
 }
 
-static void s6e8ax0_display_cond(struct s6e8ax0 *lcd)
+static void s6e8aa0_display_cond(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
-		0xf2, 0x80, 0x03, 0x0d
+		0xF2,
+		0x80, 0x03, 0x0D
 	};
+	pr_err("func: %s, line: %d\n", __func__, __LINE__);
 
 	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
 /* Gamma 2.2 Setting (200cd, 7500K, 10MPCD) */
-static void s6e8ax0_gamma_cond(struct s6e8ax0 *lcd)
+static void s6e8aa0_gamma_cond(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	unsigned int gamma = lcd->bd->props.brightness;
+	gamma = 15;
 
 	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
-			s6e8ax0_22_gamma_table[gamma],
+			s6e8aa0_22_gamma_table[gamma],
 			GAMMA_TABLE_COUNT);
 }
 
-static void s6e8ax0_gamma_update(struct s6e8ax0 *lcd)
+static void s6e8aa0_gamma_update(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
-		0xf7, 0x03
+		0xF7,
+		0x03, 0x00, 0x00
 	};
 
 	ops->cmd_write(lcd_to_master(lcd),
@@ -332,110 +436,67 @@ static void s6e8ax0_gamma_update(struct s6e8ax0 *lcd)
 		ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_etc_cond1(struct s6e8ax0 *lcd)
+static void s6e8aa0_etc_cond1(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
-		0xd1, 0xfe, 0x80, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x40,
-		0x0d, 0x00, 0x00
+		0xF6,
+		0x00, 0x02, 0x00
 	};
 
 	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_etc_cond2(struct s6e8ax0 *lcd)
+static void s6e8aa0_etc_cond2(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
-		0xb6, 0x0c, 0x02, 0x03, 0x32, 0xff, 0x44, 0x44, 0xc0,
-		0x00
+		0xB6,
+		0x0C, 0x02, 0x03, 0x32, 0xC0, 0x44, 0x44, 0xC0, 0x00
 	};
 
 	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_etc_cond3(struct s6e8ax0 *lcd)
+static void s6e8aa0_etc_cond3(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
-		0xe1, 0x10, 0x1c, 0x17, 0x08, 0x1d
+		0xF4,
+		0xCF, 0x0A, 0x15, 0x10, 0x19, 0x33, 0x02
 	};
 
 	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_etc_cond4(struct s6e8ax0 *lcd)
+static void s6e8aa0_elvss_set(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
-		0xe2, 0xed, 0x07, 0xc3, 0x13, 0x0d, 0x03
+		0xB1, 0x04, 0x00
 	};
 
 	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_etc_cond5(struct s6e8ax0 *lcd)
+static void s6e8aa0_elvss_nvm_set(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
-		0xf4, 0xcf, 0x0a, 0x12, 0x10, 0x19, 0x33, 0x02
-	};
-
-	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
-		data_to_send, ARRAY_SIZE(data_to_send));
-}
-static void s6e8ax0_etc_cond6(struct s6e8ax0 *lcd)
-{
-	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
-	static const unsigned char data_to_send[] = {
-		0xe3, 0x40
-	};
-
-	ops->cmd_write(lcd_to_master(lcd),
-		MIPI_DSI_DCS_SHORT_WRITE_PARAM,
-		data_to_send, ARRAY_SIZE(data_to_send));
-}
-
-static void s6e8ax0_etc_cond7(struct s6e8ax0 *lcd)
-{
-	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
-	static const unsigned char data_to_send[] = {
-		0xe4, 0x00, 0x00, 0x14, 0x80, 0x00, 0x00, 0x00
+		0xD9,
+		0x14, 0x40, 0x0C, 0xCB, 0xCE, 0x6E, 0xC4, 0x07, 0x40, 0x41,
+		0xC1, 0x00, 0x60, 0x19
 	};
 
 	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_elvss_set(struct s6e8ax0 *lcd)
-{
-	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
-	static const unsigned char data_to_send[] = {
-		0xb1, 0x04, 0x00
-	};
-
-	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
-		data_to_send, ARRAY_SIZE(data_to_send));
-}
-
-static void s6e8ax0_elvss_nvm_set(struct s6e8ax0 *lcd)
-{
-	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
-	static const unsigned char data_to_send[] = {
-		0xd9, 0x5c, 0x20, 0x0c, 0x0f, 0x41, 0x00, 0x10, 0x11,
-		0x12, 0xd1, 0x00, 0x00, 0x00, 0x00, 0x80, 0xcb, 0xed,
-		0x64, 0xaf
-	};
-
-	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
-		data_to_send, ARRAY_SIZE(data_to_send));
-}
-
-static void s6e8ax0_sleep_in(struct s6e8ax0 *lcd)
+static void s6e8aa0_sleep_in(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
@@ -447,7 +508,7 @@ static void s6e8ax0_sleep_in(struct s6e8ax0 *lcd)
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_sleep_out(struct s6e8ax0 *lcd)
+static void s6e8aa0_sleep_out(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
@@ -459,7 +520,7 @@ static void s6e8ax0_sleep_out(struct s6e8ax0 *lcd)
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_display_on(struct s6e8ax0 *lcd)
+static void s6e8aa0_display_on(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
@@ -471,7 +532,7 @@ static void s6e8ax0_display_on(struct s6e8ax0 *lcd)
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_display_off(struct s6e8ax0 *lcd)
+static void s6e8aa0_display_off(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
@@ -483,116 +544,21 @@ static void s6e8ax0_display_off(struct s6e8ax0 *lcd)
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_apply_level2_key(struct s6e8ax0 *lcd)
+static void s6e8aa0_apply_level2_key(struct s6e8aa0 *lcd)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	static const unsigned char data_to_send[] = {
-		0xf0, 0x5a, 0x5a
+		0xfc, 0x5a, 0x5a
 	};
 
 	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
 		data_to_send, ARRAY_SIZE(data_to_send));
 }
 
-static void s6e8ax0_acl_on(struct s6e8ax0 *lcd)
-{
-	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
-	static const unsigned char data_to_send[] = {
-		0xc0, 0x01
-	};
-
-	ops->cmd_write(lcd_to_master(lcd),
-		MIPI_DSI_DCS_SHORT_WRITE,
-		data_to_send, ARRAY_SIZE(data_to_send));
-}
-
-static void s6e8ax0_acl_off(struct s6e8ax0 *lcd)
-{
-	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
-	static const unsigned char data_to_send[] = {
-		0xc0, 0x00
-	};
-
-	ops->cmd_write(lcd_to_master(lcd),
-		MIPI_DSI_DCS_SHORT_WRITE,
-		data_to_send, ARRAY_SIZE(data_to_send));
-}
-
-/* Full white 50% reducing setting */
-static void s6e8ax0_acl_ctrl_set(struct s6e8ax0 *lcd)
-{
-	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
-	/* Full white 50% reducing setting */
-	static const unsigned char cutoff_50[] = {
-		0xc1, 0x47, 0x53, 0x13, 0x53, 0x00, 0x00, 0x02, 0xcf,
-		0x00, 0x00, 0x04, 0xff,	0x00, 0x00, 0x00, 0x00, 0x00,
-		0x01, 0x08, 0x0f, 0x16, 0x1d, 0x24, 0x2a, 0x31, 0x38,
-		0x3f, 0x46
-	};
-	/* Full white 45% reducing setting */
-	static const unsigned char cutoff_45[] = {
-		0xc1, 0x47, 0x53, 0x13, 0x53, 0x00, 0x00, 0x02, 0xcf,
-		0x00, 0x00, 0x04, 0xff,	0x00, 0x00, 0x00, 0x00, 0x00,
-		0x01, 0x07, 0x0d, 0x13, 0x19, 0x1f, 0x25, 0x2b, 0x31,
-		0x37, 0x3d
-	};
-	/* Full white 40% reducing setting */
-	static const unsigned char cutoff_40[] = {
-		0xc1, 0x47, 0x53, 0x13, 0x53, 0x00, 0x00, 0x02, 0xcf,
-		0x00, 0x00, 0x04, 0xff,	0x00, 0x00, 0x00, 0x00, 0x00,
-		0x01, 0x06, 0x0c, 0x11, 0x16, 0x1c, 0x21, 0x26, 0x2b,
-		0x31, 0x36
-	};
-
-	if (lcd->acl_enable) {
-		if (lcd->cur_acl == 0) {
-			if (lcd->gamma == 0 || lcd->gamma == 1) {
-				s6e8ax0_acl_off(lcd);
-				dev_dbg(&lcd->ld->dev,
-					"cur_acl=%d\n", lcd->cur_acl);
-			} else
-				s6e8ax0_acl_on(lcd);
-		}
-		switch (lcd->gamma) {
-		case 0: /* 30cd */
-			s6e8ax0_acl_off(lcd);
-			lcd->cur_acl = 0;
-			break;
-		case 1 ... 3: /* 50cd ~ 90cd */
-			ops->cmd_write(lcd_to_master(lcd),
-				MIPI_DSI_DCS_LONG_WRITE,
-				cutoff_40,
-				ARRAY_SIZE(cutoff_40));
-			lcd->cur_acl = 40;
-			break;
-		case 4 ... 7: /* 120cd ~ 210cd */
-			ops->cmd_write(lcd_to_master(lcd),
-				MIPI_DSI_DCS_LONG_WRITE,
-				cutoff_45,
-				ARRAY_SIZE(cutoff_45));
-			lcd->cur_acl = 45;
-			break;
-		case 8 ... 10: /* 220cd ~ 300cd */
-			ops->cmd_write(lcd_to_master(lcd),
-				MIPI_DSI_DCS_LONG_WRITE,
-				cutoff_50,
-				ARRAY_SIZE(cutoff_50));
-			lcd->cur_acl = 50;
-			break;
-		default:
-			break;
-		}
-	} else {
-		s6e8ax0_acl_off(lcd);
-		lcd->cur_acl = 0;
-		dev_dbg(&lcd->ld->dev, "cur_acl = %d\n", lcd->cur_acl);
-	}
-}
-
-static void s6e8ax0_read_id(struct s6e8ax0 *lcd, u8 *mtp_id)
+static void s6e8aa0_read_id(struct s6e8aa0 *lcd, u8 *mtp_id)
 {
 	unsigned int ret;
-	unsigned int addr = 0xd1;	/* MTP ID */
+	unsigned int addr = 0xD1;	/* MTP ID */
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 
 	ret = ops->cmd_read(lcd_to_master(lcd),
@@ -600,61 +566,52 @@ static void s6e8ax0_read_id(struct s6e8ax0 *lcd, u8 *mtp_id)
 			addr, 3, mtp_id);
 }
 
-static int s6e8ax0_panel_init(struct s6e8ax0 *lcd)
+static int s6e8aa0_panel_init(struct s6e8aa0 *lcd)
 {
-	s6e8ax0_apply_level2_key(lcd);
-	s6e8ax0_sleep_out(lcd);
-	msleep(1);
-	s6e8ax0_panel_cond(lcd);
-	s6e8ax0_display_cond(lcd);
-	s6e8ax0_gamma_cond(lcd);
-	s6e8ax0_gamma_update(lcd);
+	s6e8aa0_apply_level2_key(lcd);
+	mdelay(16);
+	s6e8aa0_sleep_out(lcd);
+	mdelay(5);
+	s6e8aa0_panel_cond(lcd);
+	s6e8aa0_display_cond(lcd);
+	s6e8aa0_gamma_cond(lcd);
+	s6e8aa0_gamma_update(lcd);
 
-	s6e8ax0_etc_cond1(lcd);
-	s6e8ax0_etc_cond2(lcd);
-	s6e8ax0_etc_cond3(lcd);
-	s6e8ax0_etc_cond4(lcd);
-	s6e8ax0_etc_cond5(lcd);
-	s6e8ax0_etc_cond6(lcd);
-	s6e8ax0_etc_cond7(lcd);
+	s6e8aa0_etc_cond1(lcd);
+	s6e8aa0_etc_cond2(lcd);
+	s6e8aa0_etc_cond3(lcd);
 
-	s6e8ax0_elvss_nvm_set(lcd);
-	s6e8ax0_elvss_set(lcd);
-
-	s6e8ax0_acl_ctrl_set(lcd);
-	s6e8ax0_acl_on(lcd);
-
-	/* if ID3 value is not 33h, branch private elvss mode */
-	msleep(lcd->ddi_pd->power_on_delay);
+	s6e8aa0_elvss_nvm_set(lcd);
+	s6e8aa0_elvss_set(lcd);
+	mdelay(120);
 
 	return 0;
 }
 
-static int s6e8ax0_update_gamma_ctrl(struct s6e8ax0 *lcd, int brightness)
+static int s6e8aa0_update_gamma_ctrl(struct s6e8aa0 *lcd, int brightness)
 {
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 
 	ops->cmd_write(lcd_to_master(lcd), MIPI_DSI_DCS_LONG_WRITE,
-			s6e8ax0_22_gamma_table[brightness],
-			ARRAY_SIZE(s6e8ax0_22_gamma_table));
+			s6e8aa0_22_gamma_table[brightness],
+			ARRAY_SIZE(s6e8aa0_22_gamma_table));
 
 	/* update gamma table. */
-	s6e8ax0_gamma_update(lcd);
+	s6e8aa0_gamma_update(lcd);
 	lcd->gamma = brightness;
 
 	return 0;
 }
 
-static int s6e8ax0_gamma_ctrl(struct s6e8ax0 *lcd, int gamma)
+static int s6e8aa0_gamma_ctrl(struct s6e8aa0 *lcd, int gamma)
 {
-	s6e8ax0_update_gamma_ctrl(lcd, gamma);
-
+	s6e8aa0_update_gamma_ctrl(lcd, gamma);
 	return 0;
 }
 
-static int s6e8ax0_set_power(struct lcd_device *ld, int power)
+static int s6e8aa0_set_power(struct lcd_device *ld, int power)
 {
-	struct s6e8ax0 *lcd = lcd_get_data(ld);
+	struct s6e8aa0 *lcd = lcd_get_data(ld);
 	struct mipi_dsim_master_ops *ops = lcd_to_master_ops(lcd);
 	int ret = 0;
 
@@ -686,22 +643,22 @@ static int s6e8ax0_set_power(struct lcd_device *ld, int power)
 	return ret;
 }
 
-static int s6e8ax0_get_power(struct lcd_device *ld)
+static int s6e8aa0_get_power(struct lcd_device *ld)
 {
-	struct s6e8ax0 *lcd = lcd_get_data(ld);
+	struct s6e8aa0 *lcd = lcd_get_data(ld);
 
 	return lcd->power;
 }
 
-static int s6e8ax0_get_brightness(struct backlight_device *bd)
+static int s6e8aa0_get_brightness(struct backlight_device *bd)
 {
 	return bd->props.brightness;
 }
 
-static int s6e8ax0_set_brightness(struct backlight_device *bd)
+static int s6e8aa0_set_brightness(struct backlight_device *bd)
 {
 	int ret = 0, brightness = bd->props.brightness;
-	struct s6e8ax0 *lcd = bl_get_data(bd);
+	struct s6e8aa0 *lcd = bl_get_data(bd);
 
 	if (brightness < MIN_BRIGHTNESS ||
 		brightness > bd->props.max_brightness) {
@@ -710,7 +667,7 @@ static int s6e8ax0_set_brightness(struct backlight_device *bd)
 		return -EINVAL;
 	}
 
-	ret = s6e8ax0_gamma_ctrl(lcd, brightness);
+	ret = s6e8aa0_gamma_ctrl(lcd, brightness);
 	if (ret) {
 		dev_err(&bd->dev, "lcd brightness setting failed.\n");
 		return -EIO;
@@ -719,90 +676,70 @@ static int s6e8ax0_set_brightness(struct backlight_device *bd)
 	return ret;
 }
 
-static struct lcd_ops s6e8ax0_lcd_ops = {
-	.set_power = s6e8ax0_set_power,
-	.get_power = s6e8ax0_get_power,
+static struct lcd_ops s6e8aa0_lcd_ops = {
+	.set_power = s6e8aa0_set_power,
+	.get_power = s6e8aa0_get_power,
 };
 
-static const struct backlight_ops s6e8ax0_backlight_ops = {
-	.get_brightness = s6e8ax0_get_brightness,
-	.update_status = s6e8ax0_set_brightness,
+static const struct backlight_ops s6e8aa0_backlight_ops = {
+	.get_brightness = s6e8aa0_get_brightness,
+	.update_status = s6e8aa0_set_brightness,
 };
 
-static void s6e8ax0_power_on(struct mipi_dsim_lcd_device *dsim_dev, int power)
+static void s6e8aa0_power_on(struct mipi_dsim_lcd_device *dsim_dev, int power)
 {
-	struct s6e8ax0 *lcd = dev_get_drvdata(&dsim_dev->dev);
+	struct s6e8aa0 *lcd = dev_get_drvdata(&dsim_dev->dev);
 
 	msleep(lcd->ddi_pd->power_on_delay);
 
+       if (power) {
+               gpio_request_one(lcd->gpio_reset, GPIOF_OUT_INIT_HIGH, 0);
+               mdelay(500);
+               gpio_set_value(lcd->gpio_reset, 0);
+               mdelay(500);
+               gpio_set_value(lcd->gpio_reset, 1);
+               gpio_free(lcd->gpio_reset);
+               mdelay(5);
+
+               gpio_request_one(lcd->gpio_power, GPIOF_OUT_INIT_HIGH, 0);
+               gpio_set_value(lcd->gpio_power, 1);
+               gpio_free(lcd->gpio_power);
+
+               gpio_request_one(lcd->gpio_bl, GPIOF_OUT_INIT_HIGH, 0);
+               gpio_set_value(lcd->gpio_bl, 1);
+               gpio_free(lcd->gpio_bl);
+
+       } else {
+               gpio_request_one(lcd->gpio_reset, GPIOF_OUT_INIT_LOW, 0);
+               mdelay(500);
+               gpio_free(lcd->gpio_reset);
+
+               gpio_request_one(lcd->gpio_power, GPIOF_OUT_INIT_LOW, 0);
+               mdelay(500);
+               gpio_free(lcd->gpio_power);
+       }
+
+       mdelay(500);
+
 	/* lcd power on */
 	if (power)
-		s6e8ax0_regulator_enable(lcd);
+		s6e8aa0_regulator_enable(lcd);
 	else
-		s6e8ax0_regulator_disable(lcd);
+		s6e8aa0_regulator_disable(lcd);
 
 	msleep(lcd->ddi_pd->reset_delay);
 
 	/* lcd reset */
 	if (lcd->ddi_pd->reset)
 		lcd->ddi_pd->reset(lcd->ld);
-	msleep(5);
 }
 
-static void s6e8ax0_set_sequence(struct mipi_dsim_lcd_device *dsim_dev)
+static void s6e8aa0_set_sequence(struct mipi_dsim_lcd_device *dsim_dev)
 {
-	struct s6e8ax0 *lcd = dev_get_drvdata(&dsim_dev->dev);
-
-	s6e8ax0_panel_init(lcd);
-	s6e8ax0_display_on(lcd);
-
-	lcd->power = FB_BLANK_UNBLANK;
-}
-
-static int s6e8ax0_probe(struct mipi_dsim_lcd_device *dsim_dev)
-{
-	struct s6e8ax0 *lcd;
-	int ret;
+	struct s6e8aa0 *lcd = dev_get_drvdata(&dsim_dev->dev);
 	u8 mtp_id[3] = {0, };
 
-	lcd = kzalloc(sizeof(struct s6e8ax0), GFP_KERNEL);
-	if (!lcd) {
-		dev_err(&dsim_dev->dev, "failed to allocate s6e8ax0 structure.\n");
-		return -ENOMEM;
-	}
-
-	lcd->dsim_dev = dsim_dev;
-	lcd->ddi_pd = (struct lcd_platform_data *)dsim_dev->platform_data;
-	lcd->dev = &dsim_dev->dev;
-
-	mutex_init(&lcd->lock);
-
-	ret = regulator_bulk_get(lcd->dev, ARRAY_SIZE(supplies), supplies);
-	if (ret) {
-		dev_err(lcd->dev, "Failed to get regulators: %d\n", ret);
-		goto err_lcd_register;
-	}
-
-	lcd->ld = lcd_device_register("s6e8ax0", lcd->dev, lcd,
-			&s6e8ax0_lcd_ops);
-	if (IS_ERR(lcd->ld)) {
-		dev_err(lcd->dev, "failed to register lcd ops.\n");
-		ret = PTR_ERR(lcd->ld);
-		goto err_lcd_register;
-	}
-
-	lcd->bd = backlight_device_register("s6e8ax0-bl", lcd->dev, lcd,
-			&s6e8ax0_backlight_ops, NULL);
-	if (IS_ERR(lcd->bd)) {
-		dev_err(lcd->dev, "failed to register backlight ops.\n");
-		ret = PTR_ERR(lcd->bd);
-		goto err_backlight_register;
-	}
-
-	lcd->bd->props.max_brightness = MAX_BRIGHTNESS;
-	lcd->bd->props.brightness = MAX_BRIGHTNESS;
-
-	s6e8ax0_read_id(lcd, mtp_id);
+	s6e8aa0_read_id(lcd, mtp_id);
 	if (mtp_id[0] == 0x00)
 		dev_err(lcd->dev, "read id failed\n");
 
@@ -816,12 +753,120 @@ static int s6e8ax0_probe(struct mipi_dsim_lcd_device *dsim_dev)
 		dev_info(lcd->dev,
 			"ID-3 is 0x%x support dynamic elvss\n", mtp_id[2]);
 
-	lcd->acl_enable = 1;
-	lcd->cur_acl = 0;
+	s6e8aa0_panel_init(lcd);
+	s6e8aa0_display_on(lcd);
+
+	lcd->power = FB_BLANK_UNBLANK;
+}
+
+static int s6e8aa0_update_platform_lcd_data(
+					struct s6e8aa0 *lcd_s6e8aa0)
+{
+	struct lcd_platform_data *ddi_pd = lcd_s6e8aa0->ddi_pd;
+	struct device_node *np = (struct device_node *)
+					lcd_s6e8aa0->ddi_pd->pdata;
+
+	lcd_s6e8aa0->gpio_reset = of_get_named_gpio(np, "gpio-reset", 0);
+	if (!gpio_is_valid(lcd_s6e8aa0->gpio_reset)) {
+		dev_err(lcd_s6e8aa0->dev,
+			"failed to get poweron gpio-reset information.\n");
+		return -EINVAL;
+	}
+
+	lcd_s6e8aa0->gpio_power = of_get_named_gpio(np, "gpio-power", 0);
+	if (!gpio_is_valid(lcd_s6e8aa0->gpio_power)) {
+		dev_err(lcd_s6e8aa0->dev,
+			"failed to get poweron gpio-power information.\n");
+		return -EINVAL;
+	}
+
+	lcd_s6e8aa0->gpio_bl = of_get_named_gpio(np, "gpio-bl", 0);
+	if (!gpio_is_valid(lcd_s6e8aa0->gpio_bl)) {
+		dev_err(lcd_s6e8aa0->dev,
+			"failed to get pwm-bl information.\n");
+		return -EINVAL;
+	}
+
+	if (of_property_read_u32(np, "enabled",
+			(unsigned int *)&ddi_pd->lcd_enabled))
+		ddi_pd->lcd_enabled = 0;
+
+	if (of_property_read_u32(np, "reset-delay",
+				&ddi_pd->reset_delay)) {
+		dev_err(lcd_s6e8aa0->dev, "reset-delay property not found");
+		return -EINVAL;
+	}
+
+	if (of_property_read_u32(np, "power-on-delay",
+				&ddi_pd->power_on_delay)) {
+		dev_err(lcd_s6e8aa0->dev, "power-on-delay property not found");
+		return -EINVAL;
+	}
+
+	if (of_property_read_u32(np, "power-off-delay",
+				&ddi_pd->power_off_delay)) {
+		dev_err(lcd_s6e8aa0->dev,
+			"power-off-delay property not found");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+
+
+static int s6e8aa0_probe(struct mipi_dsim_lcd_device *dsim_dev)
+{
+	struct s6e8aa0 *lcd;
+	int ret;
+
+	lcd = kzalloc(sizeof(struct s6e8aa0), GFP_KERNEL);
+	if (!lcd) {
+		dev_err(&dsim_dev->dev, "failed to allocate s6e8aa0 structure.\n");
+		return -ENOMEM;
+	}
+
+	lcd_global = lcd;
+
+	lcd->dsim_dev = dsim_dev;
+	lcd->ddi_pd = (struct lcd_platform_data *)dsim_dev->platform_data;
+	lcd->dev = &dsim_dev->dev;
+
+	/* get platform data information, if lcd device node is present */
+	if (lcd->ddi_pd->pdata)
+		if (s6e8aa0_update_platform_lcd_data(lcd))
+			return -EINVAL;
+
+	mutex_init(&lcd->lock);
+
+	ret = regulator_bulk_get(dsim_dev->master->dev,
+				ARRAY_SIZE(supplies), supplies);
+	if (ret) {
+		dev_err(lcd->dev, "Failed to get regulators: %d\n", ret);
+		goto err_lcd_register;
+	}
+
+	lcd->ld = lcd_device_register("s6e8aa0", lcd->dev, lcd,
+			&s6e8aa0_lcd_ops);
+	if (IS_ERR(lcd->ld)) {
+		dev_err(lcd->dev, "failed to register lcd ops.\n");
+		ret = PTR_ERR(lcd->ld);
+		goto err_lcd_register;
+	}
+
+	lcd->bd = backlight_device_register("s6e8aa0-bl", lcd->dev, lcd,
+			&s6e8aa0_backlight_ops, NULL);
+	if (IS_ERR(lcd->bd)) {
+		dev_err(lcd->dev, "failed to register backlight ops.\n");
+		ret = PTR_ERR(lcd->bd);
+		goto err_backlight_register;
+	}
+	lcd->bd->props.max_brightness = MAX_BRIGHTNESS;
+	lcd->bd->props.brightness = MAX_BRIGHTNESS;
 
 	dev_set_drvdata(&dsim_dev->dev, lcd);
 
-	dev_dbg(lcd->dev, "probed s6e8ax0 panel driver.\n");
+	dev_dbg(lcd->dev, "probed s6e8aa0 panel driver.\n");
 
 	return 0;
 
@@ -836,63 +881,62 @@ err_lcd_register:
 }
 
 #ifdef CONFIG_PM
-static int s6e8ax0_suspend(struct mipi_dsim_lcd_device *dsim_dev)
+static int s6e8aa0_suspend(struct mipi_dsim_lcd_device *dsim_dev)
 {
-	struct s6e8ax0 *lcd = dev_get_drvdata(&dsim_dev->dev);
+	struct s6e8aa0 *lcd = dev_get_drvdata(&dsim_dev->dev);
 
-	s6e8ax0_sleep_in(lcd);
+	s6e8aa0_sleep_in(lcd);
 	msleep(lcd->ddi_pd->power_off_delay);
-	s6e8ax0_display_off(lcd);
+	s6e8aa0_display_off(lcd);
 
-	s6e8ax0_regulator_disable(lcd);
+	s6e8aa0_regulator_disable(lcd);
 
 	return 0;
 }
 
-static int s6e8ax0_resume(struct mipi_dsim_lcd_device *dsim_dev)
+static int s6e8aa0_resume(struct mipi_dsim_lcd_device *dsim_dev)
 {
-	struct s6e8ax0 *lcd = dev_get_drvdata(&dsim_dev->dev);
+	struct s6e8aa0 *lcd = dev_get_drvdata(&dsim_dev->dev);
 
-	s6e8ax0_sleep_out(lcd);
+	s6e8aa0_sleep_out(lcd);
 	msleep(lcd->ddi_pd->power_on_delay);
 
-	s6e8ax0_regulator_enable(lcd);
-	s6e8ax0_set_sequence(dsim_dev);
+	s6e8aa0_regulator_enable(lcd);
+	s6e8aa0_set_sequence(dsim_dev);
 
 	return 0;
 }
 #else
-#define s6e8ax0_suspend		NULL
-#define s6e8ax0_resume		NULL
+#define s6e8aa0_suspend		NULL
+#define s6e8aa0_resume		NULL
 #endif
 
-static struct mipi_dsim_lcd_driver s6e8ax0_dsim_ddi_driver = {
+static struct mipi_dsim_lcd_driver s6e8aa0_dsim_ddi_driver = {
 	.name = "s6e8ax0",
 	.id = -1,
 
-	.power_on = s6e8ax0_power_on,
-	.set_sequence = s6e8ax0_set_sequence,
-	.probe = s6e8ax0_probe,
-	.suspend = s6e8ax0_suspend,
-	.resume = s6e8ax0_resume,
+	.power_on = s6e8aa0_power_on,
+	.set_sequence = s6e8aa0_set_sequence,
+	.probe = s6e8aa0_probe,
+	.suspend = s6e8aa0_suspend,
+	.resume = s6e8aa0_resume,
 };
 
-static int s6e8ax0_init(void)
+static int s6e8aa0_init(void)
 {
-	exynos_mipi_dsi_register_lcd_driver(&s6e8ax0_dsim_ddi_driver);
+	exynos_mipi_dsi_register_lcd_driver(&s6e8aa0_dsim_ddi_driver);
 
 	return 0;
 }
 
-static void s6e8ax0_exit(void)
+static void s6e8aa0_exit(void)
 {
 	return;
 }
 
-module_init(s6e8ax0_init);
-module_exit(s6e8ax0_exit);
+module_init(s6e8aa0_init);
+module_exit(s6e8aa0_exit);
 
-MODULE_AUTHOR("Donghwa Lee <dh09.lee@samsung.com>");
-MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
-MODULE_DESCRIPTION("MIPI-DSI based s6e8ax0 AMOLED LCD Panel Driver");
+MODULE_AUTHOR("Shaik Ameer Basha <shaik.ameer@samsung.com>");
+MODULE_DESCRIPTION("MIPI-DSI based s6e8aa0 AMOLED LCD Panel Driver");
 MODULE_LICENSE("GPL");

@@ -8,6 +8,7 @@ config OCTEON_ETHERNET
 	select MDIO_OCTEON
 	select NET_VENDOR_OCTEON
 	select OCTEON_ETHERNET_MEM
+	select OCTEON_ETHERNET_COMMON
 	help
 	  This driver supports the builtin ethernet ports on Cavium
 	  Inc.' products in the Octeon family. This driver supports the
@@ -19,8 +20,6 @@ config OCTEON_ETHERNET
 config OCTEON_ETHERNET_MEM
 	tristate
 	depends on CPU_CAVIUM_OCTEON
-
-
 
 config OCTEON_POW_ONLY_ETHERNET
 	tristate "POW based internal only ethernet driver"
@@ -37,10 +36,11 @@ config OCTEON_POW_ONLY_ETHERNET
 
 config OCTEON_MGMT_ETHERNET
 	tristate "Octeon Management port ethernet driver (CN5XXX, CN6XXX)"
-	depends on  CPU_CAVIUM_OCTEON
+	depends on  CAVIUM_OCTEON_SOC
 	select PHYLIB
 	select MDIO_OCTEON
 	select NET_VENDOR_OCTEON
+	select OCTEON_ETHERNET_COMMON
 	default y
 	---help---
 	  This option enables the ethernet driver for the management
@@ -49,3 +49,6 @@ config OCTEON_MGMT_ETHERNET
 
 config NET_VENDOR_OCTEON
 	bool
+
+config OCTEON_ETHERNET_COMMON
+	tristate

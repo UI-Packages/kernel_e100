@@ -3,6 +3,7 @@
  */
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
+#include <linux/msa.h>
 
 #include <asm/irq_vectors.h>
 #include <asm/apic.h>
@@ -17,13 +18,14 @@ static void default_threshold_interrupt(void)
 
 void (*mce_threshold_vector)(void) = default_threshold_interrupt;
 
-asmlinkage void smp_threshold_interrupt(void)
+asmlinkage void smp_threshold_interrupt(struct pt_regs *regs)
 {
 	irq_enter();
+	msa_start_irq(THRESHOLD_APIC_VECTOR);
 	exit_idle();
 	inc_irq_stat(irq_threshold_count);
 	mce_threshold_vector();
-	irq_exit();
+	msa_irq_exit(THRESHOLD_APIC_VECTOR, regs->cs != __KERNEL_CS);
 	/* Ack only at the end to avoid potential reentry */
 	ack_APIC_irq();
 }

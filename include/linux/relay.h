@@ -20,9 +20,6 @@
 #include <linux/poll.h>
 #include <linux/kref.h>
 
-/* Needs a _much_ better name... */
-#define FIX_SIZE(x) ((((x) - 1) & PAGE_MASK) + PAGE_SIZE)
-
 /*
  * Tracks changes to rchan/rchan_buf structs
  */
@@ -160,7 +157,7 @@ struct rchan_callbacks
 	 * The callback should return 0 if successful, negative if not.
 	 */
 	int (*remove_buf_file)(struct dentry *dentry);
-};
+} __no_const;
 
 /*
  * CONFIG_RELAY kernel API, kernel/relay.c

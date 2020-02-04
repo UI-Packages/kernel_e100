@@ -21,7 +21,9 @@
 #include <linux/init.h>
 #include <linux/smp.h>
 #include <linux/cpu.h>
+#include <linux/moduleparam.h>
 
+#include <asm/byteorder.h>
 #include <asm/octeon/octeon.h>
 
 union octeon_power_throttle_bits {
@@ -56,33 +58,54 @@ union octeon_power_throttle_bits {
 };
 
 /*
- * Given a CPU, calculate its PowThrottle register's L2C_COP0_MAP CSR
- * address.
+ * Boot-time power limit as percentage,
+ * set with bootparam: octeon_power_throttle.start=85
+ * Useful for situations where full-throttle boot would exceed power budget.
+ * Individual cores' power can be throttled up/down after boot.
  */
-static u64 octeon_power_throttle_csr_addr(int cpu)
-{
-	u64 csr_addr, reg_num, reg_reg, reg_sel;
-	int ppid = octeon_coreid_for_cpu(cpu);
+static int boot_powlim = 100;
+module_param_named(start, boot_powlim, int, 0444);
 
-	/* register 11 select 6 */
-	reg_reg = 11;
-	reg_sel = 6;
-	reg_num = (ppid << 8) + (reg_reg << 3) + reg_sel;
-	csr_addr = CVMX_L2C_COP0_MAPX(0) + ((reg_num) << 3);
-	return csr_addr;
+/* IPI calls to ask target CPU to access own registers ... */
+static inline void read_my_power_throttle(void *info)
+{
+	*(u64*)info = __read_64bit_c0_register($11, 6);
 }
 
-static void octeon_power_throttle_init_cpu(unsigned int cpu)
+static inline void write_my_power_throttle(void *info)
 {
-	u64 csr_addr;
-	union octeon_power_throttle_bits r;
+	__write_64bit_c0_register($11, 6, *(u64*)info);
+}
 
-	csr_addr = octeon_power_throttle_csr_addr(cpu);
-	r.raw = cvmx_read_csr(csr_addr);
-	r.s.minthr = 0;
-	r.s.maxthr = 0xff;
+/*
+ * Read/Write POW_THROTTLE.
+ */
+static void octeon_power_throttle_csr_op(int cpu,
+	union octeon_power_throttle_bits *r, bool write)
+{
+	smp_call_function_single(cpu, 
+		(write ? write_my_power_throttle
+		       : read_my_power_throttle),
+		r, 1);
+}
+
+/*
+ * Throttle given CPU's power (or all, if cpu < 0)
+ */
+static void octeon_power_throttle_init_cpu(int cpu)
+{
+	union octeon_power_throttle_bits r;
+	octeon_power_throttle_csr_op(cpu, &r, false);
+
+	r.s.ovrrd = 0;		/* MBZ */
+	r.s.distag = 0;		/* MBZ */
 	r.s.period = 2;		/* 256 cycles */
-	cvmx_write_csr(csr_addr, r.raw);
+	r.s.minthr = 0;
+	/* start at max allowed speed, subject to bootparams */
+	r.s.maxthr = 0xff;
+	r.s.powlim = 0xff * boot_powlim / 100;
+
+	octeon_power_throttle_csr_op(cpu, &r, true);
 }
 
 /*
@@ -90,18 +113,21 @@ static void octeon_power_throttle_init_cpu(unsigned int cpu)
  */
 static int octeon_power_throttle_get_powlim(unsigned int cpu)
 {
-	u64 t, rv, csr_addr;
+	int t, rv;
 	union octeon_power_throttle_bits r;
 
-	csr_addr = octeon_power_throttle_csr_addr(cpu);
-	r.raw = cvmx_read_csr(csr_addr);
+	octeon_power_throttle_csr_op(cpu, &r, false);
 	t = r.s.maxpow;
 	if (!OCTEON_IS_MODEL(OCTEON_CN63XX)) {
 		if (t < r.s.hrmpowadj)
 			return -EINVAL;
 		t -= r.s.hrmpowadj;
 	}
-	rv = (r.s.powlim * 100) / t;
+	if (t > 0)
+		rv = (r.s.powlim * 100) / t;
+	else
+		rv = 100;
+
 	return rv > 100 ? 100 : rv;
 }
 
@@ -110,22 +136,31 @@ static int octeon_power_throttle_get_powlim(unsigned int cpu)
  */
 static u64 octeon_power_throttle_set_powlim(int cpu, unsigned long percentage)
 {
-	u64 t, csr_addr;
+	u64 t;
+	u64 ret = 0;
 	union octeon_power_throttle_bits r;
 
 	if (percentage > 100)
 		return -EINVAL;
 
-	csr_addr = octeon_power_throttle_csr_addr(cpu);
-	r.raw = cvmx_read_csr(csr_addr);
-	t = r.s.maxpow;
-	if (!OCTEON_IS_MODEL(OCTEON_CN63XX)) {
-		if (t < r.s.hrmpowadj)
-			return -EINVAL;
-		t -= r.s.hrmpowadj;
+	get_online_cpus();
+	if (cpu_online(cpu)) {
+		octeon_power_throttle_csr_op(cpu, &r, false);
+		t = r.s.maxpow;
+		if (!OCTEON_IS_MODEL(OCTEON_CN63XX)) {
+			if (t < r.s.hrmpowadj)
+				ret = -EINVAL;
+			else
+				t -= r.s.hrmpowadj;
+		}
+		r.s.powlim = percentage > 0 ? percentage * t / 100 : 0;
+		r.s.ovrrd = 0;		/* MBZ */
+		r.s.distag = 0;		/* MBZ */
+		if (!ret)
+			octeon_power_throttle_csr_op(cpu, &r, true);
 	}
-	r.s.powlim = percentage > 0 ? percentage * t / 100 : 0;
-	cvmx_write_csr(csr_addr, r.raw);
+	put_online_cpus();
+
 	return 0;
 }
 
@@ -184,9 +219,6 @@ static struct attribute_group octeon_power_throttle_attr_group = {
 	.name	= "power_throttle"
 };
 
-/* Mutex protecting device creation against CPU hotplug: */
-static DEFINE_MUTEX(octeon_power_throttle_lock);
-
 static __cpuinit int octeon_power_throttle_add_dev(struct device *dev)
 {
 	return sysfs_create_group(&dev->kobj,
@@ -198,7 +230,8 @@ static __init int octeon_power_throttle_init(void)
 	unsigned int cpu = 0;
 	int err = 0;
 
-	if (!OCTEON_IS_OCTEON2())
+	if (!(current_cpu_type() == CPU_CAVIUM_OCTEON2 ||
+		current_cpu_type() == CPU_CAVIUM_OCTEON3))
 		return 0;
 
 	get_online_cpus();

@@ -45,7 +45,7 @@ struct fpa_pool {
 	int (*empty)(struct fpa_pool *p, int num);
 };
 
-static DEFINE_SPINLOCK(cvm_oct_pools_lock);
+static DEFINE_MUTEX(cvm_oct_pools_lock);
 /* Eight pools. */
 static struct fpa_pool cvm_oct_pools[] = {
 	{-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}
@@ -92,26 +92,24 @@ static int cvm_oct_fill_hw_skbuff(struct fpa_pool *pool, int elements)
  */
 static int cvm_oct_free_hw_skbuff(struct fpa_pool *pool, int elements)
 {
+	struct sk_buff *skb;
 	char *memory;
 	int pool_num = pool->pool;
 
-	do {
+	while (elements) {
 		memory = cvmx_fpa_alloc(pool_num);
-		if (memory) {
-			struct sk_buff *skb = *cvm_oct_packet_to_skb(memory);
-			elements--;
-			dev_kfree_skb(skb);
-		}
-	} while (memory);
+		if (!memory)
+			break;
+		skb = *cvm_oct_packet_to_skb(memory);
+		elements--;
+		dev_kfree_skb(skb);
+	}
 
-	if (elements < 0)
-		pr_err("Freeing of pool %u had too many skbuffs (%d)\n",
-		       pool_num, elements);
-	else if (elements > 0)
+	if (elements > 0)
 		pr_err("Freeing of pool %u is missing %d skbuffs\n",
 		       pool_num, elements);
 
-	return 0;
+	return elements;
 }
 
 /**
@@ -157,10 +155,7 @@ static int cvm_oct_free_hw_kmem(struct fpa_pool *pool, int elements)
 		kmem_cache_free(pool->kmem, fpa);
 	}
 
-	if (elements < 0)
-		pr_err("Freeing of pool %u had too many buffers (%d)\n",
-		       pool->pool, elements);
-	else if (elements > 0)
+	if (elements > 0)
 		pr_err("Warning: Freeing of pool %u is missing %d buffers\n",
 		       pool->pool, elements);
 	return elements;
@@ -198,12 +193,12 @@ void cvm_oct_mem_cleanup(void)
 {
 	int i;
 
-	spin_lock(&cvm_oct_pools_lock);
+	mutex_lock(&cvm_oct_pools_lock);
 
 	for (i = 0; i < ARRAY_SIZE(cvm_oct_pools); i++)
 		if (cvm_oct_pools[i].kmem)
 			kmem_cache_shrink(cvm_oct_pools[i].kmem);
-	spin_unlock(&cvm_oct_pools_lock);
+	mutex_unlock(&cvm_oct_pools_lock);
 }
 EXPORT_SYMBOL(cvm_oct_mem_cleanup);
 
@@ -222,7 +217,7 @@ int cvm_oct_alloc_fpa_pool(int pool, int size)
 	if (pool >= (int)ARRAY_SIZE(cvm_oct_pools) || size < 128)
 		return -EINVAL;
 
-	spin_lock(&cvm_oct_pools_lock);
+	mutex_lock(&cvm_oct_pools_lock);
 
 	if (pool >= 0) {
 		if (cvm_oct_pools[pool].pool != -1) {
@@ -288,7 +283,7 @@ int cvm_oct_alloc_fpa_pool(int pool, int size)
 	}
 	ret = pool;
 out:
-	spin_unlock(&cvm_oct_pools_lock);
+	mutex_unlock(&cvm_oct_pools_lock);
 	return ret;
 }
 EXPORT_SYMBOL(cvm_oct_alloc_fpa_pool);
@@ -308,7 +303,7 @@ int cvm_oct_release_fpa_pool(int pool)
 	if (pool < 0 || pool >= (int)ARRAY_SIZE(cvm_oct_pools))
 		return ret;
 
-	spin_lock(&cvm_oct_pools_lock);
+	mutex_lock(&cvm_oct_pools_lock);
 
 	if (cvm_oct_pools[pool].users <= 0) {
 		pr_err("Error: Unbalanced FPA pool allocation\n");
@@ -321,7 +316,7 @@ int cvm_oct_release_fpa_pool(int pool)
 
 	ret = 0;
 out:
-	spin_unlock(&cvm_oct_pools_lock);
+	mutex_unlock(&cvm_oct_pools_lock);
 	return ret;
 }
 EXPORT_SYMBOL(cvm_oct_release_fpa_pool);

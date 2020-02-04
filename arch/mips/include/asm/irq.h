@@ -33,7 +33,7 @@ struct irqaction;
 
 extern unsigned long irq_hwmask[];
 extern int setup_irq_smtc(unsigned int irq, struct irqaction * new,
-                          unsigned long hwmask);
+			  unsigned long hwmask);
 
 static inline void smtc_im_ack_irq(unsigned int irq)
 {
@@ -61,7 +61,7 @@ extern void smtc_forward_irq(struct irq_data *d);
  * if option is enabled.
  *
  * Up through Linux 2.6.22 (at least) cpumask operations are very
- * inefficient on MIPS.  Initial prototypes of SMTC IRQ affinity
+ * inefficient on MIPS.	 Initial prototypes of SMTC IRQ affinity
  * used a "fast path" per-IRQ-descriptor cache of affinity information
  * to reduce latency.  As there is a project afoot to optimize the
  * cpumask implementations, this version is optimistically assuming
@@ -130,7 +130,7 @@ static __always_inline bool msa_get_reg(void)
 	 * Remove any garbage that may be in regs (specially func
 	 * addresses) to avoid show_raw_backtrace() to report them
 	 */
-	memset((void *) &regs, 0, sizeof(regs));
+	memset(&regs, 0, sizeof(regs));
 #endif
 	__asm__ __volatile__(
 		".set push\n\t"
@@ -174,9 +174,10 @@ extern void free_irqno(unsigned int irq);
 
 /*
  * Before R2 the timer and performance counter interrupts were both fixed to
- * IE7.  Since R2 their number has to be read from the c0_intctl register.
+ * IE7.	 Since R2 their number has to be read from the c0_intctl register.
  */
 #define CP0_LEGACY_COMPARE_IRQ 7
+#define CP0_LEGACY_PERFCNT_IRQ 7
 
 extern int cp0_compare_irq;
 extern int cp0_compare_irq_shift;

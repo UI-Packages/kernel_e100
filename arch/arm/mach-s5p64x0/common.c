@@ -44,6 +44,7 @@
 #include <plat/sdhci.h>
 #include <plat/adc-core.h>
 #include <plat/fb-core.h>
+#include <plat/spi-core.h>
 #include <plat/gpio-cfg.h>
 #include <plat/regs-irqtype.h>
 #include <plat/regs-serial.h>
@@ -172,6 +173,8 @@ void __init s5p64x0_init_io(struct map_desc *mach_desc, int size)
 	s5p_init_cpu(S5P64X0_SYS_ID);
 
 	s3c_init_cpu(samsung_cpu_id, cpu_ids, ARRAY_SIZE(cpu_ids));
+	samsung_wdt_reset_init(S3C_VA_WATCHDOG);
+
 }
 
 void __init s5p6440_map_io(void)
@@ -179,13 +182,13 @@ void __init s5p6440_map_io(void)
 	/* initialize any device information early */
 	s3c_adc_setname("s3c64xx-adc");
 	s3c_fb_setname("s5p64x0-fb");
+	s3c64xx_spi_setname("s5p64x0-spi");
 
 	s5p64x0_default_sdhci0();
 	s5p64x0_default_sdhci1();
 	s5p6440_default_sdhci2();
 
 	iotable_init(s5p6440_iodesc, ARRAY_SIZE(s5p6440_iodesc));
-	init_consistent_dma_size(SZ_8M);
 }
 
 void __init s5p6450_map_io(void)
@@ -193,13 +196,13 @@ void __init s5p6450_map_io(void)
 	/* initialize any device information early */
 	s3c_adc_setname("s3c64xx-adc");
 	s3c_fb_setname("s5p64x0-fb");
+	s3c64xx_spi_setname("s5p64x0-spi");
 
 	s5p64x0_default_sdhci0();
 	s5p64x0_default_sdhci1();
 	s5p6450_default_sdhci2();
 
 	iotable_init(s5p6450_iodesc, ARRAY_SIZE(s5p6450_iodesc));
-	init_consistent_dma_size(SZ_8M);
 }
 
 /*
@@ -439,7 +442,7 @@ arch_initcall(s5p64x0_init_irq_eint);
 void s5p64x0_restart(char mode, const char *cmd)
 {
 	if (mode != 's')
-		arch_wdt_reset();
+		samsung_wdt_reset();
 
 	soft_restart(0);
 }

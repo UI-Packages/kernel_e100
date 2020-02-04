@@ -608,7 +608,6 @@ struct serial_struct32 {
 static int serial_struct_ioctl(unsigned fd, unsigned cmd,
 			struct serial_struct32 __user *ss32)
 {
-        typedef struct serial_struct SS;
         typedef struct serial_struct32 SS32;
         int err;
         struct serial_struct ss;
@@ -623,7 +622,7 @@ static int serial_struct_ioctl(unsigned fd, unsigned cmd,
 			return -EFAULT;
                 if (__get_user(udata, &ss32->iomem_base))
 			return -EFAULT;
-                ss.iomem_base = compat_ptr(udata);
+                ss.iomem_base = (unsigned char __force_kernel *)compat_ptr(udata);
                 if (__get_user(ss.iomem_reg_shift, &ss32->iomem_reg_shift) ||
 		    __get_user(ss.port_high, &ss32->port_high))
 			return -EFAULT;
@@ -704,8 +703,8 @@ static int do_i2c_rdwr_ioctl(unsigned int fd, unsigned int cmd,
 	for (i = 0; i < nmsgs; i++) {
 		if (copy_in_user(&tmsgs[i].addr, &umsgs[i].addr, 3*sizeof(u16)))
 			return -EFAULT;
-		if (get_user(datap, &umsgs[i].buf) ||
-		    put_user(compat_ptr(datap), &tmsgs[i].buf))
+		if (get_user(datap, (u8 __user * __user *)&umsgs[i].buf) ||
+		    put_user(compat_ptr(datap), (u8 __user * __user *)&tmsgs[i].buf))
 			return -EFAULT;
 	}
 	return sys_ioctl(fd, cmd, (unsigned long)tdata);
@@ -798,7 +797,7 @@ static int compat_ioctl_preallocate(struct file *file,
 	    copy_in_user(&p->l_len,	&p32->l_len,	sizeof(s64)) ||
 	    copy_in_user(&p->l_sysid,	&p32->l_sysid,	sizeof(s32)) ||
 	    copy_in_user(&p->l_pid,	&p32->l_pid,	sizeof(u32)) ||
-	    copy_in_user(&p->l_pad,	&p32->l_pad,	4*sizeof(u32)))
+	    copy_in_user(p->l_pad,	&p32->l_pad,	4*sizeof(u32)))
 		return -EFAULT;
 
 	return ioctl_preallocate(file, p);
@@ -844,6 +843,9 @@ COMPATIBLE_IOCTL(TIOCGDEV)
 COMPATIBLE_IOCTL(TIOCCBRK)
 COMPATIBLE_IOCTL(TIOCGSID)
 COMPATIBLE_IOCTL(TIOCGICOUNT)
+COMPATIBLE_IOCTL(TIOCGPKT)
+COMPATIBLE_IOCTL(TIOCGPTLCK)
+COMPATIBLE_IOCTL(TIOCGEXCL)
 /* Little t */
 COMPATIBLE_IOCTL(TIOCGETD)
 COMPATIBLE_IOCTL(TIOCSETD)
@@ -868,6 +870,12 @@ COMPATIBLE_IOCTL(TIOCGPTN)
 COMPATIBLE_IOCTL(TIOCSPTLCK)
 COMPATIBLE_IOCTL(TIOCSERGETLSR)
 COMPATIBLE_IOCTL(TIOCSIG)
+#ifdef TIOCSRS485
+COMPATIBLE_IOCTL(TIOCSRS485)
+#endif
+#ifdef TIOCGRS485
+COMPATIBLE_IOCTL(TIOCGRS485)
+#endif
 #ifdef TCGETS2
 COMPATIBLE_IOCTL(TCGETS2)
 COMPATIBLE_IOCTL(TCSETS2)
@@ -899,6 +907,8 @@ COMPATIBLE_IOCTL(KDGKBSENT)
 COMPATIBLE_IOCTL(KDSKBSENT)
 COMPATIBLE_IOCTL(KDGKBDIACR)
 COMPATIBLE_IOCTL(KDSKBDIACR)
+COMPATIBLE_IOCTL(KDGKBDIACRUC)
+COMPATIBLE_IOCTL(KDSKBDIACRUC)
 COMPATIBLE_IOCTL(KDKBDREP)
 COMPATIBLE_IOCTL(KDGKBLED)
 COMPATIBLE_IOCTL(KDGETLED)
@@ -1533,16 +1543,13 @@ static int compat_ioctl_check_table(unsigned int xcmd)
 asmlinkage long compat_sys_ioctl(unsigned int fd, unsigned int cmd,
 				unsigned long arg)
 {
-	struct file *filp;
+	struct fd f = fdget(fd);
 	int error = -EBADF;
-	int fput_needed;
-
-	filp = fget_light(fd, &fput_needed);
-	if (!filp)
+	if (!f.file)
 		goto out;
 
 	/* RED-PEN how should LSM module know it's handling 32bit? */
-	error = security_file_ioctl(filp, cmd, arg);
+	error = security_file_ioctl(f.file, cmd, arg);
 	if (error)
 		goto out_fput;
 
@@ -1562,30 +1569,30 @@ asmlinkage long compat_sys_ioctl(unsigned int fd, unsigned int cmd,
 #if defined(CONFIG_IA64) || defined(CONFIG_X86_64)
 	case FS_IOC_RESVSP_32:
 	case FS_IOC_RESVSP64_32:
-		error = compat_ioctl_preallocate(filp, compat_ptr(arg));
+		error = compat_ioctl_preallocate(f.file, compat_ptr(arg));
 		goto out_fput;
 #else
 	case FS_IOC_RESVSP:
 	case FS_IOC_RESVSP64:
-		error = ioctl_preallocate(filp, compat_ptr(arg));
+		error = ioctl_preallocate(f.file, compat_ptr(arg));
 		goto out_fput;
 #endif
 
 	case FIBMAP:
 	case FIGETBSZ:
 	case FIONREAD:
-		if (S_ISREG(filp->f_path.dentry->d_inode->i_mode))
+		if (S_ISREG(file_inode(f.file)->i_mode))
 			break;
 		/*FALL THROUGH*/
 
 	default:
-		if (filp->f_op && filp->f_op->compat_ioctl) {
-			error = filp->f_op->compat_ioctl(filp, cmd, arg);
+		if (f.file->f_op && f.file->f_op->compat_ioctl) {
+			error = f.file->f_op->compat_ioctl(f.file, cmd, arg);
 			if (error != -ENOIOCTLCMD)
 				goto out_fput;
 		}
 
-		if (!filp->f_op || !filp->f_op->unlocked_ioctl)
+		if (!f.file->f_op || !f.file->f_op->unlocked_ioctl)
 			goto do_ioctl;
 		break;
 	}
@@ -1593,7 +1600,7 @@ asmlinkage long compat_sys_ioctl(unsigned int fd, unsigned int cmd,
 	if (compat_ioctl_check_table(XFORM(cmd)))
 		goto found_handler;
 
-	error = do_ioctl_trans(fd, cmd, arg, filp);
+	error = do_ioctl_trans(fd, cmd, arg, f.file);
 	if (error == -ENOIOCTLCMD)
 		error = -ENOTTY;
 
@@ -1602,9 +1609,9 @@ asmlinkage long compat_sys_ioctl(unsigned int fd, unsigned int cmd,
  found_handler:
 	arg = (unsigned long)compat_ptr(arg);
  do_ioctl:
-	error = do_vfs_ioctl(filp, fd, cmd, arg);
+	error = do_vfs_ioctl(f.file, fd, cmd, arg);
  out_fput:
-	fput_light(filp, fput_needed);
+	fdput(f);
  out:
 	return error;
 }
@@ -1612,8 +1619,8 @@ asmlinkage long compat_sys_ioctl(unsigned int fd, unsigned int cmd,
 static int __init init_sys32_ioctl_cmp(const void *p, const void *q)
 {
 	unsigned int a, b;
-	a = *(unsigned int *)p;
-	b = *(unsigned int *)q;
+	a = *(const unsigned int *)p;
+	b = *(const unsigned int *)q;
 	if (a > b)
 		return 1;
 	if (a < b)

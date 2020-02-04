@@ -11,12 +11,15 @@
 
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
+#include <linux/kcore.h>
 #include <linux/user.h>
 #include <linux/capability.h>
 #include <linux/elf.h>
 #include <linux/elfcore.h>
+#include <linux/notifier.h>
 #include <linux/vmalloc.h>
 #include <linux/highmem.h>
+#include <linux/printk.h>
 #include <linux/bootmem.h>
 #include <linux/init.h>
 #include <linux/slab.h>
@@ -26,6 +29,7 @@
 #include <linux/ioport.h>
 #include <linux/memory.h>
 #include <asm/sections.h>
+#include "internal.h"
 
 #define CORE_STR "CORE"
 
@@ -249,7 +253,7 @@ static int kcore_update_ram(void)
 	/* Not inialized....update now */
 	/* find out "max pfn" */
 	end_pfn = 0;
-	for_each_node_state(nid, N_HIGH_MEMORY) {
+	for_each_node_state(nid, N_MEMORY) {
 		unsigned long node_end;
 		node_end  = NODE_DATA(nid)->node_start_pfn +
 			NODE_DATA(nid)->node_spanned_pages;
@@ -480,9 +484,10 @@ read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 	 * the addresses in the elf_phdr on our list.
 	 */
 	start = kc_offset_to_vaddr(*fpos - elf_buflen);
-	if ((tsz = (PAGE_SIZE - (start & ~PAGE_MASK))) > buflen)
+	tsz = PAGE_SIZE - (start & ~PAGE_MASK);
+	if (tsz > buflen)
 		tsz = buflen;
-		
+
 	while (buflen) {
 		struct kcore_list *m;
 
@@ -511,20 +516,23 @@ read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 			kfree(elf_buf);
 		} else {
 			if (kern_addr_valid(start)) {
-				unsigned long n;
+				char *elf_buf;
+				mm_segment_t oldfs;
 
-				n = copy_to_user(buffer, (char *)start, tsz);
-				/*
-				 * We cannot distinguish between fault on source
-				 * and fault on destination. When this happens
-				 * we clear too and hope it will trigger the
-				 * EFAULT again.
-				 */
-				if (n) { 
-					if (clear_user(buffer + tsz - n,
-								n))
+				elf_buf = kmalloc(tsz, GFP_KERNEL);
+				if (!elf_buf)
+					return -ENOMEM;
+				oldfs = get_fs();
+				set_fs(KERNEL_DS);
+				if (!__copy_from_user(elf_buf, (const void __user *)start, tsz)) {
+					set_fs(oldfs);
+					if (copy_to_user(buffer, elf_buf, tsz)) {
+						kfree(elf_buf);
 						return -EFAULT;
+					}
 				}
+				set_fs(oldfs);
+				kfree(elf_buf);
 			} else {
 				if (clear_user(buffer, tsz))
 					return -EFAULT;
@@ -563,7 +571,6 @@ static const struct file_operations proc_kcore_operations = {
 	.llseek		= default_llseek,
 };
 
-#ifdef CONFIG_MEMORY_HOTPLUG
 /* just remember that we have to update kcore */
 static int __meminit kcore_callback(struct notifier_block *self,
 				    unsigned long action, void *arg)
@@ -577,8 +584,11 @@ static int __meminit kcore_callback(struct notifier_block *self,
 	}
 	return NOTIFY_OK;
 }
-#endif
 
+static struct notifier_block kcore_callback_nb __meminitdata = {
+	.notifier_call = kcore_callback,
+	.priority = 0,
+};
 
 static struct kcore_list kcore_vmalloc;
 
@@ -619,7 +629,7 @@ static int __init proc_kcore_init(void)
 	proc_root_kcore = proc_create("kcore", S_IRUSR, NULL,
 				      &proc_kcore_operations);
 	if (!proc_root_kcore) {
-		printk(KERN_ERR "couldn't create /proc/kcore\n");
+		pr_err("couldn't create /proc/kcore\n");
 		return 0; /* Always returns 0. */
 	}
 	/* Store text area if it's special */
@@ -630,7 +640,7 @@ static int __init proc_kcore_init(void)
 	add_modules_range();
 	/* Store direct-map area from physical memory map */
 	kcore_update_ram();
-	hotplug_memory_notifier(kcore_callback, 0);
+	register_hotmemory_notifier(&kcore_callback_nb);
 
 	return 0;
 }

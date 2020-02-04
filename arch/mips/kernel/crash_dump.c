@@ -2,6 +2,9 @@
 #include <linux/bootmem.h>
 #include <linux/crash_dump.h>
 #include <asm/uaccess.h>
+#include <linux/slab.h>
+#include <linux/errno.h>
+#include <linux/io.h>
 
 static int __init parse_savemaxmem(char *p)
 {
@@ -11,7 +14,6 @@ static int __init parse_savemaxmem(char *p)
 	return 1;
 }
 __setup("savemaxmem=", parse_savemaxmem);
-
 
 static void *kdump_buf_page;
 
@@ -40,19 +42,20 @@ ssize_t copy_oldmem_page(unsigned long pfn, char *buf,
 	if (!csize)
 		return 0;
 
-	vaddr = kmap_atomic_pfn(pfn);
+	vaddr = ioremap(pfn << PAGE_SHIFT, PAGE_SIZE);
 
 	if (!userbuf) {
 		memcpy(buf, (vaddr + offset), csize);
-		kunmap_atomic(vaddr);
+		iounmap(vaddr);
 	} else {
 		if (!kdump_buf_page) {
 			pr_warning("Kdump: Kdump buffer page not allocated\n");
 
 			return -EFAULT;
 		}
+
 		copy_page(kdump_buf_page, vaddr);
-		kunmap_atomic(vaddr);
+		iounmap(vaddr);
 		if (copy_to_user(buf, (kdump_buf_page + offset), csize))
 			return -EFAULT;
 	}

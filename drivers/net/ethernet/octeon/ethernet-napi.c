@@ -112,7 +112,7 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 			 * around a little to see if another packet
 			 * comes in.
 			 */
-			if (no_work_count < 2)
+			if (no_work_count >= 2)
 				break;
 			no_work_count++;
 			ndelay(500);
@@ -148,6 +148,9 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 			    cores_in_use < core_state.baseline_cores)
 				cvm_oct_enable_one_cpu();
 		}
+#ifndef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+					rx_count++;
+#endif
 
 		/* If WORD2[SOFTWARE] then this WQE is a complete for
 		 * a TX packet.
@@ -158,7 +161,7 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 
 			skb = (struct sk_buff *)packet_ptr.u64;
 			priv = netdev_priv(skb->dev);
-			if (!netif_running(skb->dev))
+			if (netif_queue_stopped(skb->dev))
 				netif_wake_queue(skb->dev);
 			if (unlikely((skb_shinfo(skb)->tx_flags | SKBTX_IN_PROGRESS) != 0 &&
 				     priv->tx_timestamp_hw)) {
@@ -213,9 +216,9 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 		}
 
 		if (likely(priv) && priv->rx_strip_fcs)
-			packet_len = work->word1.len - 4;
-		else
-			packet_len = work->word1.len;
+			work->word1.len -= 4;
+
+		packet_len = work->word1.len;
 		/* We can only use the zero copy path if skbuffs are
 		 * in the FPA pool and the packet fits in a single
 		 * buffer.
@@ -338,6 +341,7 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 		if (!CVM_OCT_NAPI_HAS_CN68XX_SSO && unlikely(priv == NULL)) {
 			const struct cvmx_srio_rx_message_header *rx_header =
 				(const struct cvmx_srio_rx_message_header *)skb->data;
+			*(u64 *)rx_header = be64_to_cpu(*(u64 *)rx_header);
 			priv = cvm_oct_by_srio_mbox[(port - 40) >> 1][rx_header->word0.s.mbox];
 		}
 
@@ -346,8 +350,8 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 			if (unlikely(priv->imode == CVMX_HELPER_INTERFACE_MODE_SRIO)) {
 				__skb_pull(skb, sizeof(struct cvmx_srio_rx_message_header));
 
-				atomic64_add(1, (atomic64_t *)&priv->netdev->stats.rx_packets);
-				atomic64_add(skb->len, (atomic64_t *)&priv->netdev->stats.rx_bytes);
+				atomic64_add_unchecked(1, (atomic64_unchecked_t *)&priv->netdev->stats.rx_packets);
+				atomic64_add_unchecked(skb->len, (atomic64_unchecked_t *)&priv->netdev->stats.rx_bytes);
 			}
 #endif
 			/* Only accept packets for devices that are
@@ -378,23 +382,18 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 
 				/* Increment RX stats for virtual ports */
 				if (port >= CVMX_PIP_NUM_INPUT_PORTS) {
-					atomic64_add(1, (atomic64_t *)&priv->netdev->stats.rx_packets);
-					atomic64_add(skb->len, (atomic64_t *)&priv->netdev->stats.rx_bytes);
+					atomic64_add_unchecked(1, (atomic64_unchecked_t *)&priv->netdev->stats.rx_packets);
+					atomic64_add_unchecked(skb->len, (atomic64_unchecked_t *)&priv->netdev->stats.rx_bytes);
 				}
-
-				rx_count++;
-				callback_result = CVM_OCT_PASS;
-				if (priv->intercept_cb) 
-                                       callback_result = priv->intercept_cb(priv->netdev, work, skb);
-				if (priv->intercept_cb2 && (callback_result == CVM_OCT_PASS))
-					callback_result = priv->intercept_cb2(priv->netdev, work, skb);
-				switch (callback_result) {
+				if (priv->intercept_cb) {
+					callback_result = priv->intercept_cb(priv->netdev, work, skb);
+					switch (callback_result) {
 					case CVM_OCT_PASS:
 						netif_receive_skb(skb);
 						break;
 					case CVM_OCT_DROP:
 						dev_kfree_skb_any(skb);
-						atomic64_add(1, (atomic64_t *)&priv->netdev->stats.rx_dropped);
+						atomic64_add_unchecked(1, (atomic64_unchecked_t *)&priv->netdev->stats.rx_dropped);
 						break;
 					case CVM_OCT_TAKE_OWNERSHIP_WORK:
 						/*
@@ -416,10 +415,20 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 					case CVM_OCT_TAKE_OWNERSHIP_SKB:
 						/* Interceptor took our packet */
 						break;
+					}
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+					rx_count++;
+#endif
+				} else {
+					netif_receive_skb(skb);
+					callback_result = CVM_OCT_PASS;
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+					rx_count++;
+#endif
 				}
 			} else {
 				/* Drop any packet received for a device that isn't up */
-				atomic64_add(1, (atomic64_t *)&priv->netdev->stats.rx_dropped);
+				atomic64_add_unchecked(1, (atomic64_unchecked_t *)&priv->netdev->stats.rx_dropped);
 				dev_kfree_skb_any(skb);
 				callback_result = CVM_OCT_DROP;
 

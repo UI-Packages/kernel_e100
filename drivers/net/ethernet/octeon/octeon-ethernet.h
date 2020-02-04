@@ -33,6 +33,8 @@
 
 #include <linux/of.h>
 
+#include "octeon_common.h"
+
 #include <asm/octeon/cvmx-helper.h>
 #include <asm/octeon/cvmx-fau.h>
 #include <asm/octeon/octeon-ethernet-user.h>
@@ -61,15 +63,16 @@ struct octeon_ethernet {
 	int imode;
 
 	unsigned int rx_strip_fcs:1;
-	unsigned int has_gmx_regs:1;
 	unsigned int tx_timestamp_hw:1;
 	unsigned int rx_timestamp_hw:1;
 	unsigned int tx_multiple_queues:1;
 	unsigned int tx_lockless:1;
 
+	/* Base address for accessing GMX registers */
+	u64 gmx_base;
+
 	/* Optional intecept callback defined above */
 	cvm_oct_callback_t      intercept_cb;
-	cvm_oct_callback_t      intercept_cb2;
 
 	/* Number of elements in tx_queue below */
 	int                     num_tx_queues;
@@ -127,7 +130,8 @@ int cvm_oct_xaui_open(struct net_device *dev);
 int cvm_oct_xaui_stop(struct net_device *dev);
 
 int cvm_oct_srio_init(struct net_device *dev);
-void cvm_oct_srio_uninit(struct net_device *dev);
+int cvm_oct_srio_open(struct net_device *dev);
+int cvm_oct_srio_stop(struct net_device *dev);
 int cvm_oct_xmit_srio(struct sk_buff *skb, struct net_device *dev);
 int cvm_oct_srio_set_mac_address(struct net_device *dev, void *addr);
 int cvm_oct_srio_change_mtu(struct net_device *dev, int new_mtu);
@@ -160,6 +164,7 @@ void cvm_oct_mem_cleanup(void);
 extern const struct ethtool_ops cvm_oct_ethtool_ops;
 
 extern int rx_cpu_factor;
+extern int octeon_recycle_tx;
 extern int packet_pool;
 extern int wqe_pool;
 extern int output_pool;

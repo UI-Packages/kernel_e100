@@ -16,7 +16,7 @@
 #ifndef CONFIG_MMU
 
 #include <asm-generic/4level-fixup.h>
-#include "pgtable-nommu.h"
+#include <asm/pgtable-nommu.h>
 
 #else
 
@@ -29,6 +29,9 @@
 #else
 #include <asm/pgtable-2level.h>
 #endif
+
+#define ktla_ktva(addr)		(addr)
+#define ktva_ktla(addr)		(addr)
 
 /*
  * Just any arbitrary offset to the start of the vmalloc VM area: the
@@ -45,6 +48,9 @@
 #define LIBRARY_TEXT_START	0x0c000000
 
 #ifndef __ASSEMBLY__
+extern pteval_t __supported_pte_mask;
+extern pmdval_t __supported_pmd_mask;
+
 extern void __pte_error(const char *file, int line, pte_t);
 extern void __pmd_error(const char *file, int line, pmd_t);
 extern void __pgd_error(const char *file, int line, pgd_t);
@@ -52,6 +58,48 @@ extern void __pgd_error(const char *file, int line, pgd_t);
 #define pte_ERROR(pte)		__pte_error(__FILE__, __LINE__, pte)
 #define pmd_ERROR(pmd)		__pmd_error(__FILE__, __LINE__, pmd)
 #define pgd_ERROR(pgd)		__pgd_error(__FILE__, __LINE__, pgd)
+
+#define  __HAVE_ARCH_PAX_OPEN_KERNEL
+#define  __HAVE_ARCH_PAX_CLOSE_KERNEL
+
+#if defined(CONFIG_PAX_KERNEXEC) || defined(CONFIG_PAX_MEMORY_UDEREF)
+#include <asm/domain.h>
+#include <linux/thread_info.h>
+#include <linux/preempt.h>
+
+static inline int test_domain(int domain, int domaintype)
+{
+	return ((current_thread_info()->cpu_domain) & domain_val(domain, 3)) == domain_val(domain, domaintype);
+}
+#endif
+
+#ifdef CONFIG_PAX_KERNEXEC
+static inline unsigned long pax_open_kernel(void) {
+#ifdef CONFIG_ARM_LPAE
+	/* TODO */
+#else
+	preempt_disable();
+	BUG_ON(test_domain(DOMAIN_KERNEL, DOMAIN_KERNEXEC));
+	modify_domain(DOMAIN_KERNEL, DOMAIN_KERNEXEC);
+#endif
+	return 0;
+}
+
+static inline unsigned long pax_close_kernel(void) {
+#ifdef CONFIG_ARM_LPAE
+	/* TODO */
+#else
+	BUG_ON(test_domain(DOMAIN_KERNEL, DOMAIN_MANAGER));
+	/* DOMAIN_MANAGER = "client" under KERNEXEC */
+	modify_domain(DOMAIN_KERNEL, DOMAIN_MANAGER);
+	preempt_enable_no_resched();
+#endif
+	return 0;
+}
+#else
+static inline unsigned long pax_open_kernel(void) { return 0; }
+static inline unsigned long pax_close_kernel(void) { return 0; }
+#endif
 
 /*
  * This is the lowest virtual address we can permit any user space
@@ -61,19 +109,31 @@ extern void __pgd_error(const char *file, int line, pgd_t);
 #define FIRST_USER_ADDRESS	PAGE_SIZE
 
 /*
+ * Use TASK_SIZE as the ceiling argument for free_pgtables() and
+ * free_pgd_range() to avoid freeing the modules pmd when LPAE is enabled (pmd
+ * page shared between user and kernel).
+ */
+#ifdef CONFIG_ARM_LPAE
+#define USER_PGTABLES_CEILING	TASK_SIZE
+#endif
+
+/*
  * The pgprot_* and protection_map entries will be fixed up in runtime
  * to include the cachable and bufferable bits based on memory policy,
- * as well as any architecture dependent bits like global/ASID and SMP
- * shared mapping bits.
+ * as well as any architecture dependent bits like global/ASID, PXN,
+ * and SMP shared mapping bits.
  */
 #define _L_PTE_DEFAULT	L_PTE_PRESENT | L_PTE_YOUNG
 
 extern pgprot_t		pgprot_user;
 extern pgprot_t		pgprot_kernel;
+extern pgprot_t		pgprot_hyp_device;
+extern pgprot_t		pgprot_s2;
+extern pgprot_t		pgprot_s2_device;
 
 #define _MOD_PROT(p, b)	__pgprot(pgprot_val(p) | (b))
 
-#define PAGE_NONE		_MOD_PROT(pgprot_user, L_PTE_XN | L_PTE_RDONLY)
+#define PAGE_NONE		_MOD_PROT(pgprot_user, L_PTE_XN | L_PTE_RDONLY | L_PTE_NONE)
 #define PAGE_SHARED		_MOD_PROT(pgprot_user, L_PTE_USER | L_PTE_XN)
 #define PAGE_SHARED_EXEC	_MOD_PROT(pgprot_user, L_PTE_USER)
 #define PAGE_COPY		_MOD_PROT(pgprot_user, L_PTE_USER | L_PTE_RDONLY | L_PTE_XN)
@@ -82,8 +142,12 @@ extern pgprot_t		pgprot_kernel;
 #define PAGE_READONLY_EXEC	_MOD_PROT(pgprot_user, L_PTE_USER | L_PTE_RDONLY)
 #define PAGE_KERNEL		_MOD_PROT(pgprot_kernel, L_PTE_XN)
 #define PAGE_KERNEL_EXEC	pgprot_kernel
+#define PAGE_HYP		_MOD_PROT(pgprot_kernel, L_PTE_HYP)
+#define PAGE_HYP_DEVICE		_MOD_PROT(pgprot_hyp_device, L_PTE_HYP)
+#define PAGE_S2			_MOD_PROT(pgprot_s2, L_PTE_S2_RDONLY)
+#define PAGE_S2_DEVICE		_MOD_PROT(pgprot_s2_device, L_PTE_USER | L_PTE_S2_RDONLY)
 
-#define __PAGE_NONE		__pgprot(_L_PTE_DEFAULT | L_PTE_RDONLY | L_PTE_XN)
+#define __PAGE_NONE		__pgprot(_L_PTE_DEFAULT | L_PTE_RDONLY | L_PTE_XN | L_PTE_NONE)
 #define __PAGE_SHARED		__pgprot(_L_PTE_DEFAULT | L_PTE_USER | L_PTE_XN)
 #define __PAGE_SHARED_EXEC	__pgprot(_L_PTE_DEFAULT | L_PTE_USER)
 #define __PAGE_COPY		__pgprot(_L_PTE_DEFAULT | L_PTE_USER | L_PTE_RDONLY | L_PTE_XN)
@@ -203,9 +267,7 @@ static inline pte_t *pmd_page_vaddr(pmd_t pmd)
 #define pte_exec(pte)		(!(pte_val(pte) & L_PTE_XN))
 #define pte_special(pte)	(0)
 
-#define pte_present_user(pte) \
-	((pte_val(pte) & (L_PTE_PRESENT | L_PTE_USER)) == \
-	 (L_PTE_PRESENT | L_PTE_USER))
+#define pte_present_user(pte)  (pte_present(pte) && (pte_val(pte) & L_PTE_USER))
 
 #if __LINUX_ARM_ARCH__ < 6
 static inline void __sync_icache_dcache(pte_t pteval)
@@ -242,7 +304,8 @@ static inline pte_t pte_mkspecial(pte_t pte) { return pte; }
 
 static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
-	const pteval_t mask = L_PTE_XN | L_PTE_RDONLY | L_PTE_USER;
+	const pteval_t mask = L_PTE_XN | L_PTE_RDONLY | L_PTE_USER |
+		L_PTE_NONE | L_PTE_VALID | __supported_pte_mask;
 	pte_val(pte) = (pte_val(pte) & ~mask) | (pgprot_val(newprot) & mask);
 	return pte;
 }

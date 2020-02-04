@@ -33,6 +33,13 @@
  * can be successfully looped back */
 #define USE_PHY_WORK_AROUND
 
+/* The Thunder Simulator from Cavium implements the DMA capability for this
+ * device. The simulator has a custom Chip Revision.
+ */
+#ifdef CONFIG_ARCH_THUNDER_EMULATOR
+#define ID_CAVIUM_DMA		(1u << 15)
+#endif
+
 #if USE_DEBUG >= 1
 #define SMSC_WARN(pdata, nlevel, fmt, args...)			\
 	netif_warn(pdata, nlevel, (pdata)->dev,			\

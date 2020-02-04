@@ -62,7 +62,6 @@ void __show_regs(struct pt_regs *regs, int all)
 	unsigned int fsindex, gsindex;
 	unsigned int ds, cs, es;
 
-	show_regs_common();
 	printk(KERN_DEFAULT "RIP: %04lx:[<%016lx>] ", regs->cs & 0xffff, regs->ip);
 	printk_address(regs->ip, 1);
 	printk(KERN_DEFAULT "RSP: %04lx:%016lx  EFLAGS: %08lx\n", regs->ss,
@@ -117,7 +116,7 @@ void release_thread(struct task_struct *dead_task)
 {
 	if (dead_task->mm) {
 		if (dead_task->mm->context.size) {
-			pr_warn("WARNING: dead process %8s still has LDT? <%p/%d>\n",
+			pr_warn("WARNING: dead process %s still has LDT? <%p/%d>\n",
 				dead_task->comm,
 				dead_task->mm->context.ldt,
 				dead_task->mm->context.size);
@@ -145,39 +144,19 @@ static inline u32 read_32bit_tls(struct task_struct *t, int tls)
 	return get_desc_base(&t->thread.tls_array[tls]);
 }
 
-/*
- * This gets called before we allocate a new thread and copy
- * the current task into it.
- */
-void prepare_to_copy(struct task_struct *tsk)
-{
-	unlazy_fpu(tsk);
-}
-
 int copy_thread(unsigned long clone_flags, unsigned long sp,
-		unsigned long unused,
-	struct task_struct *p, struct pt_regs *regs)
+		unsigned long arg, struct task_struct *p)
 {
 	int err;
 	struct pt_regs *childregs;
 	struct task_struct *me = current;
 
-	childregs = ((struct pt_regs *)
-			(THREAD_SIZE + task_stack_page(p))) - 1;
-	*childregs = *regs;
-
-	childregs->ax = 0;
-	if (user_mode(regs))
-		childregs->sp = sp;
-	else
-		childregs->sp = (unsigned long)childregs;
-
+	p->thread.sp0 = (unsigned long)task_stack_page(p) + THREAD_SIZE - 16;
+	childregs = task_pt_regs(p);
 	p->thread.sp = (unsigned long) childregs;
-	p->thread.sp0 = (unsigned long) (childregs+1);
 	p->thread.usersp = me->thread.usersp;
-
+	p->tinfo.lowest_stack = (unsigned long)task_stack_page(p);
 	set_tsk_thread_flag(p, TIF_FORK);
-
 	p->fpu_counter = 0;
 	p->thread.io_bitmap_ptr = NULL;
 
@@ -187,6 +166,27 @@ int copy_thread(unsigned long clone_flags, unsigned long sp,
 	p->thread.fs = p->thread.fsindex ? 0 : me->thread.fs;
 	savesegment(es, p->thread.es);
 	savesegment(ds, p->thread.ds);
+	savesegment(ss, p->thread.ss);
+	BUG_ON(p->thread.ss == __UDEREF_KERNEL_DS);
+	memset(p->thread.ptrace_bps, 0, sizeof(p->thread.ptrace_bps));
+
+	if (unlikely(p->flags & PF_KTHREAD)) {
+		/* kernel thread */
+		memset(childregs, 0, sizeof(struct pt_regs));
+		childregs->sp = (unsigned long)childregs;
+		childregs->ss = __KERNEL_DS;
+		childregs->bx = sp; /* function */
+		childregs->bp = arg;
+		childregs->orig_ax = -1;
+		childregs->cs = __KERNEL_CS | get_kernel_rpl();
+		childregs->flags = X86_EFLAGS_IF | X86_EFLAGS_BIT1;
+		return 0;
+	}
+	*childregs = *current_pt_regs();
+
+	childregs->ax = 0;
+	if (sp)
+		childregs->sp = sp;
 
 	err = -ENOMEM;
 	memset(p->thread.ptrace_bps, 0, sizeof(p->thread.ptrace_bps));
@@ -241,10 +241,6 @@ start_thread_common(struct pt_regs *regs, unsigned long new_ip,
 	regs->cs		= _cs;
 	regs->ss		= _ss;
 	regs->flags		= X86_EFLAGS_IF;
-	/*
-	 * Free the old FP and other extended state
-	 */
-	free_thread_xstate(current);
 }
 
 void
@@ -280,7 +276,7 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	struct thread_struct *prev = &prev_p->thread;
 	struct thread_struct *next = &next_p->thread;
 	int cpu = smp_processor_id();
-	struct tss_struct *tss = &per_cpu(init_tss, cpu);
+	struct tss_struct *tss = init_tss + cpu;
 	unsigned fsindex, gsindex;
 	fpu_switch_t fpu;
 
@@ -303,6 +299,9 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	if (unlikely(next->ds | prev->ds))
 		loadsegment(ds, next->ds);
 
+	savesegment(ss, prev->ss);
+	if (unlikely(next->ss != prev->ss))
+		loadsegment(ss, next->ss);
 
 	/* We must save %fs and %gs before load_TLS() because
 	 * %fs and %gs may be cleared by load_TLS().
@@ -362,10 +361,9 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	prev->usersp = this_cpu_read(old_rsp);
 	this_cpu_write(old_rsp, next->usersp);
 	this_cpu_write(current_task, next_p);
+	this_cpu_write(current_tinfo, &next_p->tinfo);
 
-	this_cpu_write(kernel_stack,
-		  (unsigned long)task_stack_page(next_p) +
-		  THREAD_SIZE - KERNEL_STACK_OFFSET);
+	this_cpu_write(kernel_stack, next->sp0);
 
 	/*
 	 * Now maybe reload the debug registers and handle I/O bitmaps
@@ -434,12 +432,11 @@ unsigned long get_wchan(struct task_struct *p)
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
 	stack = (unsigned long)task_stack_page(p);
-	if (p->thread.sp < stack || p->thread.sp >= stack+THREAD_SIZE)
+	if (p->thread.sp < stack || p->thread.sp > stack+THREAD_SIZE-16-sizeof(u64))
 		return 0;
 	fp = *(u64 *)(p->thread.sp);
 	do {
-		if (fp < (unsigned long)stack ||
-		    fp >= (unsigned long)stack+THREAD_SIZE)
+		if (fp < stack || fp > stack+THREAD_SIZE-16-sizeof(u64))
 			return 0;
 		ip = *(u64 *)(fp+8);
 		if (!in_sched_functions(ip))

@@ -64,9 +64,9 @@ struct ops_list {
 	int argsize;		/* argument size */
 
 	/* operators */
-	struct snd_seq_dev_ops ops;
+	struct snd_seq_dev_ops *ops;
 
-	/* registred devices */
+	/* registered devices */
 	struct list_head dev_list;	/* list of devices */
 	int num_devices;	/* number of associated devices */
 	int num_init_devices;	/* number of initialized devices */
@@ -333,7 +333,7 @@ int snd_seq_device_register_driver(char *id, struct snd_seq_dev_ops *entry,
 
 	mutex_lock(&ops->reg_mutex);
 	/* copy driver operators */
-	ops->ops = *entry;
+	ops->ops = entry;
 	ops->driver |= DRIVER_LOADED;
 	ops->argsize = argsize;
 
@@ -463,7 +463,7 @@ static int init_device(struct snd_seq_device *dev, struct ops_list *ops)
 			   dev->name, ops->id, ops->argsize, dev->argsize);
 		return -EINVAL;
 	}
-	if (ops->ops.init_device(dev) >= 0) {
+	if (ops->ops->init_device(dev) >= 0) {
 		dev->status = SNDRV_SEQ_DEVICE_REGISTERED;
 		ops->num_init_devices++;
 	} else {
@@ -490,7 +490,7 @@ static int free_device(struct snd_seq_device *dev, struct ops_list *ops)
 			   dev->name, ops->id, ops->argsize, dev->argsize);
 		return -EINVAL;
 	}
-	if ((result = ops->ops.free_device(dev)) >= 0 || result == -ENXIO) {
+	if ((result = ops->ops->free_device(dev)) >= 0 || result == -ENXIO) {
 		dev->status = SNDRV_SEQ_DEVICE_FREE;
 		dev->driver_data = NULL;
 		ops->num_init_devices--;
@@ -569,5 +569,7 @@ EXPORT_SYMBOL(snd_seq_device_load_drivers);
 EXPORT_SYMBOL(snd_seq_device_new);
 EXPORT_SYMBOL(snd_seq_device_register_driver);
 EXPORT_SYMBOL(snd_seq_device_unregister_driver);
+#ifdef CONFIG_MODULES
 EXPORT_SYMBOL(snd_seq_autoload_lock);
 EXPORT_SYMBOL(snd_seq_autoload_unlock);
+#endif

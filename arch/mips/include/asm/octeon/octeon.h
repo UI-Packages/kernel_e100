@@ -3,13 +3,15 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2004-2008 Cavium Networks
+ * Copyright (c) 2003-2013 Cavium Inc. All rights reserved.
+ *
  */
 #ifndef __ASM_OCTEON_OCTEON_H
 #define __ASM_OCTEON_OCTEON_H
 
-#include <linux/phy.h>
-#include "cvmx.h"
+#include <linux/irqflags.h>
+#include <linux/notifier.h>
+#include <asm/octeon/cvmx.h>
 
 extern uint64_t octeon_bootmem_alloc_range_phys(uint64_t size,
 						uint64_t alignment,
@@ -73,15 +75,15 @@ struct octeon_boot_descriptor {
 	uint32_t argc;
 	uint32_t argv[OCTEON_ARGV_MAX_ARGS];
 
-#define  BOOT_FLAG_INIT_CORE		(1 << 0)
-#define  OCTEON_BL_FLAG_DEBUG		(1 << 1)
-#define  OCTEON_BL_FLAG_NO_MAGIC	(1 << 2)
+#define	 BOOT_FLAG_INIT_CORE		(1 << 0)
+#define	 OCTEON_BL_FLAG_DEBUG		(1 << 1)
+#define	 OCTEON_BL_FLAG_NO_MAGIC	(1 << 2)
 	/* If set, use uart1 for console */
-#define  OCTEON_BL_FLAG_CONSOLE_UART1	(1 << 3)
+#define	 OCTEON_BL_FLAG_CONSOLE_UART1	(1 << 3)
 	/* If set, use PCI console */
-#define  OCTEON_BL_FLAG_CONSOLE_PCI	(1 << 4)
+#define	 OCTEON_BL_FLAG_CONSOLE_PCI	(1 << 4)
 	/* Call exit on break on serial port */
-#define  OCTEON_BL_FLAG_BREAK		(1 << 5)
+#define	 OCTEON_BL_FLAG_BREAK		(1 << 5)
 
 	uint32_t flags;
 	uint32_t core_mask;
@@ -391,28 +393,15 @@ void octeon_irq_set_ip4_handler(octeon_irq_ip4_handler_t);
 int octeon_coreid_for_cpu(int cpu);
 int octeon_cpu_for_coreid(int coreid);
 
-struct irq_data;
-void octeon_irq_cpu_offline_ciu(struct irq_data *data);
-
 void octeon_pci_console_init(const char *);
 
 typedef void (*octeon_message_fn_t)(void);
 int octeon_request_ipi_handler(octeon_message_fn_t fn);
 void octeon_send_ipi_single(int cpu, unsigned int action);
 void octeon_release_ipi_handler(int action);
+void octeon_ciu3_mbox_send(int cpu, unsigned int mbox);
 
-int octeon_i2c_cvmx2i2c(unsigned int cvmx_twsi_bus_num);
-
-extern struct semaphore octeon_bootbus_sem;
-
-int register_co_cache_error_notifier(struct notifier_block *nb);
-int unregister_co_cache_error_notifier(struct notifier_block *nb);
-#define CO_CACHE_ERROR_RECOVERABLE 0
-#define CO_CACHE_ERROR_UNRECOVERABLE 1
-#define CO_CACHE_ERROR_WB_PARITY 2
-#define CO_CACHE_ERROR_TLB_PARITY 3
-
-extern unsigned long long cache_err_dcache[NR_CPUS];
+#define OCTEON_DEBUG_UART 1
 
 #if IS_ENABLED(CONFIG_CAVIUM_OCTEON_ERROR_TREE)
 int octeon_error_tree_enable(enum cvmx_error_groups group, int unit);
@@ -427,5 +416,39 @@ static inline int octeon_error_tree_disable(enum cvmx_error_groups group, int un
 	return 0;
 }
 #endif
+
+int octeon_i2c_cvmx2i2c(unsigned int cvmx_twsi_bus_num);
+
+#ifdef CONFIG_SMP
+void octeon_setup_smp(void);
+#else
+static inline void octeon_setup_smp(void) {}
+#endif
+
+extern struct semaphore octeon_bootbus_sem;
+
+extern void (*octeon_scache_init)(void);
+int register_co_cache_error_notifier(struct notifier_block *nb);
+int unregister_co_cache_error_notifier(struct notifier_block *nb);
+#define CO_CACHE_ERROR_RECOVERABLE 0
+#define CO_CACHE_ERROR_UNRECOVERABLE 1
+#define CO_CACHE_ERROR_WB_PARITY 2
+#define CO_CACHE_ERROR_TLB_PARITY 3
+
+extern unsigned long long cache_err_dcache[NR_CPUS];
+
+/* Octeon multiplier save/restore routines from octeon_switch.S */
+void octeon_mult_save(void);
+void octeon_mult_restore(void);
+void octeon_mult_save_end(void);
+void octeon_mult_restore_end(void);
+void octeon_mult_save3(void);
+void octeon_mult_save3_end(void);
+void octeon_mult_save2(void);
+void octeon_mult_save2_end(void);
+void octeon_mult_restore3(void);
+void octeon_mult_restore3_end(void);
+void octeon_mult_restore2(void);
+void octeon_mult_restore2_end(void);
 
 #endif /* __ASM_OCTEON_OCTEON_H */

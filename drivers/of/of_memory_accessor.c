@@ -118,11 +118,11 @@ of_memory_accessor_get(const struct device_node *devnode)
 		if (mentry->dev->of_node == devnode) {
 			macc = mentry->macc;
 			if (!mentry->ref) {
-				if (!try_module_get(mentry->dev->driver->owner)) {
-					macc = NULL;
-					pr_info("Warning: module for %s not found!",
-						mentry->dev->of_node->full_name);
-				}
+			    if (!try_module_get(mentry->dev->driver->owner)) {
+				macc = NULL;
+				pr_info("Warning: module for %s not found!",
+					mentry->dev->of_node->full_name);
+			    }
 			}
 			mentry->ref++;
 			goto done;

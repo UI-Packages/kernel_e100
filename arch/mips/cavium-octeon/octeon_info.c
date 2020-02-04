@@ -89,12 +89,13 @@ static const struct file_operations octeon_info_operations = {
  */
 static int __init octeon_info_init(void)
 {
-	struct proc_dir_entry *entry =
-		create_proc_entry("octeon_info", 0, NULL);
-	if (entry == NULL)
-		return -1;
+	struct proc_dir_entry *entry;
 
-	entry->proc_fops = &octeon_info_operations;
+	entry =	proc_create("octeon_info", S_IRUGO,
+			    NULL, &octeon_info_operations);
+	if (entry == NULL)
+		return -ENODEV;
+
 	return 0;
 }
 

@@ -1,6 +1,7 @@
 #ifndef _LINUX_LOCALLOCK_H
 #define _LINUX_LOCALLOCK_H
 
+#include <linux/percpu.h>
 #include <linux/spinlock.h>
 
 #ifdef CONFIG_PREEMPT_RT_BASE
@@ -192,6 +193,18 @@ static inline int __local_unlock_irqrestore(struct local_irq_lock *lv,
 		local_unlock_irq(lvar);					\
 	} while (0)
 
+#define local_raw_spin_lock_irq(lvar, lock)				\
+	do {								\
+		local_lock_irq(lvar);					\
+		raw_spin_lock(lock);					\
+	} while (0)
+
+#define local_raw_spin_unlock_irq(lvar, lock)				\
+	do {								\
+		raw_spin_unlock(lock);					\
+		local_unlock_irq(lvar);					\
+	} while (0)
+
 #define local_spin_lock_irqsave(lvar, lock, flags)			\
 	do {								\
 		local_lock_irqsave(lvar, flags);			\
@@ -237,6 +250,8 @@ static inline void local_irq_lock_init(int lvar) { }
 #define local_spin_trylock_irq(lvar, lock)	spin_trylock_irq(lock)
 #define local_spin_lock_irq(lvar, lock)		spin_lock_irq(lock)
 #define local_spin_unlock_irq(lvar, lock)	spin_unlock_irq(lock)
+#define local_raw_spin_lock_irq(lvar, lock)	raw_spin_lock_irq(lock)
+#define local_raw_spin_unlock_irq(lvar, lock)	raw_spin_unlock_irq(lock)
 #define local_spin_lock_irqsave(lvar, lock, flags)	\
 	spin_lock_irqsave(lock, flags)
 #define local_spin_unlock_irqrestore(lvar, lock, flags)	\

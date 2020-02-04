@@ -15,6 +15,8 @@
 #include <linux/sysctl.h>
 #include <linux/wait.h>
 
+#ifdef CONFIG_PROC_SYSCTL
+
 static void *get_uts(ctl_table *table, int write)
 {
 	char *which = table->data;
@@ -38,7 +40,6 @@ static void put_uts(ctl_table *table, int write, void *which)
 		up_write(&uts_sem);
 }
 
-#ifdef CONFIG_PROC_SYSCTL
 /*
  *	Special case of dostring for the UTS structure. This has locks
  *	to observe. Should this be in kernel/sys.c ????
@@ -46,7 +47,7 @@ static void put_uts(ctl_table *table, int write, void *which)
 static int proc_do_uts_string(ctl_table *table, int write,
 		  void __user *buffer, size_t *lenp, loff_t *ppos)
 {
-	struct ctl_table uts_table;
+	ctl_table_no_const uts_table;
 	int r;
 	memcpy(&uts_table, table, sizeof(uts_table));
 	uts_table.data = get_uts(table, write);

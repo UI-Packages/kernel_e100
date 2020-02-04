@@ -6,7 +6,7 @@
  *
  * Heavily inspired by the 32-bit Sparc compat code which is
  * Copyright (C) 1995, 1996, 1997, 1998 David S. Miller (davem@redhat.com)
- * Copyright (C) 1995, 1996, 1997, 1998 Jakub Jelinek   (jj@ultra.linux.cz)
+ * Copyright (C) 1995, 1996, 1997, 1998 Jakub Jelinek	(jj@ultra.linux.cz)
  */
 
 #define ELF_ARCH		EM_MIPS
@@ -48,7 +48,14 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 
 #define TASK32_SIZE		0x7fff8000UL
 #undef ELF_ET_DYN_BASE
-#define ELF_ET_DYN_BASE         (TASK32_SIZE / 3 * 2)
+#define ELF_ET_DYN_BASE		(TASK32_SIZE / 3 * 2)
+
+#ifdef CONFIG_PAX_ASLR
+#define PAX_ELF_ET_DYN_BASE	(TASK_IS_32BIT_ADDR ? 0x00400000UL : 0x00400000UL)
+
+#define PAX_DELTA_MMAP_LEN	(TASK_IS_32BIT_ADDR ? 27-PAGE_SHIFT : 36-PAGE_SHIFT)
+#define PAX_DELTA_STACK_LEN	(TASK_IS_32BIT_ADDR ? 27-PAGE_SHIFT : 36-PAGE_SHIFT)
+#endif
 
 #include <asm/processor.h>
 #include <linux/module.h>
@@ -67,8 +74,8 @@ struct elf_prstatus32
 	pid_t	pr_ppid;
 	pid_t	pr_pgrp;
 	pid_t	pr_sid;
-	struct compat_timeval pr_utime;	/* User time */
-	struct compat_timeval pr_stime;	/* System time */
+	struct compat_timeval pr_utime; /* User time */
+	struct compat_timeval pr_stime; /* System time */
 	struct compat_timeval pr_cutime;/* Cumulative user time */
 	struct compat_timeval pr_cstime;/* Cumulative system time */
 	elf_gregset_t pr_reg;	/* GP registers */
@@ -88,7 +95,7 @@ struct elf_prpsinfo32
 	pid_t	pr_pid, pr_ppid, pr_pgrp, pr_sid;
 	/* Lots missing */
 	char	pr_fname[16];	/* filename of executable */
-	char	pr_psargs[ELF_PRARGSZ];	/* initial part of arg list */
+	char	pr_psargs[ELF_PRARGSZ]; /* initial part of arg list */
 };
 
 #define elf_caddr_t	u32
@@ -108,27 +115,6 @@ jiffies_to_compat_timeval(unsigned long jiffies, struct compat_timeval *value)
 	value->tv_usec = rem / NSEC_PER_USEC;
 }
 
-#ifdef CONFIG_MICROSTATE_ACCT
-#ifdef cputime_to_timeval
-#undef cputime_to_timeval
-#endif
-#define cputime_to_timeval(__ct, __val) (*(__val) = ns_to_timeval_compat(__ct))
-
-/*
- * ns_to_timeval_compat - same as ns_to_timeval, except
- * it returns struct compat_timeval.
- */
-static struct compat_timeval ns_to_timeval_compat(const s64 nsec)
-{
-       struct timespec ts = ns_to_timespec(nsec);
-       struct compat_timeval tv;
-
-       tv.tv_sec = ts.tv_sec;
-       tv.tv_usec = (suseconds_t) ts.tv_nsec / 1000;
-
-       return tv;
-}
-#endif
 
 #define ELF_CORE_EFLAGS EF_MIPS_ABI2
 
@@ -140,5 +126,16 @@ MODULE_AUTHOR("Ralf Baechle (ralf@linux-mips.org)");
 
 #undef TASK_SIZE
 #define TASK_SIZE TASK_SIZE32
+
+#undef cputime_to_timeval
+#define cputime_to_timeval cputime_to_compat_timeval
+static __inline__ void
+cputime_to_compat_timeval(const cputime_t cputime, struct compat_timeval *value)
+{
+	unsigned long jiffies = cputime_to_jiffies(cputime);
+
+	value->tv_usec = (jiffies % HZ) * (1000000L / HZ);
+	value->tv_sec = jiffies / HZ;
+}
 
 #include "../../../fs/binfmt_elf.c"

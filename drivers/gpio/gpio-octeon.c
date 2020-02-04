@@ -3,7 +3,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2011,2012 Cavium Inc.
+ * Copyright (C) 2011, 2012 Cavium Inc.
  */
 
 #include <linux/platform_device.h>
@@ -14,9 +14,6 @@
 
 #include <asm/octeon/octeon.h>
 #include <asm/octeon/cvmx-gpio-defs.h>
-
-#define DRV_VERSION "1.0"
-#define DRV_DESCRIPTION "Cavium Inc. OCTEON GPIO Driver"
 
 #define RX_DAT 0x80
 #define TX_SET 0x88
@@ -60,7 +57,6 @@ static int octeon_gpio_dir_out(struct gpio_chip *chip, unsigned offset,
 	struct octeon_gpio *gpio = container_of(chip, struct octeon_gpio, chip);
 	union cvmx_gpio_bit_cfgx cfgx;
 
-
 	octeon_gpio_set(chip, offset, value);
 
 	cfgx.u64 = 0;
@@ -78,7 +74,7 @@ static int octeon_gpio_get(struct gpio_chip *chip, unsigned offset)
 	return ((1ull << offset) & read_bits) != 0;
 }
 
-static int __devinit octeon_gpio_probe(struct platform_device *pdev)
+static int octeon_gpio_probe(struct platform_device *pdev)
 {
 	struct octeon_gpio *gpio;
 	struct gpio_chip *chip;
@@ -106,7 +102,6 @@ static int __devinit octeon_gpio_probe(struct platform_device *pdev)
 	gpio->register_base = (u64)devm_ioremap(&pdev->dev, res_mem->start,
 						resource_size(res_mem));
 
-
 	pdev->dev.platform_data = chip;
 	chip->label = "octeon-gpio";
 	chip->dev = &pdev->dev;
@@ -122,12 +117,12 @@ static int __devinit octeon_gpio_probe(struct platform_device *pdev)
 	if (err)
 		goto out;
 
-	dev_info(&pdev->dev, "version: " DRV_VERSION "\n");
+	dev_info(&pdev->dev, "OCTEON GPIO\n");
 out:
 	return err;
 }
 
-static int __devexit octeon_gpio_remove(struct platform_device *pdev)
+static int octeon_gpio_remove(struct platform_device *pdev)
 {
 	struct gpio_chip *chip = pdev->dev.platform_data;
 	return gpiochip_remove(chip);
@@ -142,18 +137,17 @@ static struct of_device_id octeon_gpio_match[] = {
 MODULE_DEVICE_TABLE(of, octeon_gpio_match);
 
 static struct platform_driver octeon_gpio_driver = {
-	.probe		= octeon_gpio_probe,
-	.remove		= __exit_p(octeon_gpio_remove),
 	.driver = {
 		.name		= "octeon_gpio",
 		.owner		= THIS_MODULE,
 		.of_match_table = octeon_gpio_match,
 	},
+	.probe		= octeon_gpio_probe,
+	.remove		= octeon_gpio_remove,
 };
 
 module_platform_driver(octeon_gpio_driver);
 
-MODULE_DESCRIPTION(DRV_DESCRIPTION);
+MODULE_DESCRIPTION("Cavium Inc. OCTEON GPIO Driver");
 MODULE_AUTHOR("David Daney");
 MODULE_LICENSE("GPL");
-MODULE_VERSION(DRV_VERSION);

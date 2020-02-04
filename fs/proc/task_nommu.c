@@ -51,7 +51,7 @@ void task_mem(struct seq_file *m, struct mm_struct *mm)
 	else
 		bytes += kobjsize(mm);
 	
-	if (current->fs && current->fs->users > 1)
+	if (current->fs && atomic_read(&current->fs->users) > 1)
 		sbytes += kobjsize(current->fs);
 	else
 		bytes += kobjsize(current->fs);
@@ -149,7 +149,7 @@ static int nommu_vma_show(struct seq_file *m, struct vm_area_struct *vma,
 	file = vma->vm_file;
 
 	if (file) {
-		struct inode *inode = vma->vm_file->f_path.dentry->d_inode;
+		struct inode *inode = file_inode(vma->vm_file);
 		dev = inode->i_sb->s_dev;
 		ino = inode->i_ino;
 		pgoff = (loff_t)vma->vm_pgoff << PAGE_SHIFT;
@@ -168,7 +168,7 @@ static int nommu_vma_show(struct seq_file *m, struct vm_area_struct *vma,
 
 	if (file) {
 		pad_len_spaces(m, len);
-		seq_path(m, &file->f_path, "");
+		seq_path(m, &file->f_path, "\n\\");
 	} else if (mm) {
 		pid_t tid = vm_is_stack(priv->task, vma, is_pid);
 
@@ -223,7 +223,7 @@ static void *m_start(struct seq_file *m, loff_t *pos)
 	if (!priv->task)
 		return ERR_PTR(-ESRCH);
 
-	mm = mm_for_maps(priv->task);
+	mm = mm_access(priv->task, PTRACE_MODE_READ);
 	if (!mm || IS_ERR(mm)) {
 		put_task_struct(priv->task);
 		priv->task = NULL;

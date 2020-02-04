@@ -6,55 +6,46 @@
 #include <linux/fs_struct.h>
 #include "internal.h"
 
-static inline void path_get_longterm(struct path *path)
+static void modify_fs_path(struct fs_struct *fs, struct path *old_path,
+			   struct path *new_path, const struct path *path)
 {
-	path_get(path);
-	mnt_make_longterm(path->mnt);
-}
-
-static inline void path_put_longterm(struct path *path)
-{
-	mnt_make_shortterm(path->mnt);
-	path_put(path);
+	write_seqcount_begin(&fs->seq);
+	*old_path = *new_path;
+	*new_path = *path;
+	write_seqcount_end(&fs->seq);
 }
 
 /*
  * Replace the fs->{rootmnt,root} with {mnt,dentry}. Put the old values.
  * It can block.
  */
-void set_fs_root(struct fs_struct *fs, struct path *path)
+void set_fs_root(struct fs_struct *fs, const struct path *path)
 {
 	struct path old_root;
 
-	path_get_longterm(path);
+	path_get(path);
 	spin_lock(&fs->lock);
-	write_seqcount_begin(&fs->seq);
-	old_root = fs->root;
-	fs->root = *path;
-	write_seqcount_end(&fs->seq);
+	modify_fs_path(fs, &old_root, &fs->root, path);
 	spin_unlock(&fs->lock);
 	if (old_root.dentry)
-		path_put_longterm(&old_root);
+		path_put(&old_root);
 }
 
 /*
  * Replace the fs->{pwdmnt,pwd} with {mnt,dentry}. Put the old values.
  * It can block.
  */
-void set_fs_pwd(struct fs_struct *fs, struct path *path)
+void set_fs_pwd(struct fs_struct *fs, const struct path *path)
 {
 	struct path old_pwd;
 
-	path_get_longterm(path);
+	path_get(path);
 	spin_lock(&fs->lock);
-	write_seqcount_begin(&fs->seq);
-	old_pwd = fs->pwd;
-	fs->pwd = *path;
-	write_seqcount_end(&fs->seq);
+	modify_fs_path(fs, &old_pwd, &fs->pwd, path);
 	spin_unlock(&fs->lock);
 
 	if (old_pwd.dentry)
-		path_put_longterm(&old_pwd);
+		path_put(&old_pwd);
 }
 
 static inline int replace_path(struct path *p, const struct path *old, const struct path *new)
@@ -65,7 +56,62 @@ static inline int replace_path(struct path *p, const struct path *old, const str
 	return 1;
 }
 
-void chroot_fs_refs(struct path *old_root, struct path *new_root)
+#ifdef CONFIG_FUMOUNT
+/*
+ * Note that this whole process is obviously racy, in that changes
+ * can sneak in while it is processing.  That's ok, it is retried.
+ * Making it non-racy would be extraordinarly complex.
+ */
+static void fumount_clear_one_path(struct fs_struct *fs, struct vfsmount *mnt,
+				   struct path *new_path, struct path *path)
+{
+	struct path old_path;
+
+	path_get(path);
+	modify_fs_path(fs, &old_path, new_path, path);
+	spin_unlock(&fs->lock);
+	rcu_read_unlock();
+	path_put(&old_path);
+}
+
+/*
+ * Move the cwd and root of any process that points to this mount for
+ * pwd to use '/'.
+ */
+void fs_fumount_clear_cwd(struct vfsmount *mnt, struct path *root_path)
+{
+	struct task_struct *p;
+	struct fs_struct *fs;
+
+	/*
+	 * We have to release the rcu lock (and fs lock, of course) to
+	 * put a path, so fumount_clear_one_path does that.
+	 * Unfortunately, that mean the processes could have all
+	 * changed, so we have to start over from scratch when this
+	 * happens.
+	 */
+restart:
+	rcu_read_lock();
+	for_each_process(p) {
+		fs = p->fs;
+		if (!fs)
+			continue;
+		spin_lock(&fs->lock);
+		if (fs->pwd.mnt == mnt) {
+			fumount_clear_one_path(fs, mnt, &fs->pwd, root_path);
+			goto restart;
+		}
+		if (fs->root.mnt == mnt) {
+			fumount_clear_one_path(fs, mnt, &fs->root, root_path);
+			goto restart;
+		}
+		spin_unlock(&fs->lock);
+	}
+	rcu_read_unlock();
+}
+#endif
+
+void chroot_fs_refs(const struct path *old_root, const struct path *new_root)
 {
 	struct task_struct *g, *p;
 	struct fs_struct *fs;
@@ -84,7 +130,7 @@ void chroot_fs_refs(struct path *old_root, struct path *new_root)
 			write_seqcount_end(&fs->seq);
 			while (hits--) {
 				count++;
-				path_get_longterm(new_root);
+				path_get(new_root);
 			}
 			spin_unlock(&fs->lock);
 		}
@@ -92,13 +138,13 @@ void chroot_fs_refs(struct path *old_root, struct path *new_root)
 	} while_each_thread(g, p);
 	read_unlock(&tasklist_lock);
 	while (count--)
-		path_put_longterm(old_root);
+		path_put(old_root);
 }
 
 void free_fs_struct(struct fs_struct *fs)
 {
-	path_put_longterm(&fs->root);
-	path_put_longterm(&fs->pwd);
+	path_put(&fs->root);
+	path_put(&fs->pwd);
 	kmem_cache_free(fs_cachep, fs);
 }
 
@@ -111,7 +157,7 @@ void exit_fs(struct task_struct *tsk)
 		task_lock(tsk);
 		spin_lock(&fs->lock);
 		tsk->fs = NULL;
-		kill = !--fs->users;
+		kill = !atomic_dec_return(&fs->users);
 		spin_unlock(&fs->lock);
 		task_unlock(tsk);
 		if (kill)
@@ -124,7 +170,7 @@ struct fs_struct *copy_fs_struct(struct fs_struct *old)
 	struct fs_struct *fs = kmem_cache_alloc(fs_cachep, GFP_KERNEL);
 	/* We don't need to lock fs - think why ;-) */
 	if (fs) {
-		fs->users = 1;
+		atomic_set(&fs->users, 1);
 		fs->in_exec = 0;
 		spin_lock_init(&fs->lock);
 		seqcount_init(&fs->seq);
@@ -132,9 +178,9 @@ struct fs_struct *copy_fs_struct(struct fs_struct *old)
 
 		spin_lock(&old->lock);
 		fs->root = old->root;
-		path_get_longterm(&fs->root);
+		path_get(&fs->root);
 		fs->pwd = old->pwd;
-		path_get_longterm(&fs->pwd);
+		path_get(&fs->pwd);
 		spin_unlock(&old->lock);
 	}
 	return fs;
@@ -151,7 +197,7 @@ int unshare_fs_struct(void)
 
 	task_lock(current);
 	spin_lock(&fs->lock);
-	kill = !--fs->users;
+	kill = !atomic_dec_return(&fs->users);
 	current->fs = new_fs;
 	spin_unlock(&fs->lock);
 	task_unlock(current);
@@ -171,32 +217,8 @@ EXPORT_SYMBOL(current_umask);
 
 /* to be mentioned only in INIT_TASK */
 struct fs_struct init_fs = {
-	.users		= 1,
+	.users		= ATOMIC_INIT(1),
 	.lock		= __SPIN_LOCK_UNLOCKED(init_fs.lock),
 	.seq		= SEQCNT_ZERO,
 	.umask		= 0022,
 };
-
-void daemonize_fs_struct(void)
-{
-	struct fs_struct *fs = current->fs;
-
-	if (fs) {
-		int kill;
-
-		task_lock(current);
-
-		spin_lock(&init_fs.lock);
-		init_fs.users++;
-		spin_unlock(&init_fs.lock);
-
-		spin_lock(&fs->lock);
-		current->fs = &init_fs;
-		kill = !--fs->users;
-		spin_unlock(&fs->lock);
-
-		task_unlock(current);
-		if (kill)
-			free_fs_struct(fs);
-	}
-}

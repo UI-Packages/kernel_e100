@@ -9,6 +9,8 @@
  *  Simplified starting of init:  Michael A. Griffith <grif@acm.org> 
  */
 
+#define DEBUG		/* Enable initcall_debug */
+
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
@@ -68,6 +70,11 @@
 #include <linux/shmem_fs.h>
 #include <linux/slab.h>
 #include <linux/perf_event.h>
+#include <linux/file.h>
+#include <linux/ptrace.h>
+#include <linux/blkdev.h>
+#include <linux/elevator.h>
+#include <linux/random.h>
 #include <linux/posix-timers.h>
 
 #include <asm/io.h>
@@ -86,7 +93,6 @@ extern void init_IRQ(void);
 extern void fork_init(unsigned long);
 extern void mca_init(void);
 extern void sbus_init(void);
-extern void prio_tree_init(void);
 extern void radix_tree_init(void);
 #ifndef CONFIG_DEBUG_RODATA
 static inline void mark_rodata_ro(void) { }
@@ -149,6 +155,64 @@ static int __init set_reset_devices(char *str)
 
 __setup("reset_devices", set_reset_devices);
 
+#if defined(CONFIG_X86_64) && defined(CONFIG_PAX_MEMORY_UDEREF)
+unsigned long pax_user_shadow_base __read_only;
+EXPORT_SYMBOL(pax_user_shadow_base);
+extern char pax_enter_kernel_user[];
+extern char pax_exit_kernel_user[];
+#endif
+
+#if defined(CONFIG_X86) && defined(CONFIG_PAX_MEMORY_UDEREF)
+static int __init setup_pax_nouderef(char *str)
+{
+#ifdef CONFIG_X86_32
+	unsigned int cpu;
+	struct desc_struct *gdt;
+
+	for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
+		gdt = get_cpu_gdt_table(cpu);
+		gdt[GDT_ENTRY_KERNEL_DS].type = 3;
+		gdt[GDT_ENTRY_KERNEL_DS].limit = 0xf;
+		gdt[GDT_ENTRY_DEFAULT_USER_CS].limit = 0xf;
+		gdt[GDT_ENTRY_DEFAULT_USER_DS].limit = 0xf;
+	}
+	loadsegment(ds, __KERNEL_DS);
+	loadsegment(es, __KERNEL_DS);
+	loadsegment(ss, __KERNEL_DS);
+#else
+	memcpy(pax_enter_kernel_user, (unsigned char []){0xc3}, 1);
+	memcpy(pax_exit_kernel_user, (unsigned char []){0xc3}, 1);
+	clone_pgd_mask = ~(pgdval_t)0UL;
+	pax_user_shadow_base = 0UL;
+	setup_clear_cpu_cap(X86_FEATURE_PCID);
+#endif
+
+	return 0;
+}
+early_param("pax_nouderef", setup_pax_nouderef);
+
+#ifdef CONFIG_X86_64
+static int __init setup_pax_weakuderef(char *str)
+{
+	if (clone_pgd_mask != ~(pgdval_t)0UL)
+		pax_user_shadow_base = 1UL << TASK_SIZE_MAX_SHIFT;
+	return 1;
+}
+__setup("pax_weakuderef", setup_pax_weakuderef);
+#endif
+#endif
+
+#ifdef CONFIG_PAX_SOFTMODE
+int pax_softmode;
+
+static int __init setup_pax_softmode(char *str)
+{
+	get_option(&str, &pax_softmode);
+	return 1;
+}
+__setup("pax_softmode=", setup_pax_softmode);
+#endif
+
 static const char * argv_init[MAX_INIT_ARGS+2] = { "init", NULL, };
 const char * envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
 static const char *panic_later, *panic_param;
@@ -172,8 +236,8 @@ static int __init obsolete_checksetup(char *line)
 				if (line[n] == '\0' || line[n] == '=')
 					had_early_param = 1;
 			} else if (!p->setup_func) {
-				printk(KERN_WARNING "Parameter %s is obsolete,"
-				       " ignored\n", p->str);
+				pr_warn("Parameter %s is obsolete, ignored\n",
+					p->str);
 				return 1;
 			} else if (p->setup_func(line + n))
 				return 1;
@@ -227,7 +291,7 @@ static int __init loglevel(char *str)
 early_param("loglevel", loglevel);
 
 /* Change NUL term back to "=", to make "param" the whole string. */
-static int __init repair_env_string(char *param, char *val)
+static int __init repair_env_string(char *param, char *val, const char *unused)
 {
 	if (val) {
 		/* param=val or param="val"? */
@@ -247,9 +311,9 @@ static int __init repair_env_string(char *param, char *val)
  * Unknown boot options get handed to init, unless they look like
  * unused parameters (modprobe will find them in /proc/cmdline).
  */
-static int __init unknown_bootoption(char *param, char *val)
+static int __init unknown_bootoption(char *param, char *val, const char *unused)
 {
-	repair_env_string(param, val);
+	repair_env_string(param, val, unused);
 
 	/* Handle obsolete-style parameters */
 	if (obsolete_checksetup(param))
@@ -382,11 +446,11 @@ static noinline void __init_refok rest_init(void)
 	init_idle_bootup_task(current);
 	schedule_preempt_disabled();
 	/* Call into cpu_idle with preempt disabled */
-	cpu_idle();
+	cpu_startup_entry(CPUHP_ONLINE);
 }
 
 /* Check for early params. */
-static int __init do_early_param(char *param, char *val)
+static int __init do_early_param(char *param, char *val, const char *unused)
 {
 	const struct obs_kernel_param *p;
 
@@ -396,8 +460,7 @@ static int __init do_early_param(char *param, char *val)
 		     strcmp(p->str, "earlycon") == 0)
 		) {
 			if (p->setup_func(val) != 0)
-				printk(KERN_WARNING
-				       "Malformed early option '%s'\n", param);
+				pr_warn("Malformed early option '%s'\n", param);
 		}
 	}
 	/* We accept everything at this stage. */
@@ -442,9 +505,11 @@ void __init __weak smp_setup_processor_id(void)
 {
 }
 
+# if THREAD_SIZE >= PAGE_SIZE
 void __init __weak thread_info_cache_init(void)
 {
 }
+#endif
 
 /*
  * Set up kernel memory allocators
@@ -462,6 +527,10 @@ static void __init mm_init(void)
 	pgtable_cache_init();
 	vmalloc_init();
 }
+
+#if defined(CONFIG_MICROSTATE_ACCT) && defined(CONFIG_SPARSE_IRQ)
+int __init init_msa_irq(void);
+#endif
 
 asmlinkage void __init start_kernel(void)
 {
@@ -490,10 +559,9 @@ asmlinkage void __init start_kernel(void)
  * Interrupts are still disabled. Do necessary setups, then
  * enable them
  */
-	tick_init();
 	boot_cpu_init();
 	page_address_init();
-	printk(KERN_NOTICE "%s", linux_banner);
+	pr_notice("%s", linux_banner);
 	setup_arch(&command_line);
 	mm_init_owner(&init_mm, &init_task);
 	mm_init_cpumask(&init_mm);
@@ -503,10 +571,14 @@ asmlinkage void __init start_kernel(void)
 	softirq_early_init();
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
 
-	build_all_zonelists(NULL);
+	build_all_zonelists(NULL, NULL);
 	page_alloc_init();
 
-	printk(KERN_NOTICE "Kernel command line: %s\n", boot_command_line);
+#if defined(CONFIG_MICROSTATE_ACCT) && defined(CONFIG_SPARSE_IRQ)
+	init_msa_irq();
+#endif
+
+	pr_notice("Kernel command line: %s\n", boot_command_line);
 	parse_early_param();
 	parse_args("Booting kernel", static_command_line, __start___param,
 		   __stop___param - __start___param,
@@ -536,19 +608,17 @@ asmlinkage void __init start_kernel(void)
 	 * fragile until we cpu_idle() for the first time.
 	 */
 	preempt_disable();
-	if (!irqs_disabled()) {
-		printk(KERN_WARNING "start_kernel(): bug: interrupts were "
-				"enabled *very* early, fixing it\n");
+	if (WARN(!irqs_disabled(), "Interrupts were enabled *very* early, fixing it\n"))
 		local_irq_disable();
-	}
 	idr_init_cache();
 	perf_event_init();
 	rcu_init();
+	tick_nohz_init();
 	radix_tree_init();
 	/* init some links before init_ISA_irqs() */
 	early_irq_init();
 	init_IRQ();
-	prio_tree_init();
+	tick_init();
 	init_timers();
 	hrtimers_init();
 	softirq_init();
@@ -557,9 +627,7 @@ asmlinkage void __init start_kernel(void)
 	profile_init();
 	call_function_init();
 	msa_init(&init_task);
-	if (!irqs_disabled())
-		printk(KERN_CRIT "start_kernel(): bug: interrupts were "
-				 "enabled early\n");
+	WARN(!irqs_disabled(), "Interrupts were enabled early\n");
 	early_boot_irqs_disabled = false;
 	local_irq_enable();
 
@@ -586,8 +654,7 @@ asmlinkage void __init start_kernel(void)
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_start && !initrd_below_start_ok &&
 	    page_to_pfn(virt_to_page((void *)initrd_start)) < min_low_pfn) {
-		printk(KERN_CRIT "initrd overwritten (0x%08lx < 0x%08lx) - "
-		    "disabling it.\n",
+		pr_crit("initrd overwritten (0x%08lx < 0x%08lx) - disabling it.\n",
 		    page_to_pfn(virt_to_page((void *)initrd_start)),
 		    min_low_pfn);
 		initrd_start = 0;
@@ -605,7 +672,7 @@ asmlinkage void __init start_kernel(void)
 	pidmap_init();
 	anon_vma_init();
 #ifdef CONFIG_X86
-	if (efi_enabled)
+	if (efi_enabled(EFI_RUNTIME_SERVICES))
 		efi_enter_virtual_mode();
 #endif
 	thread_info_cache_init();
@@ -633,8 +700,10 @@ asmlinkage void __init start_kernel(void)
 	acpi_early_init(); /* before LAPIC and SMP init */
 	sfi_init_late();
 
-	if (efi_enabled)
+	if (efi_enabled(EFI_RUNTIME_SERVICES)) {
+		efi_late_init();
 		efi_free_boot_services();
+	}
 
 	ftrace_init();
 
@@ -656,22 +725,20 @@ static void __init do_ctors(void)
 bool initcall_debug;
 core_param(initcall_debug, initcall_debug, bool, 0644);
 
-static char msgbuf[64];
-
 static int __init_or_module do_one_initcall_debug(initcall_t fn)
 {
 	ktime_t calltime, delta, rettime;
 	unsigned long long duration;
 	int ret;
 
-	printk(KERN_DEBUG "calling  %pF @ %i\n", fn, task_pid_nr(current));
+	pr_debug("calling  %pF @ %i\n", fn, task_pid_nr(current));
 	calltime = ktime_get();
 	ret = fn();
 	rettime = ktime_get();
 	delta = ktime_sub(rettime, calltime);
 	duration = (unsigned long long) ktime_to_ns(delta) >> 10;
-	printk(KERN_DEBUG "initcall %pF returned %d after %lld usecs\n", fn,
-		ret, duration);
+	pr_debug("initcall %pF returned %d after %lld usecs\n",
+		 fn, ret, duration);
 
 	return ret;
 }
@@ -680,28 +747,22 @@ int __init_or_module do_one_initcall(initcall_t fn)
 {
 	int count = preempt_count();
 	int ret;
+	const char *msg1 = "", *msg2 = "";
 
 	if (initcall_debug)
 		ret = do_one_initcall_debug(fn);
 	else
 		ret = fn();
 
-	msgbuf[0] = 0;
-
-	if (ret && ret != -ENODEV && initcall_debug)
-		sprintf(msgbuf, "error code %d ", ret);
-
 	if (preempt_count() != count) {
-		strlcat(msgbuf, "preemption imbalance ", sizeof(msgbuf));
+		msg1 = " preemption imbalance";
 		preempt_count() = count;
 	}
 	if (irqs_disabled()) {
-		strlcat(msgbuf, "disabled interrupts ", sizeof(msgbuf));
+		msg2 = " disabled interrupts";
 		local_irq_enable();
 	}
-	if (msgbuf[0]) {
-		printk("initcall %pF returned with %s\n", fn, msgbuf);
-	}
+	WARN(*msg1 || *msg2, "initcall %pF returned with%s%s\n", fn, msg1, msg2);
 
 	return ret;
 }
@@ -730,15 +791,16 @@ static initcall_t *initcall_levels[] __initdata = {
 	__initcall_end,
 };
 
+/* Keep these in sync with initcalls in include/linux/init.h */
 static char *initcall_level_names[] __initdata = {
-	"early parameters",
-	"core parameters",
-	"postcore parameters",
-	"arch parameters",
-	"subsys parameters",
-	"fs parameters",
-	"device parameters",
-	"late parameters",
+	"early",
+	"core",
+	"postcore",
+	"arch",
+	"subsys",
+	"fs",
+	"device",
+	"late",
 };
 
 static void __init do_initcall_level(int level)
@@ -751,10 +813,16 @@ static void __init do_initcall_level(int level)
 		   static_command_line, __start___param,
 		   __stop___param - __start___param,
 		   level, level,
-		   repair_env_string);
+		   &repair_env_string);
 
-	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++)
+	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++) {
 		do_one_initcall(*fn);
+
+#ifdef LATENT_ENTROPY_PLUGIN
+		add_device_randomness((const void *)&latent_entropy, sizeof(latent_entropy));
+#endif
+
+	}
 }
 
 static void __init do_initcalls(void)
@@ -782,27 +850,47 @@ static void __init do_basic_setup(void)
 	do_ctors();
 	usermodehelper_enable();
 	do_initcalls();
+	random_int_secret_init();
 }
 
 static void __init do_pre_smp_initcalls(void)
 {
 	initcall_t *fn;
 
-	for (fn = __initcall_start; fn < __initcall0_start; fn++)
+	for (fn = __initcall_start; fn < __initcall0_start; fn++) {
 		do_one_initcall(*fn);
+
+#ifdef LATENT_ENTROPY_PLUGIN
+		add_device_randomness((const void *)&latent_entropy, sizeof(latent_entropy));
+#endif
+
+	}
 }
 
-static void run_init_process(const char *init_filename)
+/*
+ * This function requests modules which should be loaded by default and is
+ * called twice right after initrd is mounted and right before init is
+ * exec'd.  If such modules are on either initrd or rootfs, they will be
+ * loaded before control is passed to userland.
+ */
+void __init load_default_modules(void)
+{
+	load_default_elevator_module();
+}
+
+static int run_init_process(const char *init_filename)
 {
 	argv_init[0] = init_filename;
-	kernel_execve(init_filename, argv_init, envp_init);
+	return do_execve(init_filename,
+		(const char __user *const __force_user *)argv_init,
+		(const char __user *const __force_user *)envp_init);
 }
 
-/* This is a non __init function. Force it to be noinline otherwise gcc
- * makes it inline to init() and it becomes part of init.text section
- */
-static noinline int init_post(void)
+static noinline void __init kernel_init_freeable(void);
+
+static int __ref kernel_init(void *unused)
 {
+	kernel_init_freeable();
 	/* need to finish all async __init code before freeing the memory */
 	async_synchronize_full();
 	free_initmem();
@@ -810,13 +898,12 @@ static noinline int init_post(void)
 	system_state = SYSTEM_RUNNING;
 	numa_default_policy();
 
-
-	current->signal->flags |= SIGNAL_UNKILLABLE;
+	flush_delayed_fput();
 
 	if (ramdisk_execute_command) {
-		run_init_process(ramdisk_execute_command);
-		printk(KERN_WARNING "Failed to execute %s\n",
-				ramdisk_execute_command);
+		if (!run_init_process(ramdisk_execute_command))
+			return 0;
+		pr_err("Failed to execute %s\n", ramdisk_execute_command);
 	}
 
 	/*
@@ -826,20 +913,22 @@ static noinline int init_post(void)
 	 * trying to recover a really broken machine.
 	 */
 	if (execute_command) {
-		run_init_process(execute_command);
-		printk(KERN_WARNING "Failed to execute %s.  Attempting "
-					"defaults...\n", execute_command);
+		if (!run_init_process(execute_command))
+			return 0;
+		pr_err("Failed to execute %s.  Attempting defaults...\n",
+			execute_command);
 	}
-	run_init_process("/sbin/init");
-	run_init_process("/etc/init");
-	run_init_process("/bin/init");
-	run_init_process("/bin/sh");
+	if (!run_init_process("/sbin/init") ||
+	    !run_init_process("/etc/init") ||
+	    !run_init_process("/bin/init") ||
+	    !run_init_process("/bin/sh"))
+		return 0;
 
 	panic("No init found.  Try passing init= option to kernel. "
 	      "See Linux Documentation/init.txt for guidance.");
 }
 
-static int __init kernel_init(void * unused)
+static noinline void __init kernel_init_freeable(void)
 {
 	/*
 	 * Wait until kthreadd is all set-up.
@@ -852,7 +941,7 @@ static int __init kernel_init(void * unused)
 	/*
 	 * init can allocate pages on any node
 	 */
-	set_mems_allowed(node_states[N_HIGH_MEMORY]);
+	set_mems_allowed(node_states[N_MEMORY]);
 	/*
 	 * init can run on any cpu.
 	 */
@@ -871,8 +960,8 @@ static int __init kernel_init(void * unused)
 	do_basic_setup();
 
 	/* Open the /dev/console on the rootfs, this should never fail */
-	if (sys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
-		printk(KERN_WARNING "Warning: unable to open an initial console.\n");
+	if (sys_open((const char __force_user *) "/dev/console", O_RDWR, 0) < 0)
+		pr_err("Warning: unable to open an initial console.\n");
 
 	(void) sys_dup(0);
 	(void) sys_dup(0);
@@ -884,7 +973,7 @@ static int __init kernel_init(void * unused)
 	if (!ramdisk_execute_command)
 		ramdisk_execute_command = "/init";
 
-	if (sys_access((const char __user *) ramdisk_execute_command, 0) != 0) {
+	if (sys_access((const char __force_user *) ramdisk_execute_command, 0) != 0) {
 		ramdisk_execute_command = NULL;
 		prepare_namespace();
 	}
@@ -895,6 +984,6 @@ static int __init kernel_init(void * unused)
 	 * initmem segments and start the user-mode stuff..
 	 */
 
-	init_post();
-	return 0;
+	/* rootfs is available now, try loading default modules */
+	load_default_modules();
 }

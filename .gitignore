@@ -32,7 +32,6 @@ modules.builtin
 *.lzo
 *.patch
 *.gcno
-*.dtb
 
 #
 # Top-level generic files
@@ -41,7 +40,6 @@ modules.builtin
 /TAGS
 /linux
 /vmlinux
-/vmlinux.64
 /vmlinuz
 /System.map
 /Module.markers
@@ -62,7 +60,6 @@ modules.builtin
 # Generated include files
 #
 include/config
-include/linux/version.h
 include/generated
 arch/*/include/generated
 
@@ -86,3 +83,11 @@ GTAGS
 *.orig
 *~
 \#*#
+
+#
+# Leavings from module signing
+#
+extra_certificates
+signing_key.priv
+signing_key.x509
+x509.genkey

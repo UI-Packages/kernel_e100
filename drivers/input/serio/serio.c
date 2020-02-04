@@ -496,7 +496,7 @@ static void serio_release_port(struct device *dev)
  */
 static void serio_init_port(struct serio *serio)
 {
-	static atomic_t serio_no = ATOMIC_INIT(0);
+	static atomic_unchecked_t serio_no = ATOMIC_INIT(0);
 
 	__module_get(THIS_MODULE);
 
@@ -507,7 +507,7 @@ static void serio_init_port(struct serio *serio)
 	mutex_init(&serio->drv_mutex);
 	device_initialize(&serio->dev);
 	dev_set_name(&serio->dev, "serio%ld",
-			(long)atomic_inc_return(&serio_no) - 1);
+			(long)atomic_inc_return_unchecked(&serio_no) - 1);
 	serio->dev.bus = &serio_bus;
 	serio->dev.release = serio_release_port;
 	serio->dev.groups = serio_device_attr_groups;
@@ -891,8 +891,6 @@ static int serio_bus_match(struct device *dev, struct device_driver *drv)
 	return serio_match_port(serio_drv->id_table, serio);
 }
 
-#ifdef CONFIG_HOTPLUG
-
 #define SERIO_ADD_UEVENT_VAR(fmt, val...)				\
 	do {								\
 		int err = add_uevent_var(env, fmt, val);		\
@@ -919,15 +917,6 @@ static int serio_uevent(struct device *dev, struct kobj_uevent_env *env)
 	return 0;
 }
 #undef SERIO_ADD_UEVENT_VAR
-
-#else
-
-static int serio_uevent(struct device *dev, struct kobj_uevent_env *env)
-{
-	return -ENODEV;
-}
-
-#endif /* CONFIG_HOTPLUG */
 
 #ifdef CONFIG_PM
 static int serio_suspend(struct device *dev)

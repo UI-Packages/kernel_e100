@@ -153,7 +153,7 @@ static void octeon_cf_set_piomode(struct ata_port *ap, struct ata_device *dev)
 	T = (int)((1000000000000LL * div) / octeon_get_io_clock_rate());
 
 	if (ata_timing_compute(dev, dev->pio_mode, &timing, T, T))
-		BUG();
+		WARN_ON(true);
 
 	t1 = timing.setup;
 	if (t1)
@@ -576,7 +576,7 @@ static void octeon_cf_dma_start(struct ata_queued_cmd *qc)
 
 	/* Get the scatter list entry we need to DMA into */
 	sg = qc->cursg;
-	BUG_ON(!sg);
+	WARN_ON(!sg);
 
 	/*
 	 * Clear the DMA complete status.
@@ -817,7 +817,7 @@ static unsigned int octeon_cf_qc_issue(struct ata_queued_cmd *qc)
 
 	case ATAPI_PROT_DMA:
 		dev_err(ap->dev, "Error, ATAPI not supported\n");
-		BUG();
+		WARN_ON(true);
 
 	default:
 		return ata_sff_qc_issue(qc);
@@ -840,7 +840,7 @@ static struct ata_port_operations octeon_cf_ops = {
 	.dev_config		= octeon_cf_dev_config,
 };
 
-static int __devinit octeon_cf_probe(struct platform_device *pdev)
+static int octeon_cf_probe(struct platform_device *pdev)
 {
 	struct resource *res_cs0, *res_cs1;
 
@@ -926,7 +926,7 @@ static int __devinit octeon_cf_probe(struct platform_device *pdev)
 			goto free_cf_port;
 		}
 		cs1 = devm_ioremap_nocache(&pdev->dev, res_cs1->start,
-					   res_cs1->end - res_cs1->start + 1);
+					   resource_size(res_cs1));
 
 		if (!cs1)
 			goto free_cf_port;

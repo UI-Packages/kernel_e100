@@ -243,7 +243,25 @@ extern int force_personality32;
    the loader.  We need to make sure that it is out of the way of the program
    that it will "exec", and that there is sufficient room for the brk.  */
 
+#ifdef CONFIG_PAX_SEGMEXEC
+#define ELF_ET_DYN_BASE		((current->mm->pax_flags & MF_PAX_SEGMEXEC) ? SEGMEXEC_TASK_SIZE/3*2 : TASK_SIZE/3*2)
+#else
 #define ELF_ET_DYN_BASE		(TASK_SIZE / 3 * 2)
+#endif
+
+#ifdef CONFIG_PAX_ASLR
+#ifdef CONFIG_X86_32
+#define PAX_ELF_ET_DYN_BASE	0x10000000UL
+
+#define PAX_DELTA_MMAP_LEN	(current->mm->pax_flags & MF_PAX_SEGMEXEC ? 15 : 16)
+#define PAX_DELTA_STACK_LEN	(current->mm->pax_flags & MF_PAX_SEGMEXEC ? 15 : 16)
+#else
+#define PAX_ELF_ET_DYN_BASE	0x400000UL
+
+#define PAX_DELTA_MMAP_LEN	((test_thread_flag(TIF_ADDR32)) ? 16 : TASK_SIZE_MAX_SHIFT - PAGE_SHIFT - 3)
+#define PAX_DELTA_STACK_LEN	((test_thread_flag(TIF_ADDR32)) ? 16 : TASK_SIZE_MAX_SHIFT - PAGE_SHIFT - 3)
+#endif
+#endif
 
 /* This yields a mask that user programs can use to figure out what
    instruction set this CPU supports.  This could be done in user space,
@@ -296,16 +314,12 @@ do {									\
 
 #define ARCH_DLINFO							\
 do {									\
-	if (vdso_enabled)						\
-		NEW_AUX_ENT(AT_SYSINFO_EHDR,				\
-			    (unsigned long)current->mm->context.vdso);	\
+	NEW_AUX_ENT(AT_SYSINFO_EHDR, current->mm->context.vdso);	\
 } while (0)
 
 #define ARCH_DLINFO_X32							\
 do {									\
-	if (vdso_enabled)						\
-		NEW_AUX_ENT(AT_SYSINFO_EHDR,				\
-			    (unsigned long)current->mm->context.vdso);	\
+	NEW_AUX_ENT(AT_SYSINFO_EHDR, current->mm->context.vdso);	\
 } while (0)
 
 #define AT_SYSINFO		32
@@ -320,7 +334,7 @@ else									\
 
 #endif /* !CONFIG_X86_32 */
 
-#define VDSO_CURRENT_BASE	((unsigned long)current->mm->context.vdso)
+#define VDSO_CURRENT_BASE	(current->mm->context.vdso)
 
 #define VDSO_ENTRY							\
 	((unsigned long)VDSO32_SYMBOL(VDSO_CURRENT_BASE, vsyscall))
@@ -335,9 +349,6 @@ extern int x32_setup_additional_pages(struct linux_binprm *bprm,
 
 extern int syscall32_setup_pages(struct linux_binprm *, int exstack);
 #define compat_arch_setup_additional_pages	syscall32_setup_pages
-
-extern unsigned long arch_randomize_brk(struct mm_struct *mm);
-#define arch_randomize_brk arch_randomize_brk
 
 /*
  * True on X86_32 or when emulating IA32 on X86_64
@@ -354,12 +365,10 @@ static inline int mmap_is_ia32(void)
 	return 0;
 }
 
-/* The first two values are special, do not change. See align_addr() */
+/* Do not change the values. See get_align_mask() */
 enum align_flags {
 	ALIGN_VA_32	= BIT(0),
 	ALIGN_VA_64	= BIT(1),
-	ALIGN_VDSO	= BIT(2),
-	ALIGN_TOPDOWN	= BIT(3),
 };
 
 struct va_alignment {
@@ -368,5 +377,5 @@ struct va_alignment {
 } ____cacheline_aligned;
 
 extern struct va_alignment va_align;
-extern unsigned long align_addr(unsigned long, struct file *, enum align_flags);
+extern unsigned long align_vdso_addr(unsigned long);
 #endif /* _ASM_X86_ELF_H */

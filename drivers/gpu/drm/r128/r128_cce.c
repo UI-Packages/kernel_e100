@@ -34,9 +34,8 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 
-#include "drmP.h"
-#include "drm.h"
-#include "r128_drm.h"
+#include <drm/drmP.h>
+#include <drm/r128_drm.h>
 #include "r128_drv.h"
 
 #define R128_FIFO_DEBUG		0
@@ -378,7 +377,7 @@ static int r128_do_init_cce(struct drm_device *dev, drm_r128_init_t *init)
 
 	/* GH: Simple idle check.
 	 */
-	atomic_set(&dev_priv->idle_count, 0);
+	atomic_set_unchecked(&dev_priv->idle_count, 0);
 
 	/* We don't support anything other than bus-mastering ring mode,
 	 * but the ring can be in either AGP or PCI space for the ring

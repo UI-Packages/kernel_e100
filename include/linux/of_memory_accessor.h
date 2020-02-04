@@ -42,7 +42,7 @@ static inline int of_memory_accessor_register(struct device *dev,
 #ifdef CONFIG_OF_MEMORY_ACCESSOR
 int of_memory_accessor_remove(struct device *dev);
 #else
-static inline int of_memory_accessor(struct device *dev)
+static inline int of_memory_accessor_remove(struct device *dev)
 {
 	return 0;
 }

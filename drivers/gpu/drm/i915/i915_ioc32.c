@@ -31,9 +31,9 @@
  */
 #include <linux/compat.h>
 
-#include "drmP.h"
-#include "drm.h"
-#include "i915_drm.h"
+#include <drm/drmP.h>
+#include <drm/i915_drm.h>
+#include "i915_drv.h"
 
 typedef struct _drm_i915_batchbuffer32 {
 	int start;		/* agp offset */
@@ -181,7 +181,7 @@ static int compat_i915_alloc(struct file *file, unsigned int cmd,
 			 (unsigned long)request);
 }
 
-drm_ioctl_compat_t *i915_compat_ioctls[] = {
+static drm_ioctl_compat_t i915_compat_ioctls[] = {
 	[DRM_I915_BATCHBUFFER] = compat_i915_batchbuffer,
 	[DRM_I915_CMDBUFFER] = compat_i915_cmdbuffer,
 	[DRM_I915_GETPARAM] = compat_i915_getparam,
@@ -189,6 +189,7 @@ drm_ioctl_compat_t *i915_compat_ioctls[] = {
 	[DRM_I915_ALLOC] = compat_i915_alloc
 };
 
+#ifdef CONFIG_COMPAT
 /**
  * Called whenever a 32-bit process running under a 64-bit kernel
  * performs an ioctl on /dev/dri/card<n>.
@@ -201,19 +202,17 @@ drm_ioctl_compat_t *i915_compat_ioctls[] = {
 long i915_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	unsigned int nr = DRM_IOCTL_NR(cmd);
-	drm_ioctl_compat_t *fn = NULL;
 	int ret;
 
 	if (nr < DRM_COMMAND_BASE)
 		return drm_compat_ioctl(filp, cmd, arg);
 
-	if (nr < DRM_COMMAND_BASE + DRM_ARRAY_SIZE(i915_compat_ioctls))
-		fn = i915_compat_ioctls[nr - DRM_COMMAND_BASE];
-
-	if (fn != NULL)
+	if (nr < DRM_COMMAND_BASE + DRM_ARRAY_SIZE(i915_compat_ioctls)) {
+		drm_ioctl_compat_t fn = i915_compat_ioctls[nr - DRM_COMMAND_BASE];
 		ret = (*fn) (filp, cmd, arg);
-	else
+	} else
 		ret = drm_ioctl(filp, cmd, arg);
 
 	return ret;
 }
+#endif

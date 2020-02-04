@@ -41,7 +41,7 @@
 extern struct i2c_adapter *nforce2_smbus;
 
 static struct i2c_adapter *s4985_adapter;
-static struct i2c_algorithm *s4985_algo;
+static i2c_algorithm_no_const *s4985_algo;
 
 /* Wrapper access functions for multiplexed SMBus */
 static DEFINE_MUTEX(nforce2_lock);
@@ -164,11 +164,7 @@ static int __init nforce2_s4985_init(void)
 	}
 
 	/* Unregister physical bus */
-	error = i2c_del_adapter(nforce2_smbus);
-	if (error) {
-		dev_err(&nforce2_smbus->dev, "Physical bus removal failed\n");
-		goto ERROR0;
-	}
+	i2c_del_adapter(nforce2_smbus);
 
 	printk(KERN_INFO "Enabling SMBus multiplexing for Tyan S4985\n");
 	/* Define the 5 virtual adapters and algorithms structures */

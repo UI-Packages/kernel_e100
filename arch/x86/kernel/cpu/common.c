@@ -37,6 +37,8 @@
 #include <asm/mce.h>
 #include <asm/msr.h>
 #include <asm/pat.h>
+#include <asm/microcode.h>
+#include <asm/microcode_intel.h>
 
 #ifdef CONFIG_X86_LOCAL_APIC
 #include <asm/uv/uv.h>
@@ -85,60 +87,6 @@ static const struct cpu_dev __cpuinitconst default_cpu = {
 };
 
 static const struct cpu_dev *this_cpu __cpuinitdata = &default_cpu;
-
-DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = { .gdt = {
-#ifdef CONFIG_X86_64
-	/*
-	 * We need valid kernel segments for data and code in long mode too
-	 * IRET will check the segment types  kkeil 2000/10/28
-	 * Also sysret mandates a special GDT layout
-	 *
-	 * TLS descriptors are currently at a different place compared to i386.
-	 * Hopefully nobody expects them at a fixed place (Wine?)
-	 */
-	[GDT_ENTRY_KERNEL32_CS]		= GDT_ENTRY_INIT(0xc09b, 0, 0xfffff),
-	[GDT_ENTRY_KERNEL_CS]		= GDT_ENTRY_INIT(0xa09b, 0, 0xfffff),
-	[GDT_ENTRY_KERNEL_DS]		= GDT_ENTRY_INIT(0xc093, 0, 0xfffff),
-	[GDT_ENTRY_DEFAULT_USER32_CS]	= GDT_ENTRY_INIT(0xc0fb, 0, 0xfffff),
-	[GDT_ENTRY_DEFAULT_USER_DS]	= GDT_ENTRY_INIT(0xc0f3, 0, 0xfffff),
-	[GDT_ENTRY_DEFAULT_USER_CS]	= GDT_ENTRY_INIT(0xa0fb, 0, 0xfffff),
-#else
-	[GDT_ENTRY_KERNEL_CS]		= GDT_ENTRY_INIT(0xc09a, 0, 0xfffff),
-	[GDT_ENTRY_KERNEL_DS]		= GDT_ENTRY_INIT(0xc092, 0, 0xfffff),
-	[GDT_ENTRY_DEFAULT_USER_CS]	= GDT_ENTRY_INIT(0xc0fa, 0, 0xfffff),
-	[GDT_ENTRY_DEFAULT_USER_DS]	= GDT_ENTRY_INIT(0xc0f2, 0, 0xfffff),
-	/*
-	 * Segments used for calling PnP BIOS have byte granularity.
-	 * They code segments and data segments have fixed 64k limits,
-	 * the transfer segment sizes are set at run time.
-	 */
-	/* 32-bit code */
-	[GDT_ENTRY_PNPBIOS_CS32]	= GDT_ENTRY_INIT(0x409a, 0, 0xffff),
-	/* 16-bit code */
-	[GDT_ENTRY_PNPBIOS_CS16]	= GDT_ENTRY_INIT(0x009a, 0, 0xffff),
-	/* 16-bit data */
-	[GDT_ENTRY_PNPBIOS_DS]		= GDT_ENTRY_INIT(0x0092, 0, 0xffff),
-	/* 16-bit data */
-	[GDT_ENTRY_PNPBIOS_TS1]		= GDT_ENTRY_INIT(0x0092, 0, 0),
-	/* 16-bit data */
-	[GDT_ENTRY_PNPBIOS_TS2]		= GDT_ENTRY_INIT(0x0092, 0, 0),
-	/*
-	 * The APM segments have byte granularity and their bases
-	 * are set at run time.  All have 64k limits.
-	 */
-	/* 32-bit code */
-	[GDT_ENTRY_APMBIOS_BASE]	= GDT_ENTRY_INIT(0x409a, 0, 0xffff),
-	/* 16-bit code */
-	[GDT_ENTRY_APMBIOS_BASE+1]	= GDT_ENTRY_INIT(0x009a, 0, 0xffff),
-	/* data */
-	[GDT_ENTRY_APMBIOS_BASE+2]	= GDT_ENTRY_INIT(0x4092, 0, 0xffff),
-
-	[GDT_ENTRY_ESPFIX_SS]		= GDT_ENTRY_INIT(0xc092, 0, 0xfffff),
-	[GDT_ENTRY_PERCPU]		= GDT_ENTRY_INIT(0xc092, 0, 0xfffff),
-	GDT_STACK_CANARY_INIT
-#endif
-} };
-EXPORT_PER_CPU_SYMBOL_GPL(gdt_page);
 
 static int __init x86_xsave_setup(char *s)
 {
@@ -213,7 +161,7 @@ static inline int flag_is_changeable_p(u32 flag)
 }
 
 /* Probe for the CPUID instruction */
-static int __cpuinit have_cpuid_p(void)
+int __cpuinit have_cpuid_p(void)
 {
 	return flag_is_changeable_p(X86_EFLAGS_ID);
 }
@@ -249,34 +197,93 @@ static inline int flag_is_changeable_p(u32 flag)
 {
 	return 1;
 }
-/* Probe for the CPUID instruction */
-static inline int have_cpuid_p(void)
-{
-	return 1;
-}
 static inline void squash_the_stupid_serial_number(struct cpuinfo_x86 *c)
 {
 }
 #endif
 
-static int disable_smep __cpuinitdata;
 static __init int setup_disable_smep(char *arg)
 {
-	disable_smep = 1;
+	setup_clear_cpu_cap(X86_FEATURE_SMEP);
 	return 1;
 }
 __setup("nosmep", setup_disable_smep);
 
-static __cpuinit void setup_smep(struct cpuinfo_x86 *c)
+static __always_inline void setup_smep(struct cpuinfo_x86 *c)
 {
-	if (cpu_has(c, X86_FEATURE_SMEP)) {
-		if (unlikely(disable_smep)) {
-			setup_clear_cpu_cap(X86_FEATURE_SMEP);
-			clear_in_cr4(X86_CR4_SMEP);
-		} else
-			set_in_cr4(X86_CR4_SMEP);
-	}
+	if (cpu_has(c, X86_FEATURE_SMEP))
+		set_in_cr4(X86_CR4_SMEP);
 }
+
+static __init int setup_disable_smap(char *arg)
+{
+	setup_clear_cpu_cap(X86_FEATURE_SMAP);
+	return 1;
+}
+__setup("nosmap", setup_disable_smap);
+
+static __always_inline void setup_smap(struct cpuinfo_x86 *c)
+{
+	unsigned long eflags;
+
+	/* This should have been cleared long ago */
+	raw_local_save_flags(eflags);
+	BUG_ON(eflags & X86_EFLAGS_AC);
+
+	if (cpu_has(c, X86_FEATURE_SMAP))
+		set_in_cr4(X86_CR4_SMAP);
+}
+
+#ifdef CONFIG_X86_64
+static __init int setup_disable_pcid(char *arg)
+{
+	setup_clear_cpu_cap(X86_FEATURE_PCID);
+
+#ifdef CONFIG_PAX_MEMORY_UDEREF
+	if (clone_pgd_mask != ~(pgdval_t)0UL)
+		pax_user_shadow_base = 1UL << TASK_SIZE_MAX_SHIFT;
+#endif
+
+	return 1;
+}
+__setup("nopcid", setup_disable_pcid);
+
+static void setup_pcid(struct cpuinfo_x86 *c)
+{
+	if (!cpu_has(c, X86_FEATURE_PCID)) {
+
+#ifdef CONFIG_PAX_MEMORY_UDEREF
+		if (clone_pgd_mask != ~(pgdval_t)0UL) {
+			pax_open_kernel();
+			pax_user_shadow_base = 1UL << TASK_SIZE_MAX_SHIFT;
+			pax_close_kernel();
+			printk("PAX: slow and weak UDEREF enabled\n");
+		} else
+			printk("PAX: UDEREF disabled\n");
+#endif
+
+		return;
+	}
+
+	printk("PAX: PCID detected\n");
+	set_in_cr4(X86_CR4_PCIDE);
+
+#ifdef CONFIG_PAX_MEMORY_UDEREF
+	pax_open_kernel();
+	clone_pgd_mask = ~(pgdval_t)0UL;
+	pax_close_kernel();
+	if (pax_user_shadow_base)
+		printk("PAX: weak UDEREF enabled\n");
+	else {
+		set_cpu_cap(c, X86_FEATURE_STRONGUDEREF);
+		printk("PAX: strong UDEREF enabled\n");
+	}
+#endif
+
+	if (cpu_has(c, X86_FEATURE_INVPCID))
+		printk("PAX: INVPCID detected\n");
+}
+#endif
 
 /*
  * Some CPU features depend on higher CPUID levels, which may not always
@@ -376,7 +383,7 @@ void switch_to_new_gdt(int cpu)
 {
 	struct desc_ptr gdt_descr;
 
-	gdt_descr.address = (long)get_cpu_gdt_table(cpu);
+	gdt_descr.address = (unsigned long)get_cpu_gdt_table(cpu);
 	gdt_descr.size = GDT_SIZE - 1;
 	load_gdt(&gdt_descr);
 	/* Reload the per-cpu base */
@@ -476,7 +483,7 @@ void __cpuinit cpu_detect_tlb(struct cpuinfo_x86 *c)
 
 	printk(KERN_INFO "Last level iTLB entries: 4KB %d, 2MB %d, 4MB %d\n" \
 		"Last level dTLB entries: 4KB %d, 2MB %d, 4MB %d\n"	     \
-		"tlb_flushall_shift is 0x%x\n",
+		"tlb_flushall_shift: %d\n",
 		tlb_lli_4k[ENTRIES], tlb_lli_2m[ENTRIES],
 		tlb_lli_4m[ENTRIES], tlb_lld_4k[ENTRIES],
 		tlb_lld_2m[ENTRIES], tlb_lld_4m[ENTRIES],
@@ -712,8 +719,6 @@ static void __init early_identify_cpu(struct cpuinfo_x86 *c)
 	c->cpu_index = 0;
 	filter_cpuid_features(c, false);
 
-	setup_smep(c);
-
 	if (this_cpu->c_bsp_init)
 		this_cpu->c_bsp_init(c);
 }
@@ -798,8 +803,6 @@ static void __cpuinit generic_identify(struct cpuinfo_x86 *c)
 		c->phys_proc_id = c->initial_apicid;
 	}
 
-	setup_smep(c);
-
 	get_model_name(c); /* Default name */
 
 	detect_nopl(c);
@@ -864,6 +867,14 @@ static void __cpuinit identify_cpu(struct cpuinfo_x86 *c)
 	/* Disable the PN if appropriate */
 	squash_the_stupid_serial_number(c);
 
+	/* Set up SMEP/SMAP */
+	setup_smep(c);
+	setup_smap(c);
+
+#ifdef CONFIG_X86_64
+	setup_pcid(c);
+#endif
+
 	/*
 	 * The vendor-specific functions might have changed features.
 	 * Now we do "generic changes."
@@ -871,6 +882,10 @@ static void __cpuinit identify_cpu(struct cpuinfo_x86 *c)
 
 	/* Filter out anything that depends on CPUID levels we don't have */
 	filter_cpuid_features(c, true);
+
+#if defined(CONFIG_X86_32) && (defined(CONFIG_PAX_SEGMEXEC) || defined(CONFIG_PAX_KERNEXEC) || defined(CONFIG_PAX_MEMORY_UDEREF))
+	setup_clear_cpu_cap(X86_FEATURE_SEP);
+#endif
 
 	/* If the model name is still unset, do table lookup. */
 	if (!c->x86_model_id[0]) {
@@ -910,6 +925,10 @@ static void __cpuinit identify_cpu(struct cpuinfo_x86 *c)
 		/* AND the already accumulated flags with these */
 		for (i = 0; i < NCAPINTS; i++)
 			boot_cpu_data.x86_capability[i] &= c->x86_capability[i];
+
+		/* OR, i.e. replicate the bug flags */
+		for (i = NCAPINTS; i < NCAPINTS + NBUGINTS; i++)
+			c->x86_capability[i] |= boot_cpu_data.x86_capability[i];
 	}
 
 	/* Init Machine Check Exception if available. */
@@ -942,8 +961,7 @@ void __init identify_boot_cpu(void)
 #else
 	vgetcpu_set_mode();
 #endif
-	if (boot_cpu_data.cpuid_level >= 2)
-		cpu_detect_tlb(&boot_cpu_data);
+	cpu_detect_tlb(&boot_cpu_data);
 }
 
 void __cpuinit identify_secondary_cpu(struct cpuinfo_x86 *c)
@@ -1023,14 +1041,16 @@ void __cpuinit print_cpu_info(struct cpuinfo_x86 *c)
 		printk(KERN_CONT "%s ", vendor);
 
 	if (c->x86_model_id[0])
-		printk(KERN_CONT "%s", c->x86_model_id);
+		printk(KERN_CONT "%s", strim(c->x86_model_id));
 	else
 		printk(KERN_CONT "%d86", c->x86);
 
+	printk(KERN_CONT " (fam: %02x, model: %02x", c->x86, c->x86_model);
+
 	if (c->x86_mask || c->cpuid_level >= 0)
-		printk(KERN_CONT " stepping %02x\n", c->x86_mask);
+		printk(KERN_CONT ", stepping: %02x)\n", c->x86_mask);
 	else
-		printk(KERN_CONT "\n");
+		printk(KERN_CONT ")\n");
 
 	print_cpu_msr(c);
 }
@@ -1054,10 +1074,12 @@ static __init int setup_disablecpuid(char *arg)
 }
 __setup("clearcpuid=", setup_disablecpuid);
 
+DEFINE_PER_CPU(struct thread_info *, current_tinfo) = &init_task.tinfo;
+EXPORT_PER_CPU_SYMBOL(current_tinfo);
+
 #ifdef CONFIG_X86_64
 struct desc_ptr idt_descr = { NR_VECTORS * 16 - 1, (unsigned long) idt_table };
-struct desc_ptr nmi_idt_descr = { NR_VECTORS * 16 - 1,
-				    (unsigned long) nmi_idt_table };
+struct desc_ptr nmi_idt_descr = { NR_VECTORS * 16 - 1, (unsigned long) nmi_idt_table };
 
 DEFINE_PER_CPU_FIRST(union irq_stack_union,
 		     irq_stack_union) __aligned(PAGE_SIZE);
@@ -1071,7 +1093,7 @@ DEFINE_PER_CPU(struct task_struct *, current_task) ____cacheline_aligned =
 EXPORT_PER_CPU_SYMBOL(current_task);
 
 DEFINE_PER_CPU(unsigned long, kernel_stack) =
-	(unsigned long)&init_thread_union - KERNEL_STACK_OFFSET + THREAD_SIZE;
+	(unsigned long)&init_thread_union - 16 + THREAD_SIZE;
 EXPORT_PER_CPU_SYMBOL(kernel_stack);
 
 DEFINE_PER_CPU(char *, irq_stack_ptr) =
@@ -1115,10 +1137,9 @@ void syscall_init(void)
 
 	/* Flags to clear on syscall */
 	wrmsrl(MSR_SYSCALL_MASK,
-	       X86_EFLAGS_TF|X86_EFLAGS_DF|X86_EFLAGS_IF|X86_EFLAGS_IOPL);
+	       X86_EFLAGS_TF|X86_EFLAGS_DF|X86_EFLAGS_IF|
+	       X86_EFLAGS_IOPL|X86_EFLAGS_AC);
 }
-
-unsigned long kernel_eflags;
 
 /*
  * Copies of the original ist values from the tss are only accessed during
@@ -1162,15 +1183,6 @@ DEFINE_PER_CPU(struct task_struct *, fpu_owner_task);
 DEFINE_PER_CPU_ALIGNED(struct stack_canary, stack_canary);
 #endif
 
-/* Make sure %fs and %gs are initialized properly in idle threads */
-struct pt_regs * __cpuinit idle_regs(struct pt_regs *regs)
-{
-	memset(regs, 0, sizeof(struct pt_regs));
-	regs->fs = __KERNEL_PERCPU;
-	regs->gs = __KERNEL_STACK_CANARY;
-
-	return regs;
-}
 #endif	/* CONFIG_X86_64 */
 
 /*
@@ -1221,12 +1233,18 @@ void __cpuinit cpu_init(void)
 	int cpu;
 	int i;
 
+	/*
+	 * Load microcode on this cpu if a valid microcode is available.
+	 * This is early microcode loading procedure.
+	 */
+	load_ucode_ap();
+
 	cpu = stack_smp_processor_id();
-	t = &per_cpu(init_tss, cpu);
+	t = init_tss + cpu;
 	oist = &per_cpu(orig_ist, cpu);
 
 #ifdef CONFIG_NUMA
-	if (cpu != 0 && this_cpu_read(numa_node) == 0 &&
+	if (this_cpu_read(numa_node) == 0 &&
 	    early_cpu_to_node(cpu) != NUMA_NO_NODE)
 		set_numa_node(early_cpu_to_node(cpu));
 #endif
@@ -1248,7 +1266,7 @@ void __cpuinit cpu_init(void)
 	switch_to_new_gdt(cpu);
 	loadsegment(fs, 0);
 
-	load_idt((const struct desc_ptr *)&idt_descr);
+	load_idt(&idt_descr);
 
 	memset(me->thread.tls_array, 0, GDT_ENTRY_TLS_ENTRIES * 8);
 	syscall_init();
@@ -1257,9 +1275,7 @@ void __cpuinit cpu_init(void)
 	wrmsrl(MSR_KERNEL_GS_BASE, 0);
 	barrier();
 
-	x86_configure_nx();
-	if (cpu != 0)
-		enable_x2apic();
+	enable_x2apic();
 
 	/*
 	 * set up and load the per-CPU TSS
@@ -1299,9 +1315,6 @@ void __cpuinit cpu_init(void)
 	dbg_restore_debug_regs();
 
 	fpu_init();
-	xsave_init();
-
-	raw_local_save_flags(kernel_eflags);
 
 	if (is_uv_system())
 		uv_cpu_init();
@@ -1313,8 +1326,10 @@ void __cpuinit cpu_init(void)
 {
 	int cpu = smp_processor_id();
 	struct task_struct *curr = current;
-	struct tss_struct *t = &per_cpu(init_tss, cpu);
+	struct tss_struct *t = init_tss + cpu;
 	struct thread_struct *thread = &curr->thread;
+
+	show_ucode_info_early();
 
 	if (cpumask_test_and_set_cpu(cpu, cpu_initialized_mask)) {
 		printk(KERN_WARNING "CPU#%d already initialized!\n", cpu);
@@ -1354,6 +1369,5 @@ void __cpuinit cpu_init(void)
 	dbg_restore_debug_regs();
 
 	fpu_init();
-	xsave_init();
 }
 #endif

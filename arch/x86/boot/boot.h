@@ -85,7 +85,7 @@ static inline void io_delay(void)
 static inline u16 ds(void)
 {
 	u16 seg;
-	asm("movw %%ds,%0" : "=rm" (seg));
+	asm volatile("movw %%ds,%0" : "=rm" (seg));
 	return seg;
 }
 
@@ -181,7 +181,7 @@ static inline void wrgs32(u32 v, addr_t addr)
 static inline int memcmp(const void *s1, const void *s2, size_t len)
 {
 	u8 diff;
-	asm("repe; cmpsb; setnz %0"
+	asm volatile("repe; cmpsb; setnz %0"
 	    : "=qm" (diff), "+D" (s1), "+S" (s2), "+c" (len));
 	return diff;
 }
@@ -285,16 +285,26 @@ struct biosregs {
 void intcall(u8 int_no, const struct biosregs *ireg, struct biosregs *oreg);
 
 /* cmdline.c */
-int __cmdline_find_option(u32 cmdline_ptr, const char *option, char *buffer, int bufsize);
-int __cmdline_find_option_bool(u32 cmdline_ptr, const char *option);
+int __cmdline_find_option(unsigned long cmdline_ptr, const char *option, char *buffer, int bufsize);
+int __cmdline_find_option_bool(unsigned long cmdline_ptr, const char *option);
 static inline int cmdline_find_option(const char *option, char *buffer, int bufsize)
 {
-	return __cmdline_find_option(boot_params.hdr.cmd_line_ptr, option, buffer, bufsize);
+	unsigned long cmd_line_ptr = boot_params.hdr.cmd_line_ptr;
+
+	if (cmd_line_ptr >= 0x100000)
+		return -1;      /* inaccessible */
+
+	return __cmdline_find_option(cmd_line_ptr, option, buffer, bufsize);
 }
 
 static inline int cmdline_find_option_bool(const char *option)
 {
-	return __cmdline_find_option_bool(boot_params.hdr.cmd_line_ptr, option);
+	unsigned long cmd_line_ptr = boot_params.hdr.cmd_line_ptr;
+
+	if (cmd_line_ptr >= 0x100000)
+		return -1;      /* inaccessible */
+
+	return __cmdline_find_option_bool(cmd_line_ptr, option);
 }
 
 

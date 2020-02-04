@@ -256,7 +256,7 @@ static int __cpuinit err_inject_cpu_callback(struct notifier_block *nfb,
 	return NOTIFY_OK;
 }
 
-static struct notifier_block __cpuinitdata err_inject_cpu_notifier =
+static struct notifier_block __cpuinitdata_nopax err_inject_cpu_notifier =
 {
 	.notifier_call = err_inject_cpu_callback,
 };

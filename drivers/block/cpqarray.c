@@ -160,7 +160,7 @@ static int sendcmd(
 	unsigned int log_unit );
 
 static int ida_unlocked_open(struct block_device *bdev, fmode_t mode);
-static int ida_release(struct gendisk *disk, fmode_t mode);
+static void ida_release(struct gendisk *disk, fmode_t mode);
 static int ida_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg);
 static int ida_getgeo(struct block_device *bdev, struct hd_geometry *geo);
 static int ida_ctlr_ioctl(ctlr_info_t *h, int dsk, ida_ioctl_t *io);
@@ -296,7 +296,7 @@ static int ida_proc_show(struct seq_file *m, void *v)
 
 static int ida_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, ida_proc_show, PDE(inode)->data);
+	return single_open(file, ida_proc_show, PDE_DATA(inode));
 }
 
 static const struct file_operations ida_proc_fops = {
@@ -320,7 +320,7 @@ static void release_io_mem(ctlr_info_t *c)
 	c->io_mem_length = 0;
 }
 
-static void __devexit cpqarray_remove_one(int i)
+static void cpqarray_remove_one(int i)
 {
 	int j;
 	char buff[4];
@@ -352,7 +352,7 @@ static void __devexit cpqarray_remove_one(int i)
 	free_hba(i);
 }
 
-static void __devexit cpqarray_remove_one_pci (struct pci_dev *pdev)
+static void cpqarray_remove_one_pci(struct pci_dev *pdev)
 {
 	int i;
 	ctlr_info_t *tmp_ptr;
@@ -377,7 +377,7 @@ static void __devexit cpqarray_remove_one_pci (struct pci_dev *pdev)
 /* removing an instance that was not removed automatically..
  * must be an eisa card.
  */
-static void __devexit cpqarray_remove_one_eisa (int i)
+static void cpqarray_remove_one_eisa(int i)
 {
 	if (hba[i] == NULL) {
 		printk(KERN_ERR "cpqarray: controller %d appears to have"
@@ -388,7 +388,7 @@ static void __devexit cpqarray_remove_one_eisa (int i)
 }
 
 /* pdev is NULL for eisa */
-static int __devinit cpqarray_register_ctlr( int i, struct pci_dev *pdev)
+static int cpqarray_register_ctlr(int i, struct pci_dev *pdev)
 {
 	struct request_queue *q;
 	int j;
@@ -404,7 +404,7 @@ static int __devinit cpqarray_register_ctlr( int i, struct pci_dev *pdev)
 	if (register_blkdev(COMPAQ_SMART2_MAJOR+i, hba[i]->devname)) {
 		goto Enomem4;
 	}
-	hba[i]->access.set_intr_mask(hba[i], 0);
+	hba[i]->access->set_intr_mask(hba[i], 0);
 	if (request_irq(hba[i]->intr, do_ida_intr,
 		IRQF_DISABLED|IRQF_SHARED, hba[i]->devname, hba[i]))
 	{
@@ -459,7 +459,7 @@ static int __devinit cpqarray_register_ctlr( int i, struct pci_dev *pdev)
 	add_timer(&hba[i]->timer);
 
 	/* Enable IRQ now that spinlock and rate limit timer are set up */
-	hba[i]->access.set_intr_mask(hba[i], FIFO_NOT_EMPTY);
+	hba[i]->access->set_intr_mask(hba[i], FIFO_NOT_EMPTY);
 
 	for(j=0; j<NWD; j++) {
 		struct gendisk *disk = ida_gendisk[i][j];
@@ -505,8 +505,8 @@ Enomem4:
 	return -1;
 }
 
-static int __devinit cpqarray_init_one( struct pci_dev *pdev,
-	const struct pci_device_id *ent)
+static int cpqarray_init_one(struct pci_dev *pdev,
+			     const struct pci_device_id *ent)
 {
 	int i;
 
@@ -536,7 +536,7 @@ static int __devinit cpqarray_init_one( struct pci_dev *pdev,
 static struct pci_driver cpqarray_pci_driver = {
 	.name = "cpqarray",
 	.probe = cpqarray_init_one,
-	.remove = __devexit_p(cpqarray_remove_one_pci),
+	.remove = cpqarray_remove_one_pci,
 	.id_table = cpqarray_pci_device_id,
 };
 
@@ -694,7 +694,7 @@ DBGINFO(
 	for(i=0; i<NR_PRODUCTS; i++) {
 		if (board_id == products[i].board_id) {
 			c->product_name = products[i].product_name;
-			c->access = *(products[i].access);
+			c->access = products[i].access;
 			break;
 		}
 	}
@@ -742,7 +742,7 @@ __setup("smart2=", cpqarray_setup);
 /*
  * Find an EISA controller's signature.  Set up an hba if we find it.
  */
-static int __devinit cpqarray_eisa_detect(void)
+static int cpqarray_eisa_detect(void)
 {
 	int i=0, j;
 	__u32 board_id;
@@ -792,7 +792,7 @@ static int __devinit cpqarray_eisa_detect(void)
 		hba[ctlr]->intr = intr;
 		sprintf(hba[ctlr]->devname, "ida%d", nr_ctlr);
 		hba[ctlr]->product_name = products[j].product_name;
-		hba[ctlr]->access = *(products[j].access);
+		hba[ctlr]->access = products[j].access;
 		hba[ctlr]->ctlr = ctlr;
 		hba[ctlr]->board_id = board_id;
 		hba[ctlr]->pci_dev = NULL; /* not PCI */
@@ -856,7 +856,7 @@ static int ida_unlocked_open(struct block_device *bdev, fmode_t mode)
 /*
  * Close.  Sync first.
  */
-static int ida_release(struct gendisk *disk, fmode_t mode)
+static void ida_release(struct gendisk *disk, fmode_t mode)
 {
 	ctlr_info_t *host;
 
@@ -864,8 +864,6 @@ static int ida_release(struct gendisk *disk, fmode_t mode)
 	host = get_host(disk);
 	host->usage_count--;
 	mutex_unlock(&cpqarray_mutex);
-
-	return 0;
 }
 
 /*
@@ -980,7 +978,7 @@ static void start_io(ctlr_info_t *h)
 
 	while((c = h->reqQ) != NULL) {
 		/* Can't do anything if we're busy */
-		if (h->access.fifo_full(h) == 0)
+		if (h->access->fifo_full(h) == 0)
 			return;
 
 		/* Get the first entry from the request Q */
@@ -988,7 +986,7 @@ static void start_io(ctlr_info_t *h)
 		h->Qdepth--;
 	
 		/* Tell the controller to do our bidding */
-		h->access.submit_command(h, c);
+		h->access->submit_command(h, c);
 
 		/* Get onto the completion Q */
 		addQ(&h->cmpQ, c);
@@ -1050,7 +1048,7 @@ static irqreturn_t do_ida_intr(int irq, void *dev_id)
 	unsigned long flags;
 	__u32 a,a1;
 
-	istat = h->access.intr_pending(h);
+	istat = h->access->intr_pending(h);
 	/* Is this interrupt for us? */
 	if (istat == 0)
 		return IRQ_NONE;
@@ -1061,7 +1059,7 @@ static irqreturn_t do_ida_intr(int irq, void *dev_id)
 	 */
 	spin_lock_irqsave(IDA_LOCK(h->ctlr), flags);
 	if (istat & FIFO_NOT_EMPTY) {
-		while((a = h->access.command_completed(h))) {
+		while((a = h->access->command_completed(h))) {
 			a1 = a; a &= ~3;
 			if ((c = h->cmpQ) == NULL)
 			{  
@@ -1195,6 +1193,7 @@ out_passthru:
 		ida_pci_info_struct pciinfo;
 
 		if (!arg) return -EINVAL;
+		memset(&pciinfo, 0, sizeof(pciinfo));
 		pciinfo.bus = host->pci_dev->bus->number;
 		pciinfo.dev_fn = host->pci_dev->devfn;
 		pciinfo.board_id = host->board_id;
@@ -1449,11 +1448,11 @@ static int sendcmd(
 	/*
 	 * Disable interrupt
 	 */
-	info_p->access.set_intr_mask(info_p, 0);
+	info_p->access->set_intr_mask(info_p, 0);
 	/* Make sure there is room in the command FIFO */
 	/* Actually it should be completely empty at this time. */
 	for (i = 200000; i > 0; i--) {
-		temp = info_p->access.fifo_full(info_p);
+		temp = info_p->access->fifo_full(info_p);
 		if (temp != 0) {
 			break;
 		}
@@ -1466,7 +1465,7 @@ DBG(
 	/*
 	 * Send the cmd
 	 */
-	info_p->access.submit_command(info_p, c);
+	info_p->access->submit_command(info_p, c);
 	complete = pollcomplete(ctlr);
 	
 	pci_unmap_single(info_p->pci_dev, (dma_addr_t) c->req.sg[0].addr, 
@@ -1549,9 +1548,9 @@ static int revalidate_allvol(ctlr_info_t *host)
 	 * we check the new geometry.  Then turn interrupts back on when
 	 * we're done.
 	 */
-	host->access.set_intr_mask(host, 0);
+	host->access->set_intr_mask(host, 0);
 	getgeometry(ctlr);
-	host->access.set_intr_mask(host, FIFO_NOT_EMPTY);
+	host->access->set_intr_mask(host, FIFO_NOT_EMPTY);
 
 	for(i=0; i<NWD; i++) {
 		struct gendisk *disk = ida_gendisk[ctlr][i];
@@ -1591,7 +1590,7 @@ static int pollcomplete(int ctlr)
 	/* Wait (up to 2 seconds) for a command to complete */
 
 	for (i = 200000; i > 0; i--) {
-		done = hba[ctlr]->access.command_completed(hba[ctlr]);
+		done = hba[ctlr]->access->command_completed(hba[ctlr]);
 		if (done == 0) {
 			udelay(10);	/* a short fixed delay */
 		} else

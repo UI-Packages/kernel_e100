@@ -14,10 +14,15 @@
 #include <linux/vmalloc.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/kmemleak.h>
 
 #include <net/ip.h>
 #include <net/sock.h>
 #include <net/net_ratelimit.h>
+
+static int zero = 0;
+static int one = 1;
+static int ushort_max = USHRT_MAX;
 
 #ifdef CONFIG_RPS
 static int rps_sock_flow_sysctl(ctl_table *table, int write,
@@ -25,7 +30,7 @@ static int rps_sock_flow_sysctl(ctl_table *table, int write,
 {
 	unsigned int orig_size, size;
 	int ret, i;
-	ctl_table tmp = {
+	ctl_table_no_const tmp = {
 		.data = &size,
 		.maxlen = sizeof(size),
 		.mode = table->mode
@@ -91,28 +96,32 @@ static struct ctl_table net_core_table[] = {
 		.data		= &sysctl_wmem_max,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
 	},
 	{
 		.procname	= "rmem_max",
 		.data		= &sysctl_rmem_max,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
 	},
 	{
 		.procname	= "wmem_default",
 		.data		= &sysctl_wmem_default,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
 	},
 	{
 		.procname	= "rmem_default",
 		.data		= &sysctl_rmem_default,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
 	},
 	{
 		.procname	= "dev_weight",
@@ -197,42 +206,40 @@ static struct ctl_table netns_core_table[] = {
 		.data		= &init_net.core.sysctl_somaxconn,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec
+		.extra1		= &zero,
+		.extra2		= &ushort_max,
+		.proc_handler	= proc_dointvec_minmax
 	},
 	{ }
 };
 
-__net_initdata struct ctl_path net_core_path[] = {
-	{ .procname = "net", },
-	{ .procname = "core", },
-	{ },
-};
-
 static __net_init int sysctl_core_net_init(struct net *net)
 {
-	struct ctl_table *tbl;
+	ctl_table_no_const *tbl = NULL;
 
 	net->core.sysctl_somaxconn = SOMAXCONN;
 
-	tbl = netns_core_table;
 	if (!net_eq(net, &init_net)) {
-		tbl = kmemdup(tbl, sizeof(netns_core_table), GFP_KERNEL);
+		tbl = kmemdup(netns_core_table, sizeof(netns_core_table), GFP_KERNEL);
 		if (tbl == NULL)
 			goto err_dup;
 
 		tbl[0].data = &net->core.sysctl_somaxconn;
-	}
 
-	net->core.sysctl_hdr = register_net_sysctl_table(net,
-			net_core_path, tbl);
+		/* Don't export any sysctls to unprivileged users */
+		if (net->user_ns != &init_user_ns) {
+			tbl[0].procname = NULL;
+		}
+		net->core.sysctl_hdr = register_net_sysctl(net, "net/core", tbl);
+	} else
+		net->core.sysctl_hdr = register_net_sysctl(net, "net/core", netns_core_table);
 	if (net->core.sysctl_hdr == NULL)
 		goto err_reg;
 
 	return 0;
 
 err_reg:
-	if (tbl != netns_core_table)
-		kfree(tbl);
+	kfree(tbl);
 err_dup:
 	return -ENOMEM;
 }
@@ -247,17 +254,14 @@ static __net_exit void sysctl_core_net_exit(struct net *net)
 	kfree(tbl);
 }
 
-static __net_initdata struct pernet_operations sysctl_core_ops = {
+static __net_initconst struct pernet_operations sysctl_core_ops = {
 	.init = sysctl_core_net_init,
 	.exit = sysctl_core_net_exit,
 };
 
 static __init int sysctl_core_init(void)
 {
-	static struct ctl_table empty[1];
-
-	register_sysctl_paths(net_core_path, empty);
-	register_net_sysctl_rotable(net_core_path, net_core_table);
+	register_net_sysctl(&init_net, "net/core", net_core_table);
 	return register_pernet_subsys(&sysctl_core_ops);
 }
 

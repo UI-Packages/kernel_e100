@@ -28,34 +28,16 @@
 #include <linux/seq_file.h>
 #include <linux/init.h>
 #include <linux/bug.h>
+#include <linux/slab.h>
 
 #include <asm/uaccess.h>
 
-/*
- * Track time spend in interrupt handlers.
- */
-struct msa_irq {
-	msa_time_t times;
-	msa_time_t last_entered;
-};
-
-#ifdef CONFIG_MICROSTATE_C0_COUNT_REGISTER
-msa_time_t msa_cycles_last;
-u32 msa_last_count;
-__cacheline_aligned_in_smp DEFINE_SEQLOCK(msa_seqlock);
-#endif
 /*
  * Dummy this out for the moment.
  */
 void account_process_tick(struct task_struct *p, int user_tick)
 {
 }
-
-/*
- * Time spent in interrupt handlers
- */
-static DEFINE_PER_CPU(struct msa_irq[NR_IRQS + 1], msa_irq);
-
 
 /**
  * fetch_msa_time: Get a sane time value.  The checking and workaround
@@ -159,6 +141,8 @@ void msa_switch(struct task_struct *prev, struct task_struct *next)
 		next_state = MSA_STOPPED;
 	else if (prev->state & (TASK_DEAD | EXIT_DEAD | EXIT_ZOMBIE))
 		next_state = MSA_ZOMBIE;
+	else if (prev->state & TASK_PARKED)
+		next_state = MSA_PARKED;
 	else {
 		printk(KERN_WARNING "msa: Setting UNKNOWN state from %ld\n",
 		       prev->state);
@@ -318,18 +302,141 @@ asmlinkage void msa_user(void)
 		msa_system_time(p, msa_to_cputime(delta));
 }
 
+
+/*
+ * Track time spend in interrupt handlers.
+ */
+struct msa_irq {
+	msa_time_t times;
+	msa_time_t last_entered;
+#ifdef CONFIG_SPARSE_IRQ
+	int irq;
+	struct msa_irq *next;
+#endif
+};
+
+#ifdef CONFIG_SPARSE_IRQ
+#define MSA_IRQ_TBLSIZE 16
+static DEFINE_PER_CPU(struct msa_irq *[MSA_IRQ_TBLSIZE], msa_irq);
+#define MSA_IRQ_STORE_SIZE (NR_IRQS * NR_CPUS)
+static struct msa_irq init_msa_irq_store[MSA_IRQ_STORE_SIZE];
+static struct msa_irq *msa_irq_free;
+DEFINE_RAW_SPINLOCK(msa_irq_free_lock);
+static int msa_nr_irqs = NR_IRQS;
+#define MSA_NR_IRQS msa_nr_irqs
+
+static struct msa_irq *alloc_msa_irq(void)
+{
+	struct msa_irq *o;
+
+	raw_spin_lock(&msa_irq_free_lock);
+	o = msa_irq_free;
+	BUG_ON(!o);
+	msa_irq_free = o->next;
+	raw_spin_unlock(&msa_irq_free_lock);
+	return o;
+}
+
+int expand_msa_irqs(int new_nr_irqs)
+{
+	struct msa_irq *o;
+	int i;
+	unsigned long flags;
+
+	for (i = msa_nr_irqs; i < new_nr_irqs; i++) {
+		o = kzalloc(sizeof(*o), GFP_ATOMIC);
+		if (!o)
+			return -ENOMEM;
+		raw_spin_lock_irqsave(&msa_irq_free_lock, flags);
+		o->next = msa_irq_free;
+		msa_irq_free = o;
+		raw_spin_unlock_irqrestore(&msa_irq_free_lock, flags);
+	}
+	msa_nr_irqs = new_nr_irqs;
+	return 0;
+}
+
+int __init init_msa_irq(void)
+{
+	struct msa_irq *o;
+	int i;
+
+	for (i = 0; i < MSA_IRQ_STORE_SIZE; i++) {
+		o = &init_msa_irq_store[i];
+		o->next = msa_irq_free;
+		msa_irq_free = o;
+	}
+	return 0;
+}
+
+#else
+#define MSA_IRQ_TBLSIZE (NR_IRQS + 1)
+static DEFINE_PER_CPU(struct msa_irq[MSA_IRQ_TBLSIZE], msa_irq);
+#define MSA_NR_IRQS NR_IRQS
+#endif
+
+static struct msa_irq *get_msa_irq_cpu(int irq, int cpu)
+{
+	int idx;
+	struct msa_irq *miq;
+
+#ifdef CONFIG_SPARSE_IRQ
+	idx = irq % MSA_IRQ_TBLSIZE;
+	miq = per_cpu(msa_irq, cpu)[idx];
+	while (miq) {
+		if (miq->irq == irq)
+			break;
+		miq = miq->next;
+	}
+#else
+	idx = irq;
+	miq = &per_cpu(msa_irq, cpu)[idx];
+#endif
+	return miq;
+}
+
+static struct msa_irq *get_msa_irq(int irq, bool alloc)
+{
+	int idx;
+	struct msa_irq *miq;
+
+	BUG_ON(irq >= MSA_NR_IRQS);
+#ifdef CONFIG_SPARSE_IRQ
+	idx = irq % MSA_IRQ_TBLSIZE;
+	miq = __get_cpu_var(msa_irq)[idx];
+	while (miq) {
+		if (miq->irq == irq)
+			break;
+		miq = miq->next;
+	}
+
+	if (!miq) {
+		BUG_ON(!alloc);
+		miq = alloc_msa_irq();
+		miq->irq = irq;
+		miq->next = __get_cpu_var(msa_irq)[idx];
+		__get_cpu_var(msa_irq)[idx] = miq;
+	}
+#else
+	idx = irq;
+	miq = &__get_cpu_var(msa_irq)[idx];
+#endif
+	return miq;
+}
+
 static inline void _msa_start_irq(int irq, int nested)
 {
 	struct task_struct *p = current;
 	struct microstates *msp = &p->microstates;
 	msa_time_t now;
-
-	BUG_ON(irq > NR_IRQS);
+	struct msa_irq *miq;
 
 	/* we're in an interrupt handler... no possibility of preemption */
 	now = fetch_msa_time(msp, NULL);
 
-	__get_cpu_var(msa_irq)[irq].last_entered = now;
+	miq = get_msa_irq(irq, true);
+	BUG_ON(!miq);
+	miq->last_entered = now;
 
 	if (!nested) {
 		msa_time_t delta = now - msp->last_change;
@@ -361,7 +468,6 @@ void msa_start_irq(int irq)
 	/* we're in an interrupt handler... no possibility of preemption */
 	nested = hardirq_count() - HARDIRQ_OFFSET;
 	BUG_ON(nested < 0);
-
 	_msa_start_irq(irq, nested);
 }
 
@@ -392,18 +498,19 @@ void msa_start_irq_raw(int irq)
 void msa_continue_irq(int oldirq_id, int newirq_id)
 {
 	msa_time_t now;
-	struct msa_irq *mip;
-
-	BUG_ON(oldirq_id > NR_IRQS);
-	BUG_ON(newirq_id > NR_IRQS);
+	struct msa_irq *old_miq, *new_miq;
 
 	MSA_NOW(now);
 	/* we're in an interrupt handler... no possibility of preemption */
 	BUG_ON(!in_interrupt());
-	mip = __get_cpu_var(msa_irq);
 
-	mip[oldirq_id].times +=  now - mip[oldirq_id].last_entered;
-	mip[newirq_id].last_entered = now;
+	old_miq = get_msa_irq(oldirq_id, false);
+	new_miq = get_msa_irq(newirq_id, true);
+
+	BUG_ON(!old_miq);
+	BUG_ON(!new_miq);
+	old_miq->times +=  now - old_miq->last_entered;
+	new_miq->last_entered = now;
 }
 
 /**
@@ -422,29 +529,35 @@ void msa_irq_exit(int irq_id, int is_going_to_user)
 {
 	struct task_struct *p = current;
 	struct microstates *msp = &p->microstates;
-	u64 *cpustat = kcpustat_this_cpu->cpustat;
 	msa_time_t now, delta;
-	struct msa_irq *mip;
+	struct msa_irq *miq;
 	int nested;
 
-	BUG_ON(irq_id > NR_IRQS);
-
-	mip = get_cpu_var(msa_irq);
+	miq = get_msa_irq(irq_id, false);
+	BUG_ON(!miq);
 	nested = hardirq_count() - HARDIRQ_OFFSET;
 	BUG_ON(nested < 0);
 
 	MSA_NOW(now);
-	delta = now - mip[irq_id].last_entered;
-	mip[irq_id].times += delta;
-	if (!nested)
-		cpustat[CPUTIME_IRQ] +=	msa_to_cputime64(delta);
+	if (now < miq->last_entered)
+		delta = 0;
+	else
+		delta = now - miq->last_entered;
+	miq->times += delta;
 
 	irq_exit();
 
 	if (!nested) {
-		msa_time_t before = now;
+		msa_time_t before;
+		u64 *cpustat = kcpustat_this_cpu->cpustat;
+
+		cpustat[CPUTIME_IRQ] += msa_to_cputime64(delta);
+
 		now = fetch_msa_time(msp, NULL);
-		delta = now - before;
+		if (now < before)
+			delta = 0;
+		else
+			delta = now - before;
 		cpustat[CPUTIME_SOFTIRQ] += msa_to_cputime64(delta);
 		msp->timers[msp->cur_state] += now - msp->last_change;
 		msp->last_change = now;
@@ -453,8 +566,42 @@ void msa_irq_exit(int irq_id, int is_going_to_user)
 		else
 			msp->cur_state = MSA_ONCPU_SYS;
 	}
+}
 
-	put_cpu_var(msa_irq);
+/*
+ * Same as msa_irq_exit() except it's called from irq handler that
+ * don't call irq_enter/irq_exit. So don't call irq_exit() here and
+ * don't account softirqs time.
+ */
+void msa_irq_exit_raw(int irq_id)
+{
+	struct task_struct *p = current;
+	struct microstates *mp = &p->microstates;
+	msa_time_t now, delta;
+	struct msa_irq *miq;
+	int nested;
+
+	miq = get_msa_irq(irq_id, false);
+	BUG_ON(!miq);
+	nested = hardirq_count();
+	BUG_ON(nested < 0);
+
+	MSA_NOW(now);
+	if (now < miq->last_entered)
+		delta = 0;
+	else
+		delta = now - miq->last_entered;
+
+	if (!nested) {
+		u64 *cpustat = kcpustat_this_cpu->cpustat;
+
+		cpustat[CPUTIME_IRQ] += msa_to_cputime64(delta);
+		if (mp->cur_state == MSA_INTERRUPTED) {
+			mp->timers[mp->cur_state] += now - mp->last_change;
+			mp->last_change = now;
+			mp->cur_state = mp->next_state;
+		}
+	}
 }
 
 /**
@@ -565,46 +712,6 @@ SYSCALL_DEFINE3(msa, int, ntimers, int, which, msa_time_t __user *, timers)
 	return 0;
 }
 
-/*
- * Same as msa_irq_exit() except it's called from irq handler that
- * don't call irq_enter/irq_exit. So don't call irq_exit() here and
- * don't account softirqs time.
- */
-void msa_irq_exit_raw(int irq_id)
-{
-	struct task_struct *p = current;
-	struct microstates *mp = &p->microstates;
-	u64 *cpustat = kcpustat_this_cpu->cpustat;
-	msa_time_t now, delta;
-	struct msa_irq *mip;
-	int nested;
-
-	BUG_ON(irq_id > NR_IRQS);
-
-	mip = get_cpu_var(msa_irq);
-	nested = hardirq_count();
-	BUG_ON(nested < 0);
-
-	MSA_NOW(now);
-	delta = now - mip[irq_id].last_entered;
-	mip[irq_id].times += delta;
-	if (!nested) {
-		msa_time_t before = now;
-
-		cpustat[CPUTIME_IRQ] +=	msa_to_cputime64(delta);
-
-		MSA_NOW(now);
-		delta = now - before;
-		if (mp->cur_state == MSA_INTERRUPTED) {
-			mp->timers[mp->cur_state] += now - mp->last_change;
-			mp->last_change = now;
-			mp->cur_state = mp->next_state;
-		}
-	}
-
-	put_cpu_var(msa_irq);
-}
-
 #ifdef CONFIG_PROC_FS
 
 /*
@@ -614,13 +721,13 @@ void msa_irq_exit_raw(int irq_id)
 
 static void *msa_irq_time_seq_start(struct seq_file *f, loff_t *pos)
 {
-	return (*pos <= NR_IRQS) ? pos : NULL;
+	return (*pos <= MSA_NR_IRQS) ? pos : NULL;
 }
 
 static void *msa_irq_time_seq_next(struct seq_file *f, void *v, loff_t *pos)
 {
 	(*pos)++;
-	if (*pos > NR_IRQS)
+	if (*pos > MSA_NR_IRQS)
 		return NULL;
 	return pos;
 }
@@ -633,6 +740,7 @@ static void msa_irq_time_seq_stop(struct seq_file *f, void *v)
 static int msa_irq_time_seq_show(struct seq_file *f, void *v)
 {
 	int i = *(loff_t *) v, cpu;
+	struct msa_irq *miq;
 
 	if (i == 0) {
 		msa_time_t now;
@@ -649,17 +757,26 @@ static int msa_irq_time_seq_show(struct seq_file *f, void *v)
 		seq_putc(f, '\n');
 	}
 
-	if (i < NR_IRQS) {
-		int all_zeroes = 0;
-		for_each_present_cpu(cpu)
-			if (!(all_zeroes = !per_cpu(msa_irq, cpu)[i].times))
+	if (i < MSA_NR_IRQS) {
+		bool all_zeros = true;
+
+		for_each_present_cpu(cpu) {
+			miq = get_msa_irq_cpu(i, cpu);
+			if (miq && miq->times) {
+				all_zeros = false;
 				break;
-		if (all_zeroes)
+			}
+		}
+		if (all_zeros)
 			return 0;
 		seq_printf(f, "%3d: ", i);
 		for_each_present_cpu(cpu) {
-			msa_time_t x = MSA_TO_NSEC(per_cpu(msa_irq, cpu)[i].times);
-			seq_printf(f, " %15llu", (unsigned long long)x);
+			msa_time_t x = 0;
+
+			miq = get_msa_irq_cpu(i, cpu);
+			if (miq && miq->times)
+				x = MSA_TO_NSEC(miq->times);
+			seq_printf(f, " %15llu", (unsigned long long) x);
 		}
 		seq_putc(f, '\n');
 	}
@@ -688,10 +805,11 @@ static struct file_operations proc_msa_irq_time_ops = {
 
 static int __init proc_msa_irq_time_iinit(void)
 {
-	struct proc_dir_entry *entry;
-	entry = create_proc_entry("msa_irq_time", 0, NULL);
-	if (entry)
-		entry->proc_fops = &proc_msa_irq_time_ops;
+	struct proc_dir_entry *file;
+	file = proc_create_data("msa_irq_time", 0, NULL,
+				&proc_msa_irq_time_ops, NULL);
+	if (!file)
+		return -ENOMEM;
 	return 0;
 }
 

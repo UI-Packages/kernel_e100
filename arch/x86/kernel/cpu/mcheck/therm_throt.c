@@ -23,6 +23,7 @@
 #include <linux/init.h>
 #include <linux/smp.h>
 #include <linux/cpu.h>
+#include <linux/msa.h>
 
 #include <asm/processor.h>
 #include <asm/apic.h>
@@ -288,7 +289,7 @@ thermal_throttle_cpu_callback(struct notifier_block *nfb,
 	return notifier_from_errno(err);
 }
 
-static struct notifier_block thermal_throttle_cpu_notifier __cpuinitdata =
+static struct notifier_block thermal_throttle_cpu_notifier __cpuinitdata_nopax =
 {
 	.notifier_call = thermal_throttle_cpu_callback,
 };
@@ -381,10 +382,11 @@ static void (*smp_thermal_vector)(void) = unexpected_thermal_interrupt;
 asmlinkage void smp_thermal_interrupt(struct pt_regs *regs)
 {
 	irq_enter();
+	msa_start_irq(THERMAL_APIC_VECTOR);
 	exit_idle();
 	inc_irq_stat(irq_thermal_count);
 	smp_thermal_vector();
-	irq_exit();
+	msa_irq_exit(THERMAL_APIC_VECTOR, regs->cs != __KERNEL_CS);
 	/* Ack only at the end to avoid potential reentry */
 	ack_APIC_irq();
 }

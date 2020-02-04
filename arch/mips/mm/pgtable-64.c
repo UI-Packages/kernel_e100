@@ -24,7 +24,7 @@ void pgd_init(unsigned long page)
 	entry = (unsigned long)invalid_pmd_table;
 #endif
 
- 	p = (unsigned long *) page;
+	p = (unsigned long *) page;
 	end = p + PTRS_PER_PGD;
 
 	do {
@@ -45,7 +45,7 @@ void pmd_init(unsigned long addr, unsigned long pagetable)
 {
 	unsigned long *p, *end;
 
- 	p = (unsigned long *) addr;
+	p = (unsigned long *) addr;
 	end = p + PTRS_PER_PMD;
 
 	do {
@@ -71,7 +71,6 @@ void pmdp_splitting_flush(struct vm_area_struct *vma,
 	if (!pmd_trans_splitting(*pmdp)) {
 		pmd_t pmd = pmd_mksplitting(*pmdp);
 		set_pmd_at(vma->vm_mm, address, pmdp, pmd);
-		/* already flushed TLB in set_pmd_at() */
 	}
 }
 

@@ -16,31 +16,9 @@
 #include <asm/thread_info.h>
 #include <asm/cpufeature.h>
 #include <asm/alternative-asm.h>
-
-/*
- * By placing feature2 after feature1 in altinstructions section, we logically
- * implement:
- * If CPU has feature2, jmp to alt2 is used
- * else if CPU has feature1, jmp to alt1 is used
- * else jmp to orig is used.
- */
-	.macro ALTERNATIVE_JUMP feature1,feature2,orig,alt1,alt2
-0:
-	.byte 0xe9	/* 32bit jump */
-	.long \orig-1f	/* by default jump to orig */
-1:
-	.section .altinstr_replacement,"ax"
-2:	.byte 0xe9			/* near jump with 32bit immediate */
-	.long \alt1-1b /* offset */   /* or alternatively to alt1 */
-3:	.byte 0xe9			/* near jump with 32bit immediate */
-	.long \alt2-1b /* offset */   /* or alternatively to alt2 */
-	.previous
-
-	.section .altinstructions,"a"
-	altinstruction_entry 0b,2b,\feature1,5,5
-	altinstruction_entry 0b,3b,\feature2,5,5
-	.previous
-	.endm
+#include <asm/asm.h>
+#include <asm/smap.h>
+#include <asm/pgtable.h>
 
 	.macro ALIGN_DESTINATION
 #ifdef FIX_ALIGNMENT
@@ -63,59 +41,10 @@
 	jmp copy_user_handle_tail
 	.previous
 
-	.section __ex_table,"a"
-	.align 8
-	.quad 100b,103b
-	.quad 101b,103b
-	.previous
+	_ASM_EXTABLE(100b,103b)
+	_ASM_EXTABLE(101b,103b)
 #endif
 	.endm
-
-/* Standard copy_to_user with segment limit checking */
-ENTRY(_copy_to_user)
-	CFI_STARTPROC
-	GET_THREAD_INFO(%rax)
-	movq %rdi,%rcx
-	addq %rdx,%rcx
-	jc bad_to_user
-	cmpq TI_addr_limit(%rax),%rcx
-	ja bad_to_user
-	ALTERNATIVE_JUMP X86_FEATURE_REP_GOOD,X86_FEATURE_ERMS,	\
-		copy_user_generic_unrolled,copy_user_generic_string,	\
-		copy_user_enhanced_fast_string
-	CFI_ENDPROC
-ENDPROC(_copy_to_user)
-
-/* Standard copy_from_user with segment limit checking */
-ENTRY(_copy_from_user)
-	CFI_STARTPROC
-	GET_THREAD_INFO(%rax)
-	movq %rsi,%rcx
-	addq %rdx,%rcx
-	jc bad_from_user
-	cmpq TI_addr_limit(%rax),%rcx
-	ja bad_from_user
-	ALTERNATIVE_JUMP X86_FEATURE_REP_GOOD,X86_FEATURE_ERMS,	\
-		copy_user_generic_unrolled,copy_user_generic_string,	\
-		copy_user_enhanced_fast_string
-	CFI_ENDPROC
-ENDPROC(_copy_from_user)
-
-	.section .fixup,"ax"
-	/* must zero dest */
-ENTRY(bad_from_user)
-bad_from_user:
-	CFI_STARTPROC
-	movl %edx,%ecx
-	xorl %eax,%eax
-	rep
-	stosb
-bad_to_user:
-	movl %edx,%eax
-	ret
-	CFI_ENDPROC
-ENDPROC(bad_from_user)
-	.previous
 
 /*
  * copy_user_generic_unrolled - memory copy with exception handling.
@@ -132,6 +61,8 @@ ENDPROC(bad_from_user)
  */
 ENTRY(copy_user_generic_unrolled)
 	CFI_STARTPROC
+	ASM_PAX_OPEN_USERLAND
+	ASM_STAC
 	cmpl $8,%edx
 	jb 20f		/* less then 8 bytes, go to byte copy loop */
 	ALIGN_DESTINATION
@@ -141,19 +72,19 @@ ENTRY(copy_user_generic_unrolled)
 	jz 17f
 1:	movq (%rsi),%r8
 2:	movq 1*8(%rsi),%r9
-3:	movq 2*8(%rsi),%r10
+3:	movq 2*8(%rsi),%rax
 4:	movq 3*8(%rsi),%r11
 5:	movq %r8,(%rdi)
 6:	movq %r9,1*8(%rdi)
-7:	movq %r10,2*8(%rdi)
+7:	movq %rax,2*8(%rdi)
 8:	movq %r11,3*8(%rdi)
 9:	movq 4*8(%rsi),%r8
 10:	movq 5*8(%rsi),%r9
-11:	movq 6*8(%rsi),%r10
+11:	movq 6*8(%rsi),%rax
 12:	movq 7*8(%rsi),%r11
 13:	movq %r8,4*8(%rdi)
 14:	movq %r9,5*8(%rdi)
-15:	movq %r10,6*8(%rdi)
+15:	movq %rax,6*8(%rdi)
 16:	movq %r11,7*8(%rdi)
 	leaq 64(%rsi),%rsi
 	leaq 64(%rdi),%rdi
@@ -179,6 +110,9 @@ ENTRY(copy_user_generic_unrolled)
 	decl %ecx
 	jnz 21b
 23:	xor %eax,%eax
+	ASM_CLAC
+	ASM_PAX_CLOSE_USERLAND
+	pax_force_retaddr
 	ret
 
 	.section .fixup,"ax"
@@ -191,29 +125,26 @@ ENTRY(copy_user_generic_unrolled)
 60:	jmp copy_user_handle_tail /* ecx is zerorest also */
 	.previous
 
-	.section __ex_table,"a"
-	.align 8
-	.quad 1b,30b
-	.quad 2b,30b
-	.quad 3b,30b
-	.quad 4b,30b
-	.quad 5b,30b
-	.quad 6b,30b
-	.quad 7b,30b
-	.quad 8b,30b
-	.quad 9b,30b
-	.quad 10b,30b
-	.quad 11b,30b
-	.quad 12b,30b
-	.quad 13b,30b
-	.quad 14b,30b
-	.quad 15b,30b
-	.quad 16b,30b
-	.quad 18b,40b
-	.quad 19b,40b
-	.quad 21b,50b
-	.quad 22b,50b
-	.previous
+	_ASM_EXTABLE(1b,30b)
+	_ASM_EXTABLE(2b,30b)
+	_ASM_EXTABLE(3b,30b)
+	_ASM_EXTABLE(4b,30b)
+	_ASM_EXTABLE(5b,30b)
+	_ASM_EXTABLE(6b,30b)
+	_ASM_EXTABLE(7b,30b)
+	_ASM_EXTABLE(8b,30b)
+	_ASM_EXTABLE(9b,30b)
+	_ASM_EXTABLE(10b,30b)
+	_ASM_EXTABLE(11b,30b)
+	_ASM_EXTABLE(12b,30b)
+	_ASM_EXTABLE(13b,30b)
+	_ASM_EXTABLE(14b,30b)
+	_ASM_EXTABLE(15b,30b)
+	_ASM_EXTABLE(16b,30b)
+	_ASM_EXTABLE(18b,40b)
+	_ASM_EXTABLE(19b,40b)
+	_ASM_EXTABLE(21b,50b)
+	_ASM_EXTABLE(22b,50b)
 	CFI_ENDPROC
 ENDPROC(copy_user_generic_unrolled)
 
@@ -237,6 +168,8 @@ ENDPROC(copy_user_generic_unrolled)
  */
 ENTRY(copy_user_generic_string)
 	CFI_STARTPROC
+	ASM_PAX_OPEN_USERLAND
+	ASM_STAC
 	andl %edx,%edx
 	jz 4f
 	cmpl $8,%edx
@@ -251,6 +184,9 @@ ENTRY(copy_user_generic_string)
 3:	rep
 	movsb
 4:	xorl %eax,%eax
+	ASM_CLAC
+	ASM_PAX_CLOSE_USERLAND
+	pax_force_retaddr
 	ret
 
 	.section .fixup,"ax"
@@ -259,11 +195,8 @@ ENTRY(copy_user_generic_string)
 	jmp copy_user_handle_tail
 	.previous
 
-	.section __ex_table,"a"
-	.align 8
-	.quad 1b,11b
-	.quad 3b,12b
-	.previous
+	_ASM_EXTABLE(1b,11b)
+	_ASM_EXTABLE(3b,12b)
 	CFI_ENDPROC
 ENDPROC(copy_user_generic_string)
 
@@ -281,12 +214,17 @@ ENDPROC(copy_user_generic_string)
  */
 ENTRY(copy_user_enhanced_fast_string)
 	CFI_STARTPROC
+	ASM_PAX_OPEN_USERLAND
+	ASM_STAC
 	andl %edx,%edx
 	jz 2f
 	movl %edx,%ecx
 1:	rep
 	movsb
 2:	xorl %eax,%eax
+	ASM_CLAC
+	ASM_PAX_CLOSE_USERLAND
+	pax_force_retaddr
 	ret
 
 	.section .fixup,"ax"
@@ -294,9 +232,6 @@ ENTRY(copy_user_enhanced_fast_string)
 	jmp copy_user_handle_tail
 	.previous
 
-	.section __ex_table,"a"
-	.align 8
-	.quad 1b,12b
-	.previous
+	_ASM_EXTABLE(1b,12b)
 	CFI_ENDPROC
 ENDPROC(copy_user_enhanced_fast_string)

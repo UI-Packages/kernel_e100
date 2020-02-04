@@ -434,12 +434,11 @@ static u32 rds_ib_protocol_compatible(struct rdma_cm_event *event)
 		version = RDS_PROTOCOL_3_0;
 		while ((common >>= 1) != 0)
 			version++;
-	}
-	printk_ratelimited(KERN_NOTICE "RDS: Connection from %pI4 using "
-			"incompatible protocol version %u.%u\n",
-			&dp->dp_saddr,
-			dp->dp_protocol_major,
-			dp->dp_protocol_minor);
+	} else
+		printk_ratelimited(KERN_NOTICE "RDS: Connection from %pI4 using incompatible protocol version %u.%u\n",
+				&dp->dp_saddr,
+				dp->dp_protocol_major,
+				dp->dp_protocol_minor);
 	return version;
 }
 
@@ -718,7 +717,7 @@ void rds_ib_conn_shutdown(struct rds_connection *conn)
 	/* Clear the ACK state */
 	clear_bit(IB_ACK_IN_FLIGHT, &ic->i_ack_flags);
 #ifdef KERNEL_HAS_ATOMIC64
-	atomic64_set(&ic->i_ack_next, 0);
+	atomic64_set_unchecked(&ic->i_ack_next, 0);
 #else
 	ic->i_ack_next = 0;
 #endif

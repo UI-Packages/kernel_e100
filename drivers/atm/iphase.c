@@ -1145,7 +1145,7 @@ static int rx_pkt(struct atm_dev *dev)
 	status = (u_short) (buf_desc_ptr->desc_mode);  
 	if (status & (RX_CER | RX_PTE | RX_OFL))  
 	{  
-                atomic_inc(&vcc->stats->rx_err);
+                atomic_inc_unchecked(&vcc->stats->rx_err);
 		IF_ERR(printk("IA: bad packet, dropping it");)  
                 if (status & RX_CER) { 
                     IF_ERR(printk(" cause: packet CRC error\n");)
@@ -1168,7 +1168,7 @@ static int rx_pkt(struct atm_dev *dev)
 	len = dma_addr - buf_addr;  
         if (len > iadev->rx_buf_sz) {
            printk("Over %d bytes sdu received, dropped!!!\n", iadev->rx_buf_sz);
-           atomic_inc(&vcc->stats->rx_err);
+           atomic_inc_unchecked(&vcc->stats->rx_err);
 	   goto out_free_desc;
         }
 		  
@@ -1318,7 +1318,7 @@ static void rx_dle_intr(struct atm_dev *dev)
           ia_vcc = INPH_IA_VCC(vcc);
           if (ia_vcc == NULL)
           {
-             atomic_inc(&vcc->stats->rx_err);
+             atomic_inc_unchecked(&vcc->stats->rx_err);
              atm_return(vcc, skb->truesize);
              dev_kfree_skb_any(skb);
              goto INCR_DLE;
@@ -1330,7 +1330,7 @@ static void rx_dle_intr(struct atm_dev *dev)
           if ((length > iadev->rx_buf_sz) || (length > 
                               (skb->len - sizeof(struct cpcs_trailer))))
           {
-             atomic_inc(&vcc->stats->rx_err);
+             atomic_inc_unchecked(&vcc->stats->rx_err);
              IF_ERR(printk("rx_dle_intr: Bad  AAL5 trailer %d (skb len %d)", 
                                                             length, skb->len);)
              atm_return(vcc, skb->truesize);
@@ -1346,7 +1346,7 @@ static void rx_dle_intr(struct atm_dev *dev)
 
 	  IF_RX(printk("rx_dle_intr: skb push");)  
 	  vcc->push(vcc,skb);  
-	  atomic_inc(&vcc->stats->rx);
+	  atomic_inc_unchecked(&vcc->stats->rx);
           iadev->rx_pkt_cnt++;
       }  
 INCR_DLE:
@@ -2299,7 +2299,7 @@ static int reset_sar(struct atm_dev *dev)
 }  
 	  
 	  
-static int __devinit ia_init(struct atm_dev *dev)
+static int ia_init(struct atm_dev *dev)
 {  
 	IADEV *iadev;  
 	unsigned long real_base;
@@ -2362,7 +2362,7 @@ static int __devinit ia_init(struct atm_dev *dev)
 	{  
 		printk(DEV_LABEL " (itf %d): can't set up page mapping\n",  
 			    dev->number);  
-		return error;  
+		return -ENOMEM;
 	}  
 	IF_INIT(printk(DEV_LABEL " (itf %d): rev.%d,base=%p,irq=%d\n",  
 			dev->number, iadev->pci->revision, base, iadev->irq);)
@@ -2492,7 +2492,7 @@ static void ia_free_rx(IADEV *iadev)
 			  iadev->rx_dle_dma);  
 }
 
-static int __devinit ia_start(struct atm_dev *dev)
+static int ia_start(struct atm_dev *dev)
 {  
 	IADEV *iadev;  
 	int error;  
@@ -2826,15 +2826,15 @@ static int ia_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
          {
              struct k_sonet_stats *stats;
              stats = &PRIV(_ia_dev[board])->sonet_stats;
-             printk("section_bip: %d\n", atomic_read(&stats->section_bip));
-             printk("line_bip   : %d\n", atomic_read(&stats->line_bip));
-             printk("path_bip   : %d\n", atomic_read(&stats->path_bip));
-             printk("line_febe  : %d\n", atomic_read(&stats->line_febe));
-             printk("path_febe  : %d\n", atomic_read(&stats->path_febe));
-             printk("corr_hcs   : %d\n", atomic_read(&stats->corr_hcs));
-             printk("uncorr_hcs : %d\n", atomic_read(&stats->uncorr_hcs));
-             printk("tx_cells   : %d\n", atomic_read(&stats->tx_cells));
-             printk("rx_cells   : %d\n", atomic_read(&stats->rx_cells));
+             printk("section_bip: %d\n", atomic_read_unchecked(&stats->section_bip));
+             printk("line_bip   : %d\n", atomic_read_unchecked(&stats->line_bip));
+             printk("path_bip   : %d\n", atomic_read_unchecked(&stats->path_bip));
+             printk("line_febe  : %d\n", atomic_read_unchecked(&stats->line_febe));
+             printk("path_febe  : %d\n", atomic_read_unchecked(&stats->path_febe));
+             printk("corr_hcs   : %d\n", atomic_read_unchecked(&stats->corr_hcs));
+             printk("uncorr_hcs : %d\n", atomic_read_unchecked(&stats->uncorr_hcs));
+             printk("tx_cells   : %d\n", atomic_read_unchecked(&stats->tx_cells));
+             printk("rx_cells   : %d\n", atomic_read_unchecked(&stats->rx_cells));
          }
             ia_cmds.status = 0;
             break;
@@ -2939,7 +2939,7 @@ static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
 	if ((desc == 0) || (desc > iadev->num_tx_desc))  
 	{  
 		IF_ERR(printk(DEV_LABEL "invalid desc for send: %d\n", desc);) 
-                atomic_inc(&vcc->stats->tx);
+                atomic_inc_unchecked(&vcc->stats->tx);
 		if (vcc->pop)   
 		    vcc->pop(vcc, skb);   
 		else  
@@ -3044,14 +3044,14 @@ static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
         ATM_DESC(skb) = vcc->vci;
         skb_queue_tail(&iadev->tx_dma_q, skb);
 
-        atomic_inc(&vcc->stats->tx);
+        atomic_inc_unchecked(&vcc->stats->tx);
         iadev->tx_pkt_cnt++;
 	/* Increment transaction counter */  
 	writel(2, iadev->dma+IPHASE5575_TX_COUNTER);  
         
 #if 0        
         /* add flow control logic */ 
-        if (atomic_read(&vcc->stats->tx) % 20 == 0) {
+        if (atomic_read_unchecked(&vcc->stats->tx) % 20 == 0) {
           if (iavcc->vc_desc_cnt > 10) {
              vcc->tx_quota =  vcc->tx_quota * 3 / 4;
             printk("Tx1:  vcc->tx_quota = %d \n", (u32)vcc->tx_quota );
@@ -3168,8 +3168,7 @@ static const struct atmdev_ops ops = {
 	.owner		= THIS_MODULE,
 };  
 	  
-static int __devinit ia_init_one(struct pci_dev *pdev,
-				 const struct pci_device_id *ent)
+static int ia_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {  
 	struct atm_dev *dev;  
 	IADEV *iadev;  
@@ -3229,7 +3228,7 @@ err_out:
 	return ret;
 }
 
-static void __devexit ia_remove_one(struct pci_dev *pdev)
+static void ia_remove_one(struct pci_dev *pdev)
 {
 	struct atm_dev *dev = pci_get_drvdata(pdev);
 	IADEV *iadev = INPH_IA_DEV(dev);
@@ -3270,7 +3269,7 @@ static struct pci_driver ia_driver = {
 	.name =         DEV_LABEL,
 	.id_table =     ia_pci_tbl,
 	.probe =        ia_init_one,
-	.remove =       __devexit_p(ia_remove_one),
+	.remove =       ia_remove_one,
 };
 
 static int __init ia_module_init(void)

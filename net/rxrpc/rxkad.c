@@ -31,7 +31,7 @@
 #define REALM_SZ			40	/* size of principal's auth domain */
 #define SNAME_SZ			40	/* size of service name */
 
-unsigned rxrpc_debug;
+unsigned int rxrpc_debug;
 module_param_named(debug, rxrpc_debug, uint, S_IWUSR | S_IRUGO);
 MODULE_PARM_DESC(debug, "rxkad debugging mask");
 
@@ -207,7 +207,7 @@ static int rxkad_secure_packet_encrypt(const struct rxrpc_call *call,
 	struct rxrpc_crypt iv;
 	struct scatterlist sg[16];
 	struct sk_buff *trailer;
-	unsigned len;
+	unsigned int len;
 	u16 check;
 	int nsg;
 
@@ -610,7 +610,7 @@ static int rxkad_issue_challenge(struct rxrpc_connection *conn)
 
 	len = iov[0].iov_len + iov[1].iov_len;
 
-	hdr.serial = htonl(atomic_inc_return(&conn->serial));
+	hdr.serial = htonl(atomic_inc_return_unchecked(&conn->serial));
 	_proto("Tx CHALLENGE %%%u", ntohl(hdr.serial));
 
 	ret = kernel_sendmsg(conn->trans->local->socket, &msg, iov, 2, len);
@@ -660,7 +660,7 @@ static int rxkad_send_response(struct rxrpc_connection *conn,
 
 	len = iov[0].iov_len + iov[1].iov_len + iov[2].iov_len;
 
-	hdr->serial = htonl(atomic_inc_return(&conn->serial));
+	hdr->serial = htonl(atomic_inc_return_unchecked(&conn->serial));
 	_proto("Tx RESPONSE %%%u", ntohl(hdr->serial));
 
 	ret = kernel_sendmsg(conn->trans->local->socket, &msg, iov, 3, len);
@@ -826,7 +826,7 @@ static int rxkad_decrypt_ticket(struct rxrpc_connection *conn,
 	struct rxrpc_crypt iv, key;
 	struct scatterlist sg[1];
 	struct in_addr addr;
-	unsigned life;
+	unsigned int life;
 	time_t issue, now;
 	bool little_endian;
 	int ret;

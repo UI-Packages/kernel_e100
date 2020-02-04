@@ -34,6 +34,7 @@
 #include <asm/firmware.h>
 #include <asm/vdso.h>
 #include <asm/vdso_datapage.h>
+#include <asm/mman.h>
 
 #include "setup.h"
 
@@ -112,6 +113,10 @@ static struct vdso_patch_def vdso_patches[] = {
 	{
 		CPU_FTR_USE_TB, 0,
 		"__kernel_get_tbfreq", NULL
+	},
+	{
+		CPU_FTR_USE_TB, 0,
+		"__kernel_time", NULL
 	},
 };
 
@@ -218,7 +223,7 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 	vdso_base = VDSO32_MBASE;
 #endif
 
-	current->mm->context.vdso_base = 0;
+	current->mm->context.vdso_base = ~0UL;
 
 	/* vDSO has a problem and was disabled, just don't "enable" it for the
 	 * process
@@ -238,7 +243,7 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 	vdso_base = get_unmapped_area(NULL, vdso_base,
 				      (vdso_pages << PAGE_SHIFT) +
 				      ((VDSO_ALIGNMENT - 1) & PAGE_MASK),
-				      0, 0);
+				      0, MAP_PRIVATE | MAP_EXECUTABLE);
 	if (IS_ERR_VALUE(vdso_base)) {
 		rc = vdso_base;
 		goto fail_mmapsem;
@@ -706,6 +711,32 @@ static void __init vdso_setup_syscall_map(void)
 	}
 }
 
+#ifdef CONFIG_PPC64
+int __cpuinit vdso_getcpu_init(void)
+{
+	unsigned long cpu, node, val;
+
+	/*
+	 * SPRG3 contains the CPU in the bottom 16 bits and the NUMA node in
+	 * the next 16 bits. The VDSO uses this to implement getcpu().
+	 */
+	cpu = get_cpu();
+	WARN_ON_ONCE(cpu > 0xffff);
+
+	node = cpu_to_node(cpu);
+	WARN_ON_ONCE(node > 0xffff);
+
+	val = (cpu & 0xfff) | ((node & 0xffff) << 16);
+	mtspr(SPRN_SPRG3, val);
+	get_paca()->sprg3 = val;
+
+	put_cpu();
+
+	return 0;
+}
+/* We need to call this before SMP init */
+early_initcall(vdso_getcpu_init);
+#endif
 
 static int __init vdso_init(void)
 {

@@ -114,7 +114,7 @@ static char const counter_group_names[CM_COUNTER_GROUPS]
 
 struct cm_counter_group {
 	struct kobject obj;
-	atomic_long_t counter[CM_ATTR_COUNT];
+	atomic_long_unchecked_t counter[CM_ATTR_COUNT];
 };
 
 struct cm_counter_attribute {
@@ -382,20 +382,21 @@ static int cm_init_av_by_path(struct ib_sa_path_rec *path, struct cm_av *av)
 static int cm_alloc_id(struct cm_id_private *cm_id_priv)
 {
 	unsigned long flags;
-	int ret, id;
+	int id;
 	static int next_id;
 
-	do {
-		spin_lock_irqsave(&cm.lock, flags);
-		ret = idr_get_new_above(&cm.local_id_table, cm_id_priv,
-					next_id, &id);
-		if (!ret)
-			next_id = ((unsigned) id + 1) & MAX_ID_MASK;
-		spin_unlock_irqrestore(&cm.lock, flags);
-	} while( (ret == -EAGAIN) && idr_pre_get(&cm.local_id_table, GFP_KERNEL) );
+	idr_preload(GFP_KERNEL);
+	spin_lock_irqsave(&cm.lock, flags);
+
+	id = idr_alloc(&cm.local_id_table, cm_id_priv, next_id, 0, GFP_NOWAIT);
+	if (id >= 0)
+		next_id = max(id + 1, 0);
+
+	spin_unlock_irqrestore(&cm.lock, flags);
+	idr_preload_end();
 
 	cm_id_priv->id.local_id = (__force __be32)id ^ cm.random_id_operand;
-	return ret;
+	return id < 0 ? id : 0;
 }
 
 static void cm_free_id(__be32 local_id)
@@ -1394,7 +1395,7 @@ static void cm_dup_req_handler(struct cm_work *work,
 	struct ib_mad_send_buf *msg = NULL;
 	int ret;
 
-	atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+	atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 			counter[CM_REQ_COUNTER]);
 
 	/* Quick state check to discard duplicate REQs. */
@@ -1778,7 +1779,7 @@ static void cm_dup_rep_handler(struct cm_work *work)
 	if (!cm_id_priv)
 		return;
 
-	atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+	atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 			counter[CM_REP_COUNTER]);
 	ret = cm_alloc_response_msg(work->port, work->mad_recv_wc, &msg);
 	if (ret)
@@ -1945,7 +1946,7 @@ static int cm_rtu_handler(struct cm_work *work)
 	if (cm_id_priv->id.state != IB_CM_REP_SENT &&
 	    cm_id_priv->id.state != IB_CM_MRA_REP_RCVD) {
 		spin_unlock_irq(&cm_id_priv->lock);
-		atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+		atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 				counter[CM_RTU_COUNTER]);
 		goto out;
 	}
@@ -2128,7 +2129,7 @@ static int cm_dreq_handler(struct cm_work *work)
 	cm_id_priv = cm_acquire_id(dreq_msg->remote_comm_id,
 				   dreq_msg->local_comm_id);
 	if (!cm_id_priv) {
-		atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+		atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 				counter[CM_DREQ_COUNTER]);
 		cm_issue_drep(work->port, work->mad_recv_wc);
 		return -EINVAL;
@@ -2153,7 +2154,7 @@ static int cm_dreq_handler(struct cm_work *work)
 	case IB_CM_MRA_REP_RCVD:
 		break;
 	case IB_CM_TIMEWAIT:
-		atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+		atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 				counter[CM_DREQ_COUNTER]);
 		if (cm_alloc_response_msg(work->port, work->mad_recv_wc, &msg))
 			goto unlock;
@@ -2167,7 +2168,7 @@ static int cm_dreq_handler(struct cm_work *work)
 			cm_free_msg(msg);
 		goto deref;
 	case IB_CM_DREQ_RCVD:
-		atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+		atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 				counter[CM_DREQ_COUNTER]);
 		goto unlock;
 	default:
@@ -2534,7 +2535,7 @@ static int cm_mra_handler(struct cm_work *work)
 		    ib_modify_mad(cm_id_priv->av.port->mad_agent,
 				  cm_id_priv->msg, timeout)) {
 			if (cm_id_priv->id.lap_state == IB_CM_MRA_LAP_RCVD)
-				atomic_long_inc(&work->port->
+				atomic_long_inc_unchecked(&work->port->
 						counter_group[CM_RECV_DUPLICATES].
 						counter[CM_MRA_COUNTER]);
 			goto out;
@@ -2543,7 +2544,7 @@ static int cm_mra_handler(struct cm_work *work)
 		break;
 	case IB_CM_MRA_REQ_RCVD:
 	case IB_CM_MRA_REP_RCVD:
-		atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+		atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 				counter[CM_MRA_COUNTER]);
 		/* fall through */
 	default:
@@ -2705,7 +2706,7 @@ static int cm_lap_handler(struct cm_work *work)
 	case IB_CM_LAP_IDLE:
 		break;
 	case IB_CM_MRA_LAP_SENT:
-		atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+		atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 				counter[CM_LAP_COUNTER]);
 		if (cm_alloc_response_msg(work->port, work->mad_recv_wc, &msg))
 			goto unlock;
@@ -2721,7 +2722,7 @@ static int cm_lap_handler(struct cm_work *work)
 			cm_free_msg(msg);
 		goto deref;
 	case IB_CM_LAP_RCVD:
-		atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+		atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 				counter[CM_LAP_COUNTER]);
 		goto unlock;
 	default:
@@ -3005,7 +3006,7 @@ static int cm_sidr_req_handler(struct cm_work *work)
 	cur_cm_id_priv = cm_insert_remote_sidr(cm_id_priv);
 	if (cur_cm_id_priv) {
 		spin_unlock_irq(&cm.lock);
-		atomic_long_inc(&work->port->counter_group[CM_RECV_DUPLICATES].
+		atomic_long_inc_unchecked(&work->port->counter_group[CM_RECV_DUPLICATES].
 				counter[CM_SIDR_REQ_COUNTER]);
 		goto out; /* Duplicate message. */
 	}
@@ -3217,10 +3218,10 @@ static void cm_send_handler(struct ib_mad_agent *mad_agent,
 	if (!msg->context[0] && (attr_index != CM_REJ_COUNTER))
 		msg->retries = 1;
 
-	atomic_long_add(1 + msg->retries,
+	atomic_long_add_unchecked(1 + msg->retries,
 			&port->counter_group[CM_XMIT].counter[attr_index]);
 	if (msg->retries)
-		atomic_long_add(msg->retries,
+		atomic_long_add_unchecked(msg->retries,
 				&port->counter_group[CM_XMIT_RETRIES].
 				counter[attr_index]);
 
@@ -3430,7 +3431,7 @@ static void cm_recv_handler(struct ib_mad_agent *mad_agent,
 	}
 
 	attr_id = be16_to_cpu(mad_recv_wc->recv_buf.mad->mad_hdr.attr_id);
-	atomic_long_inc(&port->counter_group[CM_RECV].
+	atomic_long_inc_unchecked(&port->counter_group[CM_RECV].
 			counter[attr_id - CM_ATTR_ID_OFFSET]);
 
 	work = kmalloc(sizeof *work + sizeof(struct ib_sa_path_rec) * paths,
@@ -3635,7 +3636,7 @@ static ssize_t cm_show_counter(struct kobject *obj, struct attribute *attr,
 	cm_attr = container_of(attr, struct cm_counter_attribute, attr);
 
 	return sprintf(buf, "%ld\n",
-		       atomic_long_read(&group->counter[cm_attr->index]));
+		       atomic_long_read_unchecked(&group->counter[cm_attr->index]));
 }
 
 static const struct sysfs_ops cm_counter_ops = {
@@ -3844,28 +3845,31 @@ static int __init ib_cm_init(void)
 	cm.remote_sidr_table = RB_ROOT;
 	idr_init(&cm.local_id_table);
 	get_random_bytes(&cm.random_id_operand, sizeof cm.random_id_operand);
-	idr_pre_get(&cm.local_id_table, GFP_KERNEL);
 	INIT_LIST_HEAD(&cm.timewait_list);
 
 	ret = class_register(&cm_class);
-	if (ret)
-		return -ENOMEM;
-
-	cm.wq = create_workqueue("ib_cm");
-	if (!cm.wq) {
+	if (ret) {
 		ret = -ENOMEM;
 		goto error1;
 	}
 
+	cm.wq = create_workqueue("ib_cm");
+	if (!cm.wq) {
+		ret = -ENOMEM;
+		goto error2;
+	}
+
 	ret = ib_register_client(&cm_client);
 	if (ret)
-		goto error2;
+		goto error3;
 
 	return 0;
-error2:
+error3:
 	destroy_workqueue(cm.wq);
-error1:
+error2:
 	class_unregister(&cm_class);
+error1:
+	idr_destroy(&cm.local_id_table);
 	return ret;
 }
 

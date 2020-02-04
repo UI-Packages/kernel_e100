@@ -14,6 +14,9 @@
 #define PAGE_SIZE	(_AC(1, UL) << PAGE_SHIFT)
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
+#define ktla_ktva(addr)			(addr)
+#define ktva_ktla(addr)			(addr)
+
 #ifndef __ASSEMBLY__
 
 struct page;
@@ -99,7 +102,7 @@ extern unsigned long uml_physmem;
 
 #define __va_space (8*1024*1024)
 
-#include "mem.h"
+#include <mem.h>
 
 /* Cast to unsigned long before casting to void * to avoid a warning from
  * mmap_kmem about cutting a long long down to a void *.  Not sure that

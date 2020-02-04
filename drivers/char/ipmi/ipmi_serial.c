@@ -1324,7 +1324,7 @@ static int smi_type_proc_show(struct seq_file *m, void *v)
 
 static int smi_type_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, smi_type_proc_show, PDE(inode)->data);
+	return single_open(file, smi_type_proc_show, inode->i_private);
 }
 
 static const struct file_operations smi_type_proc_ops = {
@@ -1391,7 +1391,7 @@ static int smi_param_proc_show(struct seq_file *m, void *data)
 
 static int smi_param_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, smi_param_proc_show, PDE(inode)->data);
+	return single_open(file, smi_param_proc_show, inode->i_private);
 }
 
 static const struct file_operations smi_param_proc_ops = {
@@ -1434,7 +1434,7 @@ static int smi_stat_proc_show(struct seq_file *m, void *data)
 
 static int smi_stat_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, smi_stat_proc_show, PDE(inode)->data);
+	return single_open(file, smi_stat_proc_show, inode->i_private);
 }
 
 static const struct file_operations smi_stat_proc_ops = {

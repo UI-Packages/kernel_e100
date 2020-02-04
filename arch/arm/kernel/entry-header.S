@@ -73,8 +73,82 @@
 	msr	cpsr_c, \rtemp			@ switch back to the SVC mode
 	.endm
 
+	.macro	pax_enter_kernel_user
+#if defined(CONFIG_PAX_KERNEXEC) || defined(CONFIG_PAX_MEMORY_UDEREF)
+	@ save regs
+	stmdb	sp!, {r0, r1}
+	@ read DACR from cpu_domain into r1
+	mov	r0, sp
+	@ assume 8K pages, since we have to split the immediate in two
+	bic	r0, r0, #(0x1fc0)
+	bic	r0, r0, #(0x3f)
+	ldr	r1, [r0, #TI_CPU_DOMAIN]
+#ifdef CONFIG_PAX_MEMORY_UDEREF
+	@ set current DOMAIN_USER to DOMAIN_NOACCESS
+	bic	r1, r1, #(domain_val(DOMAIN_USER, 3))
+#endif
+#ifdef CONFIG_PAX_KERNEXEC
+	@ set current DOMAIN_KERNEL to DOMAIN_KERNELCLIENT
+	bic	r1, r1, #(domain_val(DOMAIN_KERNEL, 3))
+	orr	r1, r1, #(domain_val(DOMAIN_KERNEL, DOMAIN_KERNELCLIENT))
+#endif
+	@ write r1 to current_thread_info()->cpu_domain
+	str	r1, [r0, #TI_CPU_DOMAIN]
+	@ write r1 to DACR
+	mcr	p15, 0, r1, c3, c0, 0
+	@ instruction sync
+	instr_sync
+	@ restore regs
+	ldmia	sp!, {r0, r1}
+#endif
+	.endm
+
+	.macro  pax_exit_kernel
+#if defined(CONFIG_PAX_KERNEXEC) || defined(CONFIG_PAX_MEMORY_UDEREF)
+	@ save regs
+	stmdb	sp!, {r0, r1}
+	@ read old DACR from stack into r1
+	ldr	r1, [sp, #(8 + S_SP)]
+	sub	r1, r1, #8
+	ldr	r1, [r1]
+
+	@ write r1 to current_thread_info()->cpu_domain
+	mov	r0, sp
+	@ assume 8K pages, since we have to split the immediate in two
+	bic	r0, r0, #(0x1fc0)
+	bic	r0, r0, #(0x3f)
+	str	r1, [r0, #TI_CPU_DOMAIN]
+	@ write r1 to DACR
+	mcr	p15, 0, r1, c3, c0, 0
+	@ instruction sync
+	instr_sync
+	@ restore regs
+	ldmia	sp!, {r0, r1}
+#endif
+	.endm
+
 #ifndef CONFIG_THUMB2_KERNEL
-	.macro	svc_exit, rpsr
+	.macro	svc_exit, rpsr, irq = 0
+	.if	\irq != 0
+	@ IRQs already off
+#ifdef CONFIG_TRACE_IRQFLAGS
+	@ The parent context IRQs must have been enabled to get here in
+	@ the first place, so there's no point checking the PSR I bit.
+	bl	trace_hardirqs_on
+#endif
+	.else
+	@ IRQs off again before pulling preserved data off the stack
+	disable_irq_notrace
+#ifdef CONFIG_TRACE_IRQFLAGS
+	tst	\rpsr, #PSR_I_BIT
+	bleq	trace_hardirqs_on
+	tst	\rpsr, #PSR_I_BIT
+	blne	trace_hardirqs_off
+#endif
+	.endif
+
+	pax_exit_kernel
+
 	msr	spsr_cxsf, \rpsr
 #if defined(CONFIG_CPU_V6)
 	ldr	r0, [sp]
@@ -120,7 +194,27 @@
 	mov	pc, \reg
 	.endm
 #else	/* CONFIG_THUMB2_KERNEL */
-	.macro	svc_exit, rpsr
+	.macro	svc_exit, rpsr, irq = 0
+	.if	\irq != 0
+	@ IRQs already off
+#ifdef CONFIG_TRACE_IRQFLAGS
+	@ The parent context IRQs must have been enabled to get here in
+	@ the first place, so there's no point checking the PSR I bit.
+	bl	trace_hardirqs_on
+#endif
+	.else
+	@ IRQs off again before pulling preserved data off the stack
+	disable_irq_notrace
+#ifdef CONFIG_TRACE_IRQFLAGS
+	tst	\rpsr, #PSR_I_BIT
+	bleq	trace_hardirqs_on
+	tst	\rpsr, #PSR_I_BIT
+	blne	trace_hardirqs_off
+#endif
+	.endif
+
+	pax_exit_kernel
+
 	ldr	lr, [sp, #S_SP]			@ top of the stack
 	ldrd	r0, r1, [sp, #S_LR]		@ calling lr and pc
 	clrex					@ clear the exclusive monitor
@@ -162,6 +256,34 @@
 	nop
 	.endm
 #endif	/* !CONFIG_THUMB2_KERNEL */
+
+/*
+ * Context tracking subsystem.  Used to instrument transitions
+ * between user and kernel mode.
+ */
+	.macro ct_user_exit, save = 1
+#ifdef CONFIG_CONTEXT_TRACKING
+	.if	\save
+	stmdb   sp!, {r0-r3, ip, lr}
+	bl	user_exit
+	ldmia	sp!, {r0-r3, ip, lr}
+	.else
+	bl	user_exit
+	.endif
+#endif
+	.endm
+
+	.macro ct_user_enter, save = 1
+#ifdef CONFIG_CONTEXT_TRACKING
+	.if	\save
+	stmdb   sp!, {r0-r3, ip, lr}
+	bl	user_enter
+	ldmia	sp!, {r0-r3, ip, lr}
+	.else
+	bl	user_enter
+	.endif
+#endif
+	.endm
 
 /*
  * These are the registers used in the syscall handler, and allow us to

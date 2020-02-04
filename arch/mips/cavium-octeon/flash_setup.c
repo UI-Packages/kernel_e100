@@ -27,7 +27,6 @@ static const char *part_probe_types[] = {
 	NULL
 };
 
-
 static map_word octeon_flash_map_read(struct map_info *map, unsigned long ofs)
 {
 	map_word r;
@@ -90,7 +89,7 @@ static int octeon_flash_probe(struct platform_device *pdev)
 		 * address so the entire flash fits below
 		 * 0x1fc00000. This way the flash aliases to
 		 * 0x1fc00000 for booting. Software can access the
- 		 * full flash at the true address, while core boot can
+		 * full flash at the true address, while core boot can
 		 * access 4MB.
 		 */
 		/* Use this name so old part lines work */

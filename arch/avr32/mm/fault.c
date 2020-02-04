@@ -41,6 +41,23 @@ static inline int notify_page_fault(struct pt_regs *regs, int trap)
 
 int exception_trace = 1;
 
+#ifdef CONFIG_PAX_PAGEEXEC
+void pax_report_insns(struct pt_regs *regs, void *pc, void *sp)
+{
+	unsigned long i;
+
+	printk(KERN_ERR "PAX: bytes at PC: ");
+	for (i = 0; i < 20; i++) {
+		unsigned char c;
+		if (get_user(c, (unsigned char *)pc+i))
+			printk(KERN_CONT "???????? ");
+		else
+			printk(KERN_CONT "%02x ", c);
+	}
+	printk("\n");
+}
+#endif
+
 /*
  * This routine handles page faults. It determines the address and the
  * problem, and then passes it off to one of the appropriate routines.
@@ -61,10 +78,10 @@ asmlinkage void do_page_fault(unsigned long ecr, struct pt_regs *regs)
 	const struct exception_table_entry *fixup;
 	unsigned long address;
 	unsigned long page;
-	int writeaccess;
 	long signr;
 	int code;
 	int fault;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	if (notify_page_fault(regs, ecr))
 		return;
@@ -86,6 +103,7 @@ asmlinkage void do_page_fault(unsigned long ecr, struct pt_regs *regs)
 
 	local_irq_enable();
 
+retry:
 	down_read(&mm->mmap_sem);
 
 	vma = find_vma(mm, address);
@@ -104,7 +122,6 @@ asmlinkage void do_page_fault(unsigned long ecr, struct pt_regs *regs)
 	 */
 good_area:
 	code = SEGV_ACCERR;
-	writeaccess = 0;
 
 	switch (ecr) {
 	case ECR_PROTECTION_X:
@@ -121,7 +138,7 @@ good_area:
 	case ECR_TLB_MISS_W:
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
-		writeaccess = 1;
+		flags |= FAULT_FLAG_WRITE;
 		break;
 	default:
 		panic("Unhandled case %lu in do_page_fault!", ecr);
@@ -132,7 +149,11 @@ good_area:
 	 * sure we exit gracefully rather than endlessly redo the
 	 * fault.
 	 */
-	fault = handle_mm_fault(mm, vma, address, writeaccess ? FAULT_FLAG_WRITE : 0);
+	fault = handle_mm_fault(mm, vma, address, flags);
+
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+		return;
+
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		if (fault & VM_FAULT_OOM)
 			goto out_of_memory;
@@ -140,10 +161,24 @@ good_area:
 			goto do_sigbus;
 		BUG();
 	}
-	if (fault & VM_FAULT_MAJOR)
-		tsk->maj_flt++;
-	else
-		tsk->min_flt++;
+
+	if (flags & FAULT_FLAG_ALLOW_RETRY) {
+		if (fault & VM_FAULT_MAJOR)
+			tsk->maj_flt++;
+		else
+			tsk->min_flt++;
+		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			flags |= FAULT_FLAG_TRIED;
+
+			/*
+			 * No need to up_read(&mm->mmap_sem) as we would have
+			 * already released it in __lock_page_or_retry() in
+			 * mm/filemap.c.
+			 */
+			goto retry;
+		}
+	}
 
 	up_read(&mm->mmap_sem);
 	return;
@@ -156,6 +191,16 @@ bad_area:
 	up_read(&mm->mmap_sem);
 
 	if (user_mode(regs)) {
+
+#ifdef CONFIG_PAX_PAGEEXEC
+		if (mm->pax_flags & MF_PAX_PAGEEXEC) {
+			if (ecr == ECR_PROTECTION_X || ecr == ECR_TLB_MISS_X) {
+				pax_report_fault(regs, (void *)regs->pc, (void *)regs->sp);
+				do_group_exit(SIGKILL);
+			}
+		}
+#endif
+
 		if (exception_trace && printk_ratelimit())
 			printk("%s%s[%d]: segfault at %08lx pc %08lx "
 			       "sp %08lx ecr %lu\n",

@@ -16,10 +16,14 @@
 
 extern pud_t level3_kernel_pgt[512];
 extern pud_t level3_ident_pgt[512];
+extern pud_t level3_vmalloc_start_pgt[512];
+extern pud_t level3_vmalloc_end_pgt[512];
+extern pud_t level3_vmemmap_pgt[512];
+extern pud_t level2_vmemmap_pgt[512];
 extern pmd_t level2_kernel_pgt[512];
 extern pmd_t level2_fixmap_pgt[512];
-extern pmd_t level2_ident_pgt[512];
-extern pgd_t init_level4_pgt[];
+extern pmd_t level2_ident_pgt[512*2];
+extern pgd_t init_level4_pgt[512];
 
 #define swapper_pg_dir init_level4_pgt
 
@@ -61,7 +65,9 @@ static inline void native_set_pte_atomic(pte_t *ptep, pte_t pte)
 
 static inline void native_set_pmd(pmd_t *pmdp, pmd_t pmd)
 {
+	pax_open_kernel();
 	*pmdp = pmd;
+	pax_close_kernel();
 }
 
 static inline void native_pmd_clear(pmd_t *pmd)
@@ -97,7 +103,9 @@ static inline pmd_t native_pmdp_get_and_clear(pmd_t *xp)
 
 static inline void native_set_pud(pud_t *pudp, pud_t pud)
 {
+	pax_open_kernel();
 	*pudp = pud;
+	pax_close_kernel();
 }
 
 static inline void native_pud_clear(pud_t *pud)
@@ -106,6 +114,13 @@ static inline void native_pud_clear(pud_t *pud)
 }
 
 static inline void native_set_pgd(pgd_t *pgdp, pgd_t pgd)
+{
+	pax_open_kernel();
+	*pgdp = pgd;
+	pax_close_kernel();
+}
+
+static inline void native_set_pgd_batched(pgd_t *pgdp, pgd_t pgd)
 {
 	*pgdp = pgd;
 }
@@ -141,8 +156,6 @@ static inline int pgd_large(pgd_t pgd) { return 0; }
 /* x86-64 always has all page tables mapped. */
 #define pte_offset_map(dir, address) pte_offset_kernel((dir), (address))
 #define pte_unmap(pte) ((void)(pte))/* NOP */
-
-#define update_mmu_cache(vma, address, ptep) do { } while (0)
 
 /* Encode and de-code a swap entry */
 #if _PAGE_BIT_FILE < _PAGE_BIT_PROTNONE
@@ -181,6 +194,11 @@ extern void cleanup_highmap(void);
 #define	kc_offset_to_vaddr(o) ((o) | ~__VIRTUAL_MASK)
 
 #define __HAVE_ARCH_PTE_SAME
+
+#define vmemmap ((struct page *)VMEMMAP_START)
+
+extern void init_extra_mapping_uc(unsigned long phys, unsigned long size);
+extern void init_extra_mapping_wb(unsigned long phys, unsigned long size);
 
 #endif /* !__ASSEMBLY__ */
 

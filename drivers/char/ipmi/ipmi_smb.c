@@ -965,7 +965,7 @@ static void sender(void                *send_info,
 					del_timer(&smb_info->retry_timer);
 				}
 			}
-			i2c_poll(smb_info->client, 500);
+			i2c_poll(smb_info->client, 500000);
 		}
 		return;
 	}
@@ -1038,7 +1038,7 @@ static void set_run_to_completion(void *send_info, int i_run_to_completion)
 					del_timer(&smb_info->retry_timer);
 				}
 			}
-			i2c_poll(smb_info->client, 500);
+			i2c_poll(smb_info->client, 500000);
 		}
 	}
 }
@@ -1046,7 +1046,7 @@ static void set_run_to_completion(void *send_info, int i_run_to_completion)
 static void poll(void *send_info)
 {
 	struct smb_info *smb_info = send_info;
-	i2c_poll(smb_info->client, 10);
+	i2c_poll(smb_info->client, 10000);
 }
 
 static int inc_usecount(void *send_info)
@@ -1124,7 +1124,7 @@ MODULE_PARM_DESC(dbg_probe, "Enable debugging of probing of adapters.");
 
 static unsigned int next_smb_if = 0;
 
-static int __devexit smb_remove(struct i2c_client *client)
+static int smb_remove(struct i2c_client *client)
 {
 	struct smb_info *smb_info = i2c_get_clientdata(client);
 	int rv;
@@ -1235,7 +1235,7 @@ static int smi_type_proc_show(struct seq_file *m, void *v)
 
 static int smi_type_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, smi_type_proc_show, PDE(inode)->data);
+	return single_open(file, smi_type_proc_show, inode->i_private);
 }
 
 static const struct file_operations smi_type_proc_ops = {
@@ -1276,7 +1276,7 @@ static int smi_stats_proc_show(struct seq_file *m, void *v)
 
 static int smi_stats_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, smi_stats_proc_show, PDE(inode)->data);
+	return single_open(file, smi_stats_proc_show, inode->i_private);
 }
 
 static const struct file_operations smi_stats_proc_ops = {
@@ -1286,8 +1286,7 @@ static const struct file_operations smi_stats_proc_ops = {
 	.release	= single_release,
 };
 
-static int __devinit smb_probe(struct i2c_client *client,
-			       const struct i2c_device_id *id)
+static int smb_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	unsigned char     msg[3];
 	unsigned char     *resp;
@@ -1538,7 +1537,7 @@ static struct i2c_driver smb_i2c_driver = {
 		.name  = "ipmi_smb"
 	},
 	.probe        = smb_probe,
-	.remove       = __devexit_p(smb_remove),
+	.remove       = smb_remove,
 	.id_table     = smb_id,
 	.detect       = smb_detect,
 	.address_list = address_list
@@ -1636,7 +1635,7 @@ static int __devinit decode_acpi(int acpi_num)
 #endif
 
 #ifdef CONFIG_DMI
-static int __devinit decode_dmi(struct dmi_header *dm)
+static int decode_dmi(struct dmi_header *dm)
 {
 	int           addr_in_slave_addr = 0;
 	u8            *data = (u8 *)dm;
@@ -1679,7 +1678,7 @@ static int __devinit decode_dmi(struct dmi_header *dm)
 	return 0;
 }
 
-static void __devinit dmi_iterator(void)
+static void dmi_iterator(void)
 {
 	const struct dmi_device *dev = NULL;
 
@@ -1688,7 +1687,7 @@ static void __devinit dmi_iterator(void)
 }
 #endif
 
-static int __init init_ipmi_smb(void)
+static int init_ipmi_smb(void)
 {
 	int i;
 	int rv;
@@ -1719,7 +1718,7 @@ static int __init init_ipmi_smb(void)
 }
 module_init(init_ipmi_smb);
 
-static void __exit cleanup_ipmi_smb(void)
+static void cleanup_ipmi_smb(void)
 {
 	if (!initialized)
 		return;

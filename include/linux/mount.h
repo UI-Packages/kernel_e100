@@ -47,10 +47,20 @@ struct mnt_namespace;
 
 #define MNT_INTERNAL	0x4000
 
+/*
+ * The mount is being forceably unmounted.
+ */
+#define MNT_FUMOUNT	0x8000
+
+#define MNT_LOCK_READONLY	0x400000
+
 struct vfsmount {
 	struct dentry *mnt_root;	/* root of the mounted tree */
 	struct super_block *mnt_sb;	/* pointer to superblock */
 	int mnt_flags;
+#ifdef CONFIG_BLK_DEV_REMOVE
+	struct list_head mnt_sblist;
+#endif
 };
 
 struct file; /* forward dec */
@@ -75,5 +85,11 @@ extern void mnt_set_expiry(struct vfsmount *mnt, struct list_head *expiry_list);
 extern void mark_mounts_for_expiry(struct list_head *mounts);
 
 extern dev_t name_to_dev_t(char *name);
+
+#ifdef CONFIG_BLK_DEV_REMOVE
+extern int bdremove_insertfd (struct task_struct *task, int fd, dev_t dev);
+extern int bdremove_removefd (struct task_struct *task, int fd, dev_t dev);
+extern int bdremove_removefdbytask (struct task_struct *task);
+#endif
 
 #endif /* _LINUX_MOUNT_H */

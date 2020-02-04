@@ -37,4 +37,3 @@ Example:
 		local-mac-address = [ 00 0f b7 10 63 54 ];
 		phy-handle = <&phy1>;
 	};
-

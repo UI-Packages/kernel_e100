@@ -7,6 +7,7 @@
 #include <linux/mm.h>
 #include <linux/uaccess.h>
 #include <linux/hardirq.h>
+#include <linux/sched.h>
 
 #include <asm/cacheflush.h>
 
@@ -39,9 +40,16 @@ extern unsigned long totalhigh_pages;
 
 void kmap_flush_unused(void);
 
+struct page *kmap_to_page(void *addr);
+
 #else /* CONFIG_HIGHMEM */
 
 static inline unsigned int nr_free_highpages(void) { return 0; }
+
+static inline struct page *kmap_to_page(void *addr)
+{
+	return virt_to_page(addr);
+}
 
 #define totalhigh_pages 0UL
 
@@ -78,86 +86,66 @@ static inline void __kunmap_atomic(void *addr)
 
 #if defined(CONFIG_HIGHMEM) || defined(CONFIG_X86_32)
 
+#ifndef CONFIG_PREEMPT_RT_FULL
 DECLARE_PER_CPU(int, __kmap_atomic_idx);
+#endif
 
 static inline int kmap_atomic_idx_push(void)
 {
+#ifndef CONFIG_PREEMPT_RT_FULL
 	int idx = __this_cpu_inc_return(__kmap_atomic_idx) - 1;
 
-#ifdef CONFIG_DEBUG_HIGHMEM
+# ifdef CONFIG_DEBUG_HIGHMEM
 	WARN_ON_ONCE(in_irq() && !irqs_disabled());
 	BUG_ON(idx > KM_TYPE_NR);
-#endif
+# endif
 	return idx;
+#else
+	current->kmap_idx++;
+	BUG_ON(current->kmap_idx > KM_TYPE_NR);
+	return current->kmap_idx - 1;
+#endif
 }
 
 static inline int kmap_atomic_idx(void)
 {
+#ifndef CONFIG_PREEMPT_RT_FULL
 	return __this_cpu_read(__kmap_atomic_idx) - 1;
+#else
+	return current->kmap_idx - 1;
+#endif
 }
 
 static inline void kmap_atomic_idx_pop(void)
 {
-#ifdef CONFIG_DEBUG_HIGHMEM
+#ifndef CONFIG_PREEMPT_RT_FULL
+# ifdef CONFIG_DEBUG_HIGHMEM
 	int idx = __this_cpu_dec_return(__kmap_atomic_idx);
 
 	BUG_ON(idx < 0);
-#else
+# else
 	__this_cpu_dec(__kmap_atomic_idx);
+# endif
+#else
+	current->kmap_idx--;
+# ifdef CONFIG_DEBUG_HIGHMEM
+	BUG_ON(current->kmap_idx < 0);
+# endif
 #endif
 }
 
 #endif
-
-/*
- * NOTE:
- * kmap_atomic() and kunmap_atomic() with two arguments are deprecated.
- * We only keep them for backward compatibility, any usage of them
- * are now warned.
- */
-
-#define PASTE(a, b) a ## b
-#define PASTE2(a, b) PASTE(a, b)
-
-#define NARG_(_2, _1, n, ...) n
-#define NARG(...) NARG_(__VA_ARGS__, 2, 1, :)
-
-static inline void __deprecated *kmap_atomic_deprecated(struct page *page,
-							enum km_type km)
-{
-	return kmap_atomic(page);
-}
-
-#define kmap_atomic1(...) kmap_atomic(__VA_ARGS__)
-#define kmap_atomic2(...) kmap_atomic_deprecated(__VA_ARGS__)
-#define kmap_atomic(...) PASTE2(kmap_atomic, NARG(__VA_ARGS__)(__VA_ARGS__))
-
-static inline void __deprecated __kunmap_atomic_deprecated(void *addr,
-							enum km_type km)
-{
-	__kunmap_atomic(addr);
-}
 
 /*
  * Prevent people trying to call kunmap_atomic() as if it were kunmap()
  * kunmap_atomic() should get the return value of kmap_atomic, not the page.
  */
-#define kunmap_atomic_deprecated(addr, km)                      \
-do {                                                            \
-	BUILD_BUG_ON(__same_type((addr), struct page *));       \
-	__kunmap_atomic_deprecated(addr, km);                   \
-} while (0)
-
-#define kunmap_atomic_withcheck(addr)                           \
+#define kunmap_atomic(addr)                                     \
 do {                                                            \
 	BUILD_BUG_ON(__same_type((addr), struct page *));       \
 	__kunmap_atomic(addr);                                  \
 } while (0)
 
-#define kunmap_atomic1(...) kunmap_atomic_withcheck(__VA_ARGS__)
-#define kunmap_atomic2(...) kunmap_atomic_deprecated(__VA_ARGS__)
-#define kunmap_atomic(...) PASTE2(kunmap_atomic, NARG(__VA_ARGS__)(__VA_ARGS__))
-/**** End of C pre-processor tricks for deprecated macros ****/
 
 /* when CONFIG_HIGHMEM is not set these will be plain clear/copy_page */
 #ifndef clear_user_highpage
@@ -221,6 +209,18 @@ static inline void clear_highpage(struct page *page)
 	kunmap_atomic(kaddr);
 }
 
+static inline void sanitize_highpage(struct page *page)
+{
+	void *kaddr;
+	unsigned long flags;
+
+	local_irq_save(flags);
+	kaddr = kmap_atomic(page);
+	clear_page(kaddr);
+	kunmap_atomic(kaddr);
+	local_irq_restore(flags);
+}
+
 static inline void zero_user_segments(struct page *page,
 	unsigned start1, unsigned end1,
 	unsigned start2, unsigned end2)
@@ -249,12 +249,6 @@ static inline void zero_user(struct page *page,
 	unsigned start, unsigned size)
 {
 	zero_user_segments(page, start, start + size, 0, 0);
-}
-
-static inline void __deprecated memclear_highpage_flush(struct page *page,
-			unsigned int offset, unsigned int size)
-{
-	zero_user(page, offset, size);
 }
 
 #ifndef __HAVE_ARCH_COPY_USER_HIGHPAGE

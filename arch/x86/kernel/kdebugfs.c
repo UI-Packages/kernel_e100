@@ -27,7 +27,7 @@ struct setup_data_node {
 	u32 len;
 };
 
-static ssize_t setup_data_read(struct file *file, char __user *user_buf,
+static ssize_t __size_overflow(3) setup_data_read(struct file *file, char __user *user_buf,
 			       size_t count, loff_t *ppos)
 {
 	struct setup_data_node *node = file->private_data;
@@ -107,7 +107,7 @@ static int __init create_setup_data_nodes(struct dentry *parent)
 {
 	struct setup_data_node *node;
 	struct setup_data *data;
-	int error = -ENOMEM;
+	int error;
 	struct dentry *d;
 	struct page *pg;
 	u64 pa_data;
@@ -121,8 +121,10 @@ static int __init create_setup_data_nodes(struct dentry *parent)
 
 	while (pa_data) {
 		node = kmalloc(sizeof(*node), GFP_KERNEL);
-		if (!node)
+		if (!node) {
+			error = -ENOMEM;
 			goto err_dir;
+		}
 
 		pg = pfn_to_page((pa_data+sizeof(*data)-1) >> PAGE_SHIFT);
 		if (PageHighMem(pg)) {

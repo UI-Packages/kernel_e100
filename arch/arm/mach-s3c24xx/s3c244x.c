@@ -36,11 +36,7 @@
 #include <mach/regs-clock.h>
 #include <plat/regs-serial.h>
 #include <mach/regs-gpio.h>
-#include <mach/regs-gpioj.h>
-#include <mach/regs-dsc.h>
 
-#include <plat/s3c2410.h>
-#include <plat/s3c244x.h>
 #include <plat/clock.h>
 #include <plat/devs.h>
 #include <plat/cpu.h>
@@ -48,6 +44,8 @@
 #include <plat/pll.h>
 #include <plat/nand-core.h>
 #include <plat/watchdog-reset.h>
+
+#include "regs-dsc.h"
 
 static struct map_desc s3c244x_iodesc[] __initdata = {
 	IODESC_ENT(CLKPWR),
@@ -135,6 +133,7 @@ void __init s3c244x_init_clocks(int xtal)
 	s3c24xx_register_baseclocks(xtal);
 	s3c244x_setup_clocks();
 	s3c2410_baseclk_add();
+	samsung_wdt_reset_init(S3C24XX_VA_WATCHDOG);
 }
 
 /* Since the S3C2442 and S3C2440 share items, put both subsystems here */
@@ -204,7 +203,7 @@ void s3c244x_restart(char mode, const char *cmd)
 	if (mode == 's')
 		soft_restart(0);
 
-	arch_wdt_reset();
+	samsung_wdt_reset();
 
 	/* we'll take a jump through zero as a poor second */
 	soft_restart(0);

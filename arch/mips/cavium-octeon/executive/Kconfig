@@ -1,5 +1,0 @@
-
-config CAVIUM_OCTEON_EXECUTIVE_TWSI
-	def_bool y
-	select I2C
-	select I2C_OCTEON

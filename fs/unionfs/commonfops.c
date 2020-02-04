@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2011 Erez Zadok
+ * Copyright (c) 2003-2014 Erez Zadok
  * Copyright (c) 2003-2006 Charles P. Wright
  * Copyright (c) 2005-2007 Josef 'Jeff' Sipek
  * Copyright (c) 2005-2006 Junjiro Okajima
@@ -8,8 +8,8 @@
  * Copyright (c) 2003-2004 Mohammad Nayyer Zubair
  * Copyright (c) 2003      Puja Gupta
  * Copyright (c) 2003      Harikesavan Krishnan
- * Copyright (c) 2003-2011 Stony Brook University
- * Copyright (c) 2003-2011 The Research Foundation of SUNY
+ * Copyright (c) 2003-2014 Stony Brook University
+ * Copyright (c) 2003-2014 The Research Foundation of SUNY
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -17,6 +17,54 @@
  */
 
 #include "union.h"
+
+#define __NFDBITS	(8 * sizeof(unsigned long))
+#define __FDSET_LONGS	(__FD_SETSIZE/__NFDBITS)
+static inline void __FD_SET(unsigned long __fd, __kernel_fd_set *__fdsetp)
+{
+	unsigned long __tmp = __fd / __NFDBITS;
+	unsigned long __rem = __fd % __NFDBITS;
+	__fdsetp->fds_bits[__tmp] |= (1UL<<__rem);
+}
+static inline void __FD_ZERO(__kernel_fd_set *__p)
+{
+	unsigned long *__tmp = __p->fds_bits;
+	int __i;
+
+	if (__builtin_constant_p(__FDSET_LONGS)) {
+		switch (__FDSET_LONGS) {
+		case 16:
+			__tmp[ 0] = 0; __tmp[ 1] = 0;
+			__tmp[ 2] = 0; __tmp[ 3] = 0;
+			__tmp[ 4] = 0; __tmp[ 5] = 0;
+			__tmp[ 6] = 0; __tmp[ 7] = 0;
+			__tmp[ 8] = 0; __tmp[ 9] = 0;
+			__tmp[10] = 0; __tmp[11] = 0;
+			__tmp[12] = 0; __tmp[13] = 0;
+			__tmp[14] = 0; __tmp[15] = 0;
+			return;
+
+		case 8:
+			__tmp[ 0] = 0; __tmp[ 1] = 0;
+			__tmp[ 2] = 0; __tmp[ 3] = 0;
+			__tmp[ 4] = 0; __tmp[ 5] = 0;
+			__tmp[ 6] = 0; __tmp[ 7] = 0;
+			return;
+
+		case 4:
+			__tmp[ 0] = 0; __tmp[ 1] = 0;
+			__tmp[ 2] = 0; __tmp[ 3] = 0;
+			return;
+		}
+	}
+	__i = __FDSET_LONGS;
+	while (__i) {
+		__i--;
+		*__tmp = 0;
+		__tmp++;
+	}
+}
+
 
 /*
  * 1) Copyup the file
@@ -162,6 +210,7 @@ static int open_all_files(struct file *file)
 	struct dentry *lower_dentry;
 	struct dentry *dentry = file->f_path.dentry;
 	struct super_block *sb = dentry->d_sb;
+	struct path path;
 
 	bstart = dbstart(dentry);
 	bend = dbend(dentry);
@@ -175,10 +224,10 @@ static int open_all_files(struct file *file)
 		unionfs_mntget(dentry, bindex);
 		branchget(sb, bindex);
 
-		lower_file =
-			dentry_open(lower_dentry,
-				    unionfs_lower_mnt_idx(dentry, bindex),
-				    file->f_flags, current_cred());
+		path.dentry = lower_dentry;
+		path.mnt = unionfs_lower_mnt_idx(dentry, bindex);
+		lower_file = dentry_open(&path, file->f_flags, current_cred());
+		path_put(&path);
 		if (IS_ERR(lower_file)) {
 			branchput(sb, bindex);
 			err = PTR_ERR(lower_file);
@@ -201,6 +250,7 @@ static int open_highest_file(struct file *file, bool willwrite)
 	struct dentry *parent = dget_parent(dentry);
 	struct inode *parent_inode = parent->d_inode;
 	struct super_block *sb = dentry->d_sb;
+	struct path path;
 
 	bstart = dbstart(dentry);
 	bend = dbend(dentry);
@@ -221,9 +271,10 @@ static int open_highest_file(struct file *file, bool willwrite)
 
 	dget(lower_dentry);
 	unionfs_mntget(dentry, bstart);
-	lower_file = dentry_open(lower_dentry,
-				 unionfs_lower_mnt_idx(dentry, bstart),
-				 file->f_flags, current_cred());
+	path.dentry = lower_dentry;
+	path.mnt = unionfs_lower_mnt_idx(dentry, bstart);
+	lower_file = dentry_open(&path, file->f_flags, current_cred());
+	path_put(&path);
 	if (IS_ERR(lower_file)) {
 		err = PTR_ERR(lower_file);
 		goto out;
@@ -416,7 +467,7 @@ int unionfs_file_revalidate(struct file *file, struct dentry *parent,
 	 * but not unhashed dentries.
 	 */
 	if (!d_deleted(dentry) &&
-	    !__unionfs_d_revalidate(dentry, parent, willwrite)) {
+	    !__unionfs_d_revalidate(dentry, parent, willwrite, 0)) {
 		err = -ESTALE;
 		goto out;
 	}
@@ -446,6 +497,7 @@ static int __open_dir(struct inode *inode, struct file *file,
 	int bindex, bstart, bend;
 	struct vfsmount *lower_mnt;
 	struct dentry *dentry = file->f_path.dentry;
+	struct path path;
 
 	bstart = fbstart(file) = dbstart(dentry);
 	bend = fbend(file) = dbend(dentry);
@@ -460,8 +512,10 @@ static int __open_dir(struct inode *inode, struct file *file,
 		lower_mnt = unionfs_mntget(dentry, bindex);
 		if (!lower_mnt)
 			lower_mnt = unionfs_mntget(parent, bindex);
-		lower_file = dentry_open(lower_dentry, lower_mnt, file->f_flags,
-					 current_cred());
+		path.dentry = lower_dentry;
+		path.mnt = lower_mnt;
+		lower_file = dentry_open(&path, file->f_flags, current_cred());
+		path_put(&path);
 		if (IS_ERR(lower_file))
 			return PTR_ERR(lower_file);
 
@@ -489,6 +543,7 @@ static int __open_file(struct inode *inode, struct file *file,
 	int bindex, bstart, bend;
 	struct dentry *dentry = file->f_path.dentry;
 	struct vfsmount *lower_mnt;
+	struct path path;
 
 	lower_dentry = unionfs_lower_dentry(dentry);
 	lower_flags = file->f_flags;
@@ -532,12 +587,14 @@ static int __open_file(struct inode *inode, struct file *file,
 	dget(lower_dentry);
 
 	/*
-	 * dentry_open will decrement mnt refcnt if err.
+	 * dentry_open used to decrement mnt refcnt if err.
 	 * otherwise fput() will do an mntput() for us upon file close.
 	 */
 	lower_mnt = unionfs_mntget(dentry, bstart);
-	lower_file = dentry_open(lower_dentry, lower_mnt, lower_flags,
-				 current_cred());
+	path.dentry = lower_dentry;
+	path.mnt = lower_mnt;
+	lower_file = dentry_open(&path, lower_flags, current_cred());
+	path_put(&path);
 	if (IS_ERR(lower_file))
 		return PTR_ERR(lower_file);
 
@@ -568,7 +625,7 @@ int unionfs_open(struct inode *inode, struct file *file)
 	}
 
 	/* XXX: should I change 'false' below to the 'willwrite' flag? */
-	valid = __unionfs_d_revalidate(dentry, parent, false);
+	valid = __unionfs_d_revalidate(dentry, parent, false, 0);
 	if (unlikely(!valid)) {
 		err = -ESTALE;
 		goto out_nofree;
@@ -781,14 +838,14 @@ static int unionfs_ioctl_queryfile(struct file *file, struct dentry *parent,
 	bstart = dbstart(dentry);
 	bend = dbend(dentry);
 
-	memset(branchlist.fds_bits, 0, sizeof branchlist.fds_bits);
+	__FD_ZERO(&branchlist);
 
 	for (bindex = bstart; bindex <= bend; bindex++) {
 		lower_dentry = unionfs_lower_dentry_idx(dentry, bindex);
 		if (!lower_dentry)
 			continue;
 		if (likely(lower_dentry->d_inode))
-			__set_bit(bindex, branchlist.fds_bits);
+			__FD_SET(bindex, &branchlist);
 		/* purge any lower objects after partial_lookup */
 		if (bindex < orig_bstart || bindex > orig_bend) {
 			dput(lower_dentry);

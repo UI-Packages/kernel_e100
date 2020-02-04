@@ -108,7 +108,7 @@ struct	_io_ops {
 			  u8 *pmem);
 	u32 (*_write_port)(struct intf_hdl *pintfhdl, u32 addr, u32 cnt,
 			   u8 *pmem);
-};
+} __no_const;
 
 struct io_req {
 	struct list_head list;
@@ -117,7 +117,7 @@ struct io_req {
 	u32	command;
 	u32	status;
 	u8	*pbuf;
-	void (*_async_io_callback)(struct _adapter *padater,
+	void (*_async_io_callback)(struct _adapter *padapter,
 				   struct io_req *pio_req, u8 *cnxt);
 	u8 *cnxt;
 };

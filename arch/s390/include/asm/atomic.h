@@ -1,8 +1,5 @@
-#ifndef __ARCH_S390_ATOMIC__
-#define __ARCH_S390_ATOMIC__
-
 /*
- * Copyright 1999,2009 IBM Corp.
+ * Copyright IBM Corp. 1999, 2009
  * Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>,
  *	      Denis Joseph Barrow,
  *	      Arnd Bergmann <arndb@de.ibm.com>,
@@ -12,6 +9,9 @@
  * s390 uses 'Compare And Swap' for atomicity in SMP environment.
  *
  */
+
+#ifndef __ARCH_S390_ATOMIC__
+#define __ARCH_S390_ATOMIC__
 
 #include <linux/compiler.h>
 #include <linux/types.h>
@@ -325,6 +325,16 @@ static inline long long atomic64_dec_if_positive(atomic64_t *v)
 #define atomic64_dec_return(_v)		atomic64_sub_return(1, _v)
 #define atomic64_dec_and_test(_v)	(atomic64_sub_return(1, _v) == 0)
 #define atomic64_inc_not_zero(v)	atomic64_add_unless((v), 1, 0)
+
+#define atomic64_read_unchecked(v)		atomic64_read(v)
+#define atomic64_set_unchecked(v, i)		atomic64_set((v), (i))
+#define atomic64_add_unchecked(a, v)		atomic64_add((a), (v))
+#define atomic64_add_return_unchecked(a, v)	atomic64_add_return((a), (v))
+#define atomic64_sub_unchecked(a, v)		atomic64_sub((a), (v))
+#define atomic64_inc_unchecked(v)		atomic64_inc(v)
+#define atomic64_inc_return_unchecked(v)	atomic64_inc_return(v)
+#define atomic64_dec_unchecked(v)		atomic64_dec(v)
+#define atomic64_cmpxchg_unchecked(v, o, n)	atomic64_cmpxchg((v), (o), (n))
 
 #define smp_mb__before_atomic_dec()	smp_mb()
 #define smp_mb__after_atomic_dec()	smp_mb()

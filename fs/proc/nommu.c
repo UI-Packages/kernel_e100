@@ -45,7 +45,7 @@ static int nommu_region_show(struct seq_file *m, struct vm_region *region)
 	file = region->vm_file;
 
 	if (file) {
-		struct inode *inode = region->vm_file->f_path.dentry->d_inode;
+		struct inode *inode = file_inode(region->vm_file);
 		dev = inode->i_sb->s_dev;
 		ino = inode->i_ino;
 	}
@@ -66,7 +66,7 @@ static int nommu_region_show(struct seq_file *m, struct vm_region *region)
 		if (len < 1)
 			len = 1;
 		seq_printf(m, "%*c", len, ' ');
-		seq_path(m, &file->f_path, "");
+		seq_path(m, &file->f_path, "\n\\");
 	}
 
 	seq_putc(m, '\n');

@@ -757,7 +757,7 @@ __vxge_hw_verify_pci_e_info(struct __vxge_hw_device *hldev)
 	u16 lnk;
 
 	/* Get the negotiated link width and speed from PCI config space */
-	pci_read_config_word(dev, dev->pcie_cap + PCI_EXP_LNKSTA, &lnk);
+	pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnk);
 
 	if ((lnk & PCI_EXP_LNKSTA_CLS) != 1)
 		return VXGE_HW_ERR_INVALID_PCI_INFO;
@@ -993,7 +993,7 @@ exit:
  * for the driver, FW version information, and the first mac address for
  * each vpath
  */
-enum vxge_hw_status __devinit
+enum vxge_hw_status
 vxge_hw_device_hw_info_get(void __iomem *bar0,
 			   struct vxge_hw_device_hw_info *hw_info)
 {
@@ -1310,7 +1310,7 @@ __vxge_hw_device_config_check(struct vxge_hw_device_config *new_config)
  * When done, the driver allocates sizeof(struct __vxge_hw_device) bytes for HW
  * to enable the latter to perform Titan hardware initialization.
  */
-enum vxge_hw_status __devinit
+enum vxge_hw_status
 vxge_hw_device_initialize(
 	struct __vxge_hw_device **devh,
 	struct vxge_hw_device_attr *attr,
@@ -1982,7 +1982,7 @@ u16 vxge_hw_device_link_width_get(struct __vxge_hw_device *hldev)
 	struct pci_dev *dev = hldev->pdev;
 	u16 lnk;
 
-	pci_read_config_word(dev, dev->pcie_cap + PCI_EXP_LNKSTA, &lnk);
+	pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnk);
 	return (lnk & VXGE_HW_PCI_EXP_LNKCAP_LNK_WIDTH) >> 4;
 }
 
@@ -2346,7 +2346,7 @@ void __vxge_hw_blockpool_blocks_add(struct __vxge_hw_blockpool *blockpool)
 
 	for (i = 0; i < nreq; i++)
 		vxge_os_dma_malloc_async(
-			((struct __vxge_hw_device *)blockpool->hldev)->pdev,
+			(blockpool->hldev)->pdev,
 			blockpool->hldev, VXGE_HW_BLOCK_SIZE);
 }
 
@@ -2428,13 +2428,13 @@ __vxge_hw_blockpool_blocks_remove(struct __vxge_hw_blockpool *blockpool)
 			break;
 
 		pci_unmap_single(
-			((struct __vxge_hw_device *)blockpool->hldev)->pdev,
+			(blockpool->hldev)->pdev,
 			((struct __vxge_hw_blockpool_entry *)p)->dma_addr,
 			((struct __vxge_hw_blockpool_entry *)p)->length,
 			PCI_DMA_BIDIRECTIONAL);
 
 		vxge_os_dma_free(
-			((struct __vxge_hw_device *)blockpool->hldev)->pdev,
+			(blockpool->hldev)->pdev,
 			((struct __vxge_hw_blockpool_entry *)p)->memblock,
 			&((struct __vxge_hw_blockpool_entry *)p)->acc_handle);
 
@@ -2917,7 +2917,7 @@ exit:
  * vxge_hw_device_config_default_get - Initialize device config with defaults.
  * Initialize Titan device config with default values.
  */
-enum vxge_hw_status __devinit
+enum vxge_hw_status
 vxge_hw_device_config_default_get(struct vxge_hw_device_config *device_config)
 {
 	u32 i;
@@ -3461,7 +3461,10 @@ __vxge_hw_fifo_create(struct __vxge_hw_vpath_handle *vp,
 	struct __vxge_hw_fifo *fifo;
 	struct vxge_hw_fifo_config *config;
 	u32 txdl_size, txdl_per_memblock;
-	struct vxge_hw_mempool_cbs fifo_mp_callback;
+	static struct vxge_hw_mempool_cbs fifo_mp_callback = {
+		.item_func_alloc = __vxge_hw_fifo_mempool_item_alloc,
+	};
+
 	struct __vxge_hw_virtualpath *vpath;
 
 	if ((vp == NULL) || (attr == NULL)) {
@@ -3543,8 +3546,6 @@ __vxge_hw_fifo_create(struct __vxge_hw_vpath_handle *vp,
 		status = VXGE_HW_ERR_INVALID_BLOCK_SIZE;
 		goto exit;
 	}
-
-	fifo_mp_callback.item_func_alloc = __vxge_hw_fifo_mempool_item_alloc;
 
 	fifo->mempool =
 		__vxge_hw_mempool_create(vpath->hldev,
@@ -4059,7 +4060,7 @@ __vxge_hw_vpath_sw_reset(struct __vxge_hw_device *hldev, u32 vp_id)
 	enum vxge_hw_status status = VXGE_HW_OK;
 	struct __vxge_hw_virtualpath *vpath;
 
-	vpath = (struct __vxge_hw_virtualpath *)&hldev->virtual_paths[vp_id];
+	vpath = &hldev->virtual_paths[vp_id];
 
 	if (vpath->ringh) {
 		status = __vxge_hw_ring_reset(vpath->ringh);

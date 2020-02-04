@@ -27,9 +27,9 @@
 
 #define pr_fmt(fmt) "[TTM] " fmt
 
-#include "ttm/ttm_memory.h"
-#include "ttm/ttm_module.h"
-#include "ttm/ttm_page_alloc.h"
+#include <drm/ttm/ttm_memory.h>
+#include <drm/ttm/ttm_module.h>
+#include <drm/ttm/ttm_page_alloc.h>
 #include <linux/spinlock.h>
 #include <linux/sched.h>
 #include <linux/wait.h>
@@ -264,7 +264,7 @@ static int ttm_mem_init_kernel_zone(struct ttm_mem_global *glob,
 	zone->glob = glob;
 	glob->zone_kernel = zone;
 	ret = kobject_init_and_add(
-		&zone->kobj, &ttm_mem_zone_kobj_type, &glob->kobj, zone->name);
+		&zone->kobj, &ttm_mem_zone_kobj_type, &glob->kobj, "%s", zone->name);
 	if (unlikely(ret != 0)) {
 		kobject_put(&zone->kobj);
 		return ret;
@@ -347,7 +347,7 @@ static int ttm_mem_init_dma32_zone(struct ttm_mem_global *glob,
 	zone->glob = glob;
 	glob->zone_dma32 = zone;
 	ret = kobject_init_and_add(
-		&zone->kobj, &ttm_mem_zone_kobj_type, &glob->kobj, zone->name);
+		&zone->kobj, &ttm_mem_zone_kobj_type, &glob->kobj, "%s", zone->name);
 	if (unlikely(ret != 0)) {
 		kobject_put(&zone->kobj);
 		return ret;
@@ -367,7 +367,6 @@ int ttm_mem_global_init(struct ttm_mem_global *glob)
 	spin_lock_init(&glob->lock);
 	glob->swap_queue = create_singlethread_workqueue("ttm_swap");
 	INIT_WORK(&glob->work, ttm_shrink_work);
-	init_waitqueue_head(&glob->queue);
 	ret = kobject_init_and_add(
 		&glob->kobj, &ttm_mem_glob_kobj_type, ttm_get_kobj(), "memory_accounting");
 	if (unlikely(ret != 0)) {

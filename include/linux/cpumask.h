@@ -118,17 +118,17 @@ static inline unsigned int cpumask_first(const struct cpumask *srcp)
 }
 
 /* Valid inputs for n are -1 and 0. */
-static inline unsigned int cpumask_next(int n, const struct cpumask *srcp)
+static inline unsigned int __intentional_overflow(-1) cpumask_next(int n, const struct cpumask *srcp)
 {
 	return n+1;
 }
 
-static inline unsigned int cpumask_next_zero(int n, const struct cpumask *srcp)
+static inline unsigned int __intentional_overflow(-1) cpumask_next_zero(int n, const struct cpumask *srcp)
 {
 	return n+1;
 }
 
-static inline unsigned int cpumask_next_and(int n,
+static inline unsigned int __intentional_overflow(-1) cpumask_next_and(int n,
 					    const struct cpumask *srcp,
 					    const struct cpumask *andp)
 {
@@ -167,7 +167,7 @@ static inline unsigned int cpumask_first(const struct cpumask *srcp)
  *
  * Returns >= nr_cpu_ids if no further cpus set.
  */
-static inline unsigned int cpumask_next(int n, const struct cpumask *srcp)
+static inline unsigned int __intentional_overflow(-1) cpumask_next(int n, const struct cpumask *srcp)
 {
 	/* -1 is a legal arg here. */
 	if (n != -1)
@@ -182,7 +182,7 @@ static inline unsigned int cpumask_next(int n, const struct cpumask *srcp)
  *
  * Returns >= nr_cpu_ids if no further cpus unset.
  */
-static inline unsigned int cpumask_next_zero(int n, const struct cpumask *srcp)
+static inline unsigned int __intentional_overflow(-1) cpumask_next_zero(int n, const struct cpumask *srcp)
 {
 	/* -1 is a legal arg here. */
 	if (n != -1)
@@ -190,7 +190,7 @@ static inline unsigned int cpumask_next_zero(int n, const struct cpumask *srcp)
 	return find_next_zero_bit(cpumask_bits(srcp), nr_cpumask_bits, n+1);
 }
 
-int cpumask_next_and(int n, const struct cpumask *, const struct cpumask *);
+int cpumask_next_and(int n, const struct cpumask *, const struct cpumask *) __intentional_overflow(-1);
 int cpumask_any_but(const struct cpumask *mask, unsigned int cpu);
 
 /**
@@ -272,6 +272,8 @@ static inline void cpumask_clear_cpu(int cpu, struct cpumask *dstp)
  * @cpu: cpu number (< nr_cpu_ids)
  * @cpumask: the cpumask pointer
  *
+ * Returns 1 if @cpu is set in @cpumask, else returns 0
+ *
  * No static inline type checking - see Subtlety (1) above.
  */
 #define cpumask_test_cpu(cpu, cpumask) \
@@ -281,6 +283,8 @@ static inline void cpumask_clear_cpu(int cpu, struct cpumask *dstp)
  * cpumask_test_and_set_cpu - atomically test and set a cpu in a cpumask
  * @cpu: cpu number (< nr_cpu_ids)
  * @cpumask: the cpumask pointer
+ *
+ * Returns 1 if @cpu is set in old bitmap of @cpumask, else returns 0
  *
  * test_and_set_bit wrapper for cpumasks.
  */
@@ -293,6 +297,8 @@ static inline int cpumask_test_and_set_cpu(int cpu, struct cpumask *cpumask)
  * cpumask_test_and_clear_cpu - atomically test and clear a cpu in a cpumask
  * @cpu: cpu number (< nr_cpu_ids)
  * @cpumask: the cpumask pointer
+ *
+ * Returns 1 if @cpu is set in old bitmap of @cpumask, else returns 0
  *
  * test_and_clear_bit wrapper for cpumasks.
  */
@@ -324,6 +330,8 @@ static inline void cpumask_clear(struct cpumask *dstp)
  * @dstp: the cpumask result
  * @src1p: the first input
  * @src2p: the second input
+ *
+ * If *@dstp is empty, returns 0, else returns 1
  */
 static inline int cpumask_and(struct cpumask *dstp,
 			       const struct cpumask *src1p,
@@ -365,6 +373,8 @@ static inline void cpumask_xor(struct cpumask *dstp,
  * @dstp: the cpumask result
  * @src1p: the first input
  * @src2p: the second input
+ *
+ * If *@dstp is empty, returns 0, else returns 1
  */
 static inline int cpumask_andnot(struct cpumask *dstp,
 				  const struct cpumask *src1p,
@@ -414,6 +424,8 @@ static inline bool cpumask_intersects(const struct cpumask *src1p,
  * cpumask_subset - (*src1p & ~*src2p) == 0
  * @src1p: the first input
  * @src2p: the second input
+ *
+ * Returns 1 if *@src1p is a subset of *@src2p, else returns 0
  */
 static inline int cpumask_subset(const struct cpumask *src1p,
 				 const struct cpumask *src2p)
@@ -579,9 +591,23 @@ static inline int cpulist_scnprintf(char *buf, int len,
 }
 
 /**
- * cpulist_parse_user - extract a cpumask from a user string of ranges
+ * cpumask_parse - extract a cpumask from from a string
  * @buf: the buffer to extract from
- * @len: the length of the buffer
+ * @dstp: the cpumask to set.
+ *
+ * Returns -errno, or 0 for success.
+ */
+static inline int cpumask_parse(const char *buf, struct cpumask *dstp)
+{
+	char *nl = strchr(buf, '\n');
+	int len = nl ? nl - buf : strlen(buf);
+
+	return bitmap_parse(buf, len, cpumask_bits(dstp), nr_cpumask_bits);
+}
+
+/**
+ * cpulist_parse - extract a cpumask from a user string of ranges
+ * @buf: the buffer to extract from
  * @dstp: the cpumask to set.
  *
  * Returns -errno, or 0 for success.

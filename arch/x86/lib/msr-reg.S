@@ -3,20 +3,21 @@
 #include <asm/dwarf2.h>
 #include <asm/asm.h>
 #include <asm/msr.h>
+#include <asm/alternative-asm.h>
 
 #ifdef CONFIG_X86_64
 /*
- * int native_{rdmsr,wrmsr}_safe_regs(u32 gprs[8]);
+ * int {rdmsr,wrmsr}_safe_regs(u32 gprs[8]);
  *
  * reg layout: u32 gprs[eax, ecx, edx, ebx, esp, ebp, esi, edi]
  *
  */
 .macro op_safe_regs op
-ENTRY(native_\op\()_safe_regs)
+ENTRY(\op\()_safe_regs)
 	CFI_STARTPROC
 	pushq_cfi %rbx
 	pushq_cfi %rbp
-	movq	%rdi, %r10	/* Save pointer */
+	movq	%rdi, %r9	/* Save pointer */
 	xorl	%r11d, %r11d	/* Return value */
 	movl    (%rdi), %eax
 	movl    4(%rdi), %ecx
@@ -27,16 +28,17 @@ ENTRY(native_\op\()_safe_regs)
 	movl    28(%rdi), %edi
 	CFI_REMEMBER_STATE
 1:	\op
-2:	movl    %eax, (%r10)
+2:	movl    %eax, (%r9)
 	movl	%r11d, %eax	/* Return value */
-	movl    %ecx, 4(%r10)
-	movl    %edx, 8(%r10)
-	movl    %ebx, 12(%r10)
-	movl    %ebp, 20(%r10)
-	movl    %esi, 24(%r10)
-	movl    %edi, 28(%r10)
+	movl    %ecx, 4(%r9)
+	movl    %edx, 8(%r9)
+	movl    %ebx, 12(%r9)
+	movl    %ebp, 20(%r9)
+	movl    %esi, 24(%r9)
+	movl    %edi, 28(%r9)
 	popq_cfi %rbp
 	popq_cfi %rbx
+	pax_force_retaddr
 	ret
 3:
 	CFI_RESTORE_STATE
@@ -45,13 +47,13 @@ ENTRY(native_\op\()_safe_regs)
 
 	_ASM_EXTABLE(1b, 3b)
 	CFI_ENDPROC
-ENDPROC(native_\op\()_safe_regs)
+ENDPROC(\op\()_safe_regs)
 .endm
 
 #else /* X86_32 */
 
 .macro op_safe_regs op
-ENTRY(native_\op\()_safe_regs)
+ENTRY(\op\()_safe_regs)
 	CFI_STARTPROC
 	pushl_cfi %ebx
 	pushl_cfi %ebp
@@ -92,7 +94,7 @@ ENTRY(native_\op\()_safe_regs)
 
 	_ASM_EXTABLE(1b, 3b)
 	CFI_ENDPROC
-ENDPROC(native_\op\()_safe_regs)
+ENDPROC(\op\()_safe_regs)
 .endm
 
 #endif

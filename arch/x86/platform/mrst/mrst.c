@@ -78,13 +78,15 @@ struct sfi_rtc_table_entry sfi_mrtc_array[SFI_MRTC_MAX];
 EXPORT_SYMBOL_GPL(sfi_mrtc_array);
 int sfi_mrtc_num;
 
-static void mrst_power_off(void)
+static __noreturn void mrst_power_off(void)
 {
+	BUG();
 }
 
-static void mrst_reboot(void)
+static __noreturn void mrst_reboot(void)
 {
 	intel_scu_ipc_simple_command(IPCMSG_COLD_BOOT, 0);
+	BUG();
 }
 
 /* parse all the mtimer info to a static mtimer array */
@@ -356,8 +358,7 @@ static int __init sfi_parse_gpio(struct sfi_table_header *table)
 	num = SFI_GET_NUM_ENTRIES(sb, struct sfi_gpio_table_entry);
 	pentry = (struct sfi_gpio_table_entry *)sb->pentry;
 
-	gpio_table = (struct sfi_gpio_table_entry *)
-				kmalloc(num * sizeof(*pentry), GFP_KERNEL);
+	gpio_table = kmalloc(num * sizeof(*pentry), GFP_KERNEL);
 	if (!gpio_table)
 		return -1;
 	memcpy(gpio_table, pentry, num * sizeof(*pentry));

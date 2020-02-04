@@ -7,15 +7,16 @@
  * Copyright (C) 2007 MIPS Technologies, Inc.
  *   written by Ralf Baechle (ralf@linux-mips.org)
  */
+#include <linux/kernel.h>
 #include <linux/console.h>
+#include <linux/printk.h>
 #include <linux/init.h>
 
 #include <asm/setup.h>
 
 extern void prom_putchar(char);
 
-static void __init
-early_console_write(struct console *con, const char *s, unsigned n)
+static void early_console_write(struct console *con, const char *s, unsigned n)
 {
 	while (n-- && *s) {
 		if (*s == '\n')
@@ -25,7 +26,7 @@ early_console_write(struct console *con, const char *s, unsigned n)
 	}
 }
 
-static struct console early_console_prom __initdata = {
+static struct console early_console_prom = {
 	.name	= "early",
 	.write	= early_console_write,
 	.flags	= CON_PRINTBUFFER | CON_BOOT,

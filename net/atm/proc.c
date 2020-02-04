@@ -45,9 +45,9 @@ static void add_stats(struct seq_file *seq, const char *aal,
   const struct k_atm_aal_stats *stats)
 {
 	seq_printf(seq, "%s ( %d %d %d %d %d )", aal,
-		   atomic_read(&stats->tx), atomic_read(&stats->tx_err),
-		   atomic_read(&stats->rx), atomic_read(&stats->rx_err),
-		   atomic_read(&stats->rx_drop));
+		   atomic_read_unchecked(&stats->tx),atomic_read_unchecked(&stats->tx_err),
+		   atomic_read_unchecked(&stats->rx),atomic_read_unchecked(&stats->rx_err),
+		   atomic_read_unchecked(&stats->rx_drop));
 }
 
 static void atm_dev_info(struct seq_file *seq, const struct atm_dev *dev)
@@ -385,7 +385,7 @@ static ssize_t proc_dev_atm_read(struct file *file, char __user *buf,
 	page = get_zeroed_page(GFP_KERNEL);
 	if (!page)
 		return -ENOMEM;
-	dev = PDE(file->f_path.dentry->d_inode)->data;
+	dev = PDE_DATA(file_inode(file));
 	if (!dev->ops->proc_read)
 		length = -EINVAL;
 	else {
@@ -460,7 +460,7 @@ static void atm_proc_dirs_remove(void)
 		if (e->dirent)
 			remove_proc_entry(e->name, atm_proc_root);
 	}
-	proc_net_remove(&init_net, "atm");
+	remove_proc_entry("atm", init_net.proc_net);
 }
 
 int __init atm_proc_init(void)

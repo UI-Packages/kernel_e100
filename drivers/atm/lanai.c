@@ -551,8 +551,8 @@ static inline void sram_write(const struct lanai_dev *lanai,
 	writel(val, sram_addr(lanai, offset));
 }
 
-static int __devinit sram_test_word(const struct lanai_dev *lanai,
-				    int offset, u32 pattern)
+static int sram_test_word(const struct lanai_dev *lanai, int offset,
+			  u32 pattern)
 {
 	u32 readback;
 	sram_write(lanai, pattern, offset);
@@ -566,7 +566,7 @@ static int __devinit sram_test_word(const struct lanai_dev *lanai,
 	return -EIO;
 }
 
-static int __devinit sram_test_pass(const struct lanai_dev *lanai, u32 pattern)
+static int sram_test_pass(const struct lanai_dev *lanai, u32 pattern)
 {
 	int offset, result = 0;
 	for (offset = 0; offset < SRAM_BYTES && result == 0; offset += 4)
@@ -574,7 +574,7 @@ static int __devinit sram_test_pass(const struct lanai_dev *lanai, u32 pattern)
 	return result;
 }
 
-static int __devinit sram_test_and_clear(const struct lanai_dev *lanai)
+static int sram_test_and_clear(const struct lanai_dev *lanai)
 {
 #ifdef FULL_MEMORY_TEST
 	int result;
@@ -860,7 +860,7 @@ static inline void aal0_buffer_free(struct lanai_dev *lanai)
 #ifndef READ_EEPROM
 
 /* Stub functions to use if EEPROM reading is disabled */
-static int __devinit eeprom_read(struct lanai_dev *lanai)
+static int eeprom_read(struct lanai_dev *lanai)
 {
 	printk(KERN_INFO DEV_LABEL "(itf %d): *NOT* reading EEPROM\n",
 	    lanai->number);
@@ -868,7 +868,7 @@ static int __devinit eeprom_read(struct lanai_dev *lanai)
 	return 0;
 }
 
-static int __devinit eeprom_validate(struct lanai_dev *lanai)
+static int eeprom_validate(struct lanai_dev *lanai)
 {
 	lanai->serialno = 0;
 	lanai->magicno = EEPROM_MAGIC_VALUE;
@@ -877,7 +877,7 @@ static int __devinit eeprom_validate(struct lanai_dev *lanai)
 
 #else /* READ_EEPROM */
 
-static int __devinit eeprom_read(struct lanai_dev *lanai)
+static int eeprom_read(struct lanai_dev *lanai)
 {
 	int i, address;
 	u8 data;
@@ -953,7 +953,7 @@ static inline u32 eeprom_be4(const struct lanai_dev *lanai, int address)
 }
 
 /* Checksum/validate EEPROM contents */
-static int __devinit eeprom_validate(struct lanai_dev *lanai)
+static int eeprom_validate(struct lanai_dev *lanai)
 {
 	int i, s;
 	u32 v;
@@ -1303,7 +1303,7 @@ static void lanai_send_one_aal5(struct lanai_dev *lanai,
 	vcc_tx_add_aal5_trailer(lvcc, skb->len, 0, 0);
 	lanai_endtx(lanai, lvcc);
 	lanai_free_skb(lvcc->tx.atmvcc, skb);
-	atomic_inc(&lvcc->tx.atmvcc->stats->tx);
+	atomic_inc_unchecked(&lvcc->tx.atmvcc->stats->tx);
 }
 
 /* Try to fill the buffer - don't call unless there is backlog */
@@ -1426,7 +1426,7 @@ static void vcc_rx_aal5(struct lanai_vcc *lvcc, int endptr)
 	ATM_SKB(skb)->vcc = lvcc->rx.atmvcc;
 	__net_timestamp(skb);
 	lvcc->rx.atmvcc->push(lvcc->rx.atmvcc, skb);
-	atomic_inc(&lvcc->rx.atmvcc->stats->rx);
+	atomic_inc_unchecked(&lvcc->rx.atmvcc->stats->rx);
     out:
 	lvcc->rx.buf.ptr = end;
 	cardvcc_write(lvcc, endptr, vcc_rxreadptr);
@@ -1448,7 +1448,7 @@ static void vcc_rx_aal0(struct lanai_dev *lanai)
 #include <linux/vmalloc.h>
 #endif
 
-static int __devinit vcc_table_allocate(struct lanai_dev *lanai)
+static int vcc_table_allocate(struct lanai_dev *lanai)
 {
 #ifdef VCCTABLE_GETFREEPAGE
 	APRINTK((lanai->num_vci) * sizeof(struct lanai_vcc *) <= PAGE_SIZE,
@@ -1588,7 +1588,7 @@ static void lanai_reset(struct lanai_dev *lanai)
 /*
  * Allocate service buffer and tell card about it
  */
-static int __devinit service_buffer_allocate(struct lanai_dev *lanai)
+static int service_buffer_allocate(struct lanai_dev *lanai)
 {
 	lanai_buf_allocate(&lanai->service, SERVICE_ENTRIES * 4, 8,
 	    lanai->pci);
@@ -1667,7 +1667,7 @@ static int handle_service(struct lanai_dev *lanai, u32 s)
 		DPRINTK("(itf %d) got RX service entry 0x%X for non-AAL5 "
 		    "vcc %d\n", lanai->number, (unsigned int) s, vci);
 		lanai->stats.service_rxnotaal5++;
-		atomic_inc(&lvcc->rx.atmvcc->stats->rx_err);
+		atomic_inc_unchecked(&lvcc->rx.atmvcc->stats->rx_err);
 		return 0;
 	}
 	if (likely(!(s & (SERVICE_TRASH | SERVICE_STREAM | SERVICE_CRCERR)))) {
@@ -1679,7 +1679,7 @@ static int handle_service(struct lanai_dev *lanai, u32 s)
 		int bytes;
 		read_unlock(&vcc_sklist_lock);
 		DPRINTK("got trashed rx pdu on vci %d\n", vci);
-		atomic_inc(&lvcc->rx.atmvcc->stats->rx_err);
+		atomic_inc_unchecked(&lvcc->rx.atmvcc->stats->rx_err);
 		lvcc->stats.x.aal5.service_trash++;
 		bytes = (SERVICE_GET_END(s) * 16) -
 		    (((unsigned long) lvcc->rx.buf.ptr) -
@@ -1691,7 +1691,7 @@ static int handle_service(struct lanai_dev *lanai, u32 s)
 	}
 	if (s & SERVICE_STREAM) {
 		read_unlock(&vcc_sklist_lock);
-		atomic_inc(&lvcc->rx.atmvcc->stats->rx_err);
+		atomic_inc_unchecked(&lvcc->rx.atmvcc->stats->rx_err);
 		lvcc->stats.x.aal5.service_stream++;
 		printk(KERN_ERR DEV_LABEL "(itf %d): Got AAL5 stream "
 		    "PDU on VCI %d!\n", lanai->number, vci);
@@ -1699,7 +1699,7 @@ static int handle_service(struct lanai_dev *lanai, u32 s)
 		return 0;
 	}
 	DPRINTK("got rx crc error on vci %d\n", vci);
-	atomic_inc(&lvcc->rx.atmvcc->stats->rx_err);
+	atomic_inc_unchecked(&lvcc->rx.atmvcc->stats->rx_err);
 	lvcc->stats.x.aal5.service_rxcrc++;
 	lvcc->rx.buf.ptr = &lvcc->rx.buf.start[SERVICE_GET_END(s) * 4];
 	cardvcc_write(lvcc, SERVICE_GET_END(s), vcc_rxreadptr);
@@ -1942,7 +1942,7 @@ static int check_board_id_and_rev(const char *name, u32 val, int *revp)
 
 /* -------------------- PCI INITIALIZATION/SHUTDOWN: */
 
-static int __devinit lanai_pci_start(struct lanai_dev *lanai)
+static int lanai_pci_start(struct lanai_dev *lanai)
 {
 	struct pci_dev *pci = lanai->pci;
 	int result;
@@ -2123,7 +2123,7 @@ static inline void lanai_cbr_shutdown(struct lanai_dev *lanai)
 /* -------------------- OPERATIONS: */
 
 /* setup a newly detected device */
-static int __devinit lanai_dev_open(struct atm_dev *atmdev)
+static int lanai_dev_open(struct atm_dev *atmdev)
 {
 	struct lanai_dev *lanai = (struct lanai_dev *) atmdev->dev_data;
 	unsigned long raw_base;
@@ -2566,8 +2566,8 @@ static const struct atmdev_ops ops = {
 };
 
 /* initialize one probed card */
-static int __devinit lanai_init_one(struct pci_dev *pci,
-				    const struct pci_device_id *ident)
+static int lanai_init_one(struct pci_dev *pci,
+			  const struct pci_device_id *ident)
 {
 	struct lanai_dev *lanai;
 	struct atm_dev *atmdev;

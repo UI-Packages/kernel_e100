@@ -642,7 +642,7 @@ ocfs2_block_group_alloc_discontig(handle_t *handle,
 	 * cluster groups will be staying in cache for the duration of
 	 * this operation.
 	 */
-	ac->ac_allow_chain_relink = 0;
+	ac->ac_disable_chain_relink = 1;
 
 	/* Claim the first region */
 	status = ocfs2_block_group_claim_bits(osb, handle, ac, min_bits,
@@ -872,7 +872,7 @@ static int ocfs2_reserve_suballoc_bits(struct ocfs2_super *osb,
 				mlog_errno(status);
 			goto bail;
 		}
-		atomic_inc(&osb->alloc_stats.bg_extends);
+		atomic_inc_unchecked(&osb->alloc_stats.bg_extends);
 
 		/* You should never ask for this much metadata */
 		BUG_ON(bits_wanted >
@@ -1823,7 +1823,7 @@ static int ocfs2_search_chain(struct ocfs2_alloc_context *ac,
 	 * Do this *after* figuring out how many bits we're taking out
 	 * of our target group.
 	 */
-	if (ac->ac_allow_chain_relink &&
+	if (!ac->ac_disable_chain_relink &&
 	    (prev_group_bh) &&
 	    (ocfs2_block_group_reasonably_empty(bg, res->sr_bits))) {
 		status = ocfs2_relink_block_group(handle, alloc_inode,
@@ -1928,7 +1928,6 @@ static int ocfs2_claim_suballoc_bits(struct ocfs2_alloc_context *ac,
 
 	victim = ocfs2_find_victim_chain(cl);
 	ac->ac_chain = victim;
-	ac->ac_allow_chain_relink = 1;
 
 	status = ocfs2_search_chain(ac, handle, bits_wanted, min_bits,
 				    res, &bits_left);
@@ -1947,7 +1946,7 @@ static int ocfs2_claim_suballoc_bits(struct ocfs2_alloc_context *ac,
 	 * searching each chain in order. Don't allow chain relinking
 	 * because we only calculate enough journal credits for one
 	 * relink per alloc. */
-	ac->ac_allow_chain_relink = 0;
+	ac->ac_disable_chain_relink = 1;
 	for (i = 0; i < le16_to_cpu(cl->cl_next_free_rec); i ++) {
 		if (i == victim)
 			continue;
@@ -2008,7 +2007,7 @@ int ocfs2_claim_metadata(handle_t *handle,
 		mlog_errno(status);
 		goto bail;
 	}
-	atomic_inc(&OCFS2_SB(ac->ac_inode->i_sb)->alloc_stats.bg_allocs);
+	atomic_inc_unchecked(&OCFS2_SB(ac->ac_inode->i_sb)->alloc_stats.bg_allocs);
 
 	*suballoc_loc = res.sr_bg_blkno;
 	*suballoc_bit_start = res.sr_bit_offset;
@@ -2172,7 +2171,7 @@ int ocfs2_claim_new_inode_at_loc(handle_t *handle,
 	trace_ocfs2_claim_new_inode_at_loc((unsigned long long)di_blkno,
 					   res->sr_bits);
 
-	atomic_inc(&OCFS2_SB(ac->ac_inode->i_sb)->alloc_stats.bg_allocs);
+	atomic_inc_unchecked(&OCFS2_SB(ac->ac_inode->i_sb)->alloc_stats.bg_allocs);
 
 	BUG_ON(res->sr_bits != 1);
 
@@ -2214,7 +2213,7 @@ int ocfs2_claim_new_inode(handle_t *handle,
 		mlog_errno(status);
 		goto bail;
 	}
-	atomic_inc(&OCFS2_SB(ac->ac_inode->i_sb)->alloc_stats.bg_allocs);
+	atomic_inc_unchecked(&OCFS2_SB(ac->ac_inode->i_sb)->alloc_stats.bg_allocs);
 
 	BUG_ON(res.sr_bits != 1);
 
@@ -2318,7 +2317,7 @@ int __ocfs2_claim_clusters(handle_t *handle,
 						      cluster_start,
 						      num_clusters);
 		if (!status)
-			atomic_inc(&osb->alloc_stats.local_data);
+			atomic_inc_unchecked(&osb->alloc_stats.local_data);
 	} else {
 		if (min_clusters > (osb->bitmap_cpg - 1)) {
 			/* The only paths asking for contiguousness
@@ -2344,7 +2343,7 @@ int __ocfs2_claim_clusters(handle_t *handle,
 				ocfs2_desc_bitmap_to_cluster_off(ac->ac_inode,
 								 res.sr_bg_blkno,
 								 res.sr_bit_offset);
-			atomic_inc(&osb->alloc_stats.bitmap_data);
+			atomic_inc_unchecked(&osb->alloc_stats.bitmap_data);
 			*num_clusters = res.sr_bits;
 		}
 	}

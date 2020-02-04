@@ -437,7 +437,7 @@ struct ioc4_soft {
 		} is_intr_info[MAX_IOC4_INTR_ENTS];
 
 		/* Number of entries active in the above array */
-		atomic_t is_num_intrs;
+		atomic_unchecked_t is_num_intrs;
 	} is_intr_type[IOC4_NUM_INTR_TYPES];
 
 	/* is_ir_lock must be held while
@@ -974,7 +974,7 @@ intr_connect(struct ioc4_soft *soft, int type,
 	BUG_ON(!((type == IOC4_SIO_INTR_TYPE)
 	       || (type == IOC4_OTHER_INTR_TYPE)));
 
-	i = atomic_inc_return(&soft-> is_intr_type[type].is_num_intrs) - 1;
+	i = atomic_inc_return_unchecked(&soft-> is_intr_type[type].is_num_intrs) - 1;
 	BUG_ON(!(i < MAX_IOC4_INTR_ENTS || (printk("i %d\n", i), 0)));
 
 	/* Save off the lower level interrupt handler */
@@ -1001,7 +1001,7 @@ static irqreturn_t ioc4_intr(int irq, void *arg)
 
 	soft = arg;
 	for (intr_type = 0; intr_type < IOC4_NUM_INTR_TYPES; intr_type++) {
-		num_intrs = (int)atomic_read(
+		num_intrs = (int)atomic_read_unchecked(
 				&soft->is_intr_type[intr_type].is_num_intrs);
 
 		this_mir = this_ir = pending_intrs(soft, intr_type);
@@ -1740,7 +1740,7 @@ ioc4_change_speed(struct uart_port *the_port,
 
 	the_port->ignore_status_mask = N_ALL_INPUT;
 
-	state->port.tty->low_latency = 1;
+	state->port.low_latency = 1;
 
 	if (iflag & IGNPAR)
 		the_port->ignore_status_mask &= ~(N_PARITY_ERROR
@@ -1803,7 +1803,7 @@ static inline int ic4_startup_local(struct uart_port *the_port)
 	ioc4_set_proto(port, the_port->mapbase);
 
 	/* set the speed of the serial port */
-	ioc4_change_speed(the_port, state->port.tty->termios,
+	ioc4_change_speed(the_port, &state->port.tty->termios,
 			  (struct ktermios *)0);
 
 	return 0;
@@ -2069,13 +2069,14 @@ static inline int do_read(struct uart_port *the_port, unsigned char *buf,
 	struct ioc4_port *port = get_ioc4_port(the_port, 0);
 	struct ring *inring;
 	struct ring_entry *entry;
-	struct hooks *hooks = port->ip_hooks;
+	struct hooks *hooks;
 	int byte_num;
 	char *sc;
 	int loop_counter;
 
 	BUG_ON(!(len >= 0));
 	BUG_ON(!port);
+	hooks = port->ip_hooks;
 
 	/* There is a nasty timing issue in the IOC4. When the rx_timer
 	 * expires or the rx_high condition arises, we take an interrupt.
@@ -2339,7 +2340,6 @@ static inline int do_read(struct uart_port *the_port, unsigned char *buf,
  */
 static void receive_chars(struct uart_port *the_port)
 {
-	struct tty_struct *tty;
 	unsigned char ch[IOC4_MAX_CHARS];
 	int read_count, request_count = IOC4_MAX_CHARS;
 	struct uart_icount *icount;
@@ -2349,26 +2349,23 @@ static void receive_chars(struct uart_port *the_port)
 	/* Make sure all the pointers are "good" ones */
 	if (!state)
 		return;
-	if (!state->port.tty)
-		return;
 
 	spin_lock_irqsave(&the_port->lock, pflags);
-	tty = state->port.tty;
 
-	request_count = tty_buffer_request_room(tty, IOC4_MAX_CHARS);
+	request_count = tty_buffer_request_room(&state->port, IOC4_MAX_CHARS);
 
 	if (request_count > 0) {
 		icount = &the_port->icount;
 		read_count = do_read(the_port, ch, request_count);
 		if (read_count > 0) {
-			tty_insert_flip_string(tty, ch, read_count);
+			tty_insert_flip_string(&state->port, ch, read_count);
 			icount->rx += read_count;
 		}
 	}
 
 	spin_unlock_irqrestore(&the_port->lock, pflags);
 
-	tty_flip_buffer_push(tty);
+	tty_flip_buffer_push(&state->port);
 }
 
 /**
@@ -2882,6 +2879,7 @@ ioc4_serial_attach_one(struct ioc4_driver_data *idd)
 	/* error exits that give back resources */
 out5:
 	ioc4_serial_remove_one(idd);
+	return ret;
 out4:
 	kfree(soft);
 out3:

@@ -660,7 +660,7 @@ err_out:
 	return err;
 }
 
-static int __devexit at24_remove(struct i2c_client *client)
+static int at24_remove(struct i2c_client *client)
 {
 	struct at24_data *at24;
 	int i;
@@ -687,7 +687,7 @@ static struct i2c_driver at24_driver = {
 		.owner = THIS_MODULE,
 	},
 	.probe = at24_probe,
-	.remove = __devexit_p(at24_remove),
+	.remove = at24_remove,
 	.id_table = at24_ids,
 };
 

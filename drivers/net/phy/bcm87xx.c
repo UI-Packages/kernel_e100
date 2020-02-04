@@ -21,9 +21,8 @@
 #define BCM87XX_LASI_STATUS (MII_ADDR_C45 | 0x39005)
 
 #if IS_ENABLED(CONFIG_OF_MDIO)
-/*
- * Set and/or override some configuration registers based on the
- * marvell,reg-init property stored in the of_node for the phydev.
+/* Set and/or override some configuration registers based on the
+ * broadcom,c45-reg-init property stored in the of_node for the phydev.
  *
  * broadcom,c45-reg-init = <devid reg mask value>,...;
  *
@@ -90,6 +89,7 @@ static int bcm87xx_config_init(struct phy_device *phydev)
 	phydev->supported = SUPPORTED_10000baseR_FEC;
 	phydev->advertising = ADVERTISED_10000baseR_FEC;
 	phydev->state = PHY_NOLINK;
+	phydev->autoneg = AUTONEG_DISABLE;
 
 	bcm87xx_of_reg_init(phydev);
 
@@ -187,7 +187,8 @@ static int bcm8727_match_phy_device(struct phy_device *phydev)
 	return phydev->c45_ids.device_ids[4] == PHY_ID_BCM8727;
 }
 
-static struct phy_driver bcm8706_driver = {
+static struct phy_driver bcm87xx_driver[] = {
+{
 	.phy_id		= PHY_ID_BCM8706,
 	.phy_id_mask	= 0xffffffff,
 	.name		= "Broadcom BCM8706",
@@ -200,9 +201,7 @@ static struct phy_driver bcm8706_driver = {
 	.did_interrupt	= bcm87xx_did_interrupt,
 	.match_phy_device = bcm8706_match_phy_device,
 	.driver		= { .owner = THIS_MODULE },
-};
-
-static struct phy_driver bcm8727_driver = {
+}, {
 	.phy_id		= PHY_ID_BCM8727,
 	.phy_id_mask	= 0xffffffff,
 	.name		= "Broadcom BCM8727",
@@ -215,26 +214,20 @@ static struct phy_driver bcm8727_driver = {
 	.did_interrupt	= bcm87xx_did_interrupt,
 	.match_phy_device = bcm8727_match_phy_device,
 	.driver		= { .owner = THIS_MODULE },
-};
+} };
 
 static int __init bcm87xx_init(void)
 {
-	int ret;
-
-	ret = phy_driver_register(&bcm8706_driver);
-	if (ret)
-		goto err;
-
-	ret = phy_driver_register(&bcm8727_driver);
-err:
-	return ret;
+	return phy_drivers_register(bcm87xx_driver,
+		ARRAY_SIZE(bcm87xx_driver));
 }
 module_init(bcm87xx_init);
 
 static void __exit bcm87xx_exit(void)
 {
-	phy_driver_unregister(&bcm8706_driver);
-	phy_driver_unregister(&bcm8727_driver);
+	phy_drivers_unregister(bcm87xx_driver,
+		ARRAY_SIZE(bcm87xx_driver));
 }
 module_exit(bcm87xx_exit);
 
+MODULE_LICENSE("GPL");

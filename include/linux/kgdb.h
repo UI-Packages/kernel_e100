@@ -13,7 +13,6 @@
 #ifndef _KGDB_H_
 #define _KGDB_H_
 
-#include <linux/serial_8250.h>
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <linux/atomic.h>
@@ -53,7 +52,7 @@ extern int kgdb_connected;
 extern int kgdb_io_module_registered;
 
 extern atomic_t			kgdb_setting_breakpoint;
-extern atomic_t			kgdb_cpu_doing_single_step;
+extern atomic_unchecked_t	kgdb_cpu_doing_single_step;
 
 extern struct task_struct	*kgdb_usethread;
 extern struct task_struct	*kgdb_contthread;
@@ -240,6 +239,7 @@ extern void kgdb_arch_late(void);
  * hardware breakpoints.
  * @correct_hw_break: Allow an architecture to specify how to correct the
  * hardware debug registers.
+ * @enable_nmi: Manage NMI-triggered entry to KGDB
  */
 struct kgdb_arch {
 	unsigned char		gdb_bpt_instr[BREAK_INSTR_SIZE];
@@ -252,7 +252,9 @@ struct kgdb_arch {
 	void	(*disable_hw_break)(struct pt_regs *regs);
 	void	(*remove_all_hw_break)(void);
 	void	(*correct_hw_break)(void);
-};
+
+	void	(*enable_nmi)(bool on);
+} __do_const;
 
 /**
  * struct kgdb_io - Describe the interface for an I/O driver to talk with KGDB.
@@ -277,11 +279,21 @@ struct kgdb_io {
 	void			(*pre_exception) (void);
 	void			(*post_exception) (void);
 	int			is_console;
-};
+} __do_const;
 
 extern struct kgdb_arch		arch_kgdb_ops;
 
 extern unsigned long __weak kgdb_arch_pc(int exception, struct pt_regs *regs);
+
+#ifdef CONFIG_SERIAL_KGDB_NMI
+extern int kgdb_register_nmi_console(void);
+extern int kgdb_unregister_nmi_console(void);
+extern bool kgdb_nmi_poll_knock(void);
+#else
+static inline int kgdb_register_nmi_console(void) { return 0; }
+static inline int kgdb_unregister_nmi_console(void) { return 0; }
+static inline bool kgdb_nmi_poll_knock(void) { return 1; }
+#endif
 
 extern int kgdb_register_io_module(struct kgdb_io *local_kgdb_io_ops);
 extern void kgdb_unregister_io_module(struct kgdb_io *local_kgdb_io_ops);

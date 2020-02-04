@@ -421,8 +421,8 @@ static void bm_work(struct work_struct *work)
 			 * root, and thus, IRM.
 			 */
 			new_root_id = local_id;
-			fw_notice(card, "%s, making local node (%02x) root\n",
-				  "BM lock failed", new_root_id);
+			fw_notice(card, "BM lock failed (%s), making local node (%02x) root\n",
+				  fw_rcode_string(rcode), new_root_id);
 			goto pick_me;
 		}
 	} else if (card->bm_generation != generation) {
@@ -528,9 +528,9 @@ void fw_card_initialize(struct fw_card *card,
 			const struct fw_card_driver *driver,
 			struct device *device)
 {
-	static atomic_t index = ATOMIC_INIT(-1);
+	static atomic_unchecked_t index = ATOMIC_INIT(-1);
 
-	card->index = atomic_inc_return(&index);
+	card->index = atomic_inc_return_unchecked(&index);
 	card->driver = driver;
 	card->device = device;
 	card->current_tlabel = 0;
@@ -676,10 +676,11 @@ void fw_card_release(struct kref *kref)
 
 	complete(&card->done);
 }
+EXPORT_SYMBOL_GPL(fw_card_release);
 
 void fw_core_remove_card(struct fw_card *card)
 {
-	struct fw_card_driver dummy_driver = dummy_driver_template;
+	fw_card_driver_no_const dummy_driver = dummy_driver_template;
 
 	card->driver->update_phy_reg(card, 4,
 				     PHY_LINK_ACTIVE | PHY_CONTENDER, 0);

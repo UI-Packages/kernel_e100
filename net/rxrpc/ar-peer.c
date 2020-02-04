@@ -72,7 +72,7 @@ static struct rxrpc_peer *rxrpc_alloc_peer(struct sockaddr_rxrpc *srx,
 		INIT_LIST_HEAD(&peer->error_targets);
 		spin_lock_init(&peer->lock);
 		atomic_set(&peer->usage, 1);
-		peer->debug_id = atomic_inc_return(&rxrpc_debug_id);
+		peer->debug_id = atomic_inc_return_unchecked(&rxrpc_debug_id);
 		memcpy(&peer->srx, srx, sizeof(*srx));
 
 		rxrpc_assess_MTU_size(peer);
@@ -229,7 +229,7 @@ found_UDP_peer:
 	return peer;
 
 new_UDP_peer:
-	_net("Rx UDP DGRAM from NEW peer %d", peer->debug_id);
+	_net("Rx UDP DGRAM from NEW peer");
 	read_unlock_bh(&rxrpc_peer_lock);
 	_leave(" = -EBUSY [new]");
 	return ERR_PTR(-EBUSY);

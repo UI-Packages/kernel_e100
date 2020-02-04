@@ -18,6 +18,7 @@
 
 #include <linux/linkage.h>
 #include <asm/inst.h>
+#include <asm/alternative-asm.h>
 
 .data
 
@@ -93,7 +94,9 @@ __clmul_gf128mul_ble:
 	psrlq $1, T2
 	pxor T2, T1
 	pxor T1, DATA
+	pax_force_retaddr
 	ret
+ENDPROC(__clmul_gf128mul_ble)
 
 /* void clmul_ghash_mul(char *dst, const be128 *shash) */
 ENTRY(clmul_ghash_mul)
@@ -104,7 +107,9 @@ ENTRY(clmul_ghash_mul)
 	call __clmul_gf128mul_ble
 	PSHUFB_XMM BSWAP DATA
 	movups DATA, (%rdi)
+	pax_force_retaddr
 	ret
+ENDPROC(clmul_ghash_mul)
 
 /*
  * void clmul_ghash_update(char *dst, const char *src, unsigned int srclen,
@@ -130,7 +135,9 @@ ENTRY(clmul_ghash_update)
 	PSHUFB_XMM BSWAP DATA
 	movups DATA, (%rdi)
 .Lupdate_just_ret:
+	pax_force_retaddr
 	ret
+ENDPROC(clmul_ghash_update)
 
 /*
  * void clmul_ghash_setkey(be128 *shash, const u8 *key);
@@ -154,4 +161,6 @@ ENTRY(clmul_ghash_setkey)
 	pand .Lpoly, %xmm1
 	pxor %xmm1, %xmm0
 	movups %xmm0, (%rdi)
+	pax_force_retaddr
 	ret
+ENDPROC(clmul_ghash_setkey)

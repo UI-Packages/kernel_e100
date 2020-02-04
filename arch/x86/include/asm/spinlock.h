@@ -12,18 +12,15 @@
  * Simple spin lock operations.  There are two variants, one clears IRQ's
  * on the local processor, one does not.
  *
- * These are fair FIFO ticket locks, which are currently limited to 256
- * CPUs.
+ * These are fair FIFO ticket locks, which support up to 2^16 CPUs.
  *
  * (the type definitions are in asm/spinlock_types.h)
  */
 
 #ifdef CONFIG_X86_32
 # define LOCK_PTR_REG "a"
-# define REG_PTR_MODE "k"
 #else
 # define LOCK_PTR_REG "D"
-# define REG_PTR_MODE "q"
 #endif
 
 #if defined(CONFIG_X86_32) && \
@@ -175,6 +172,14 @@ static inline int arch_write_can_lock(arch_rwlock_t *lock)
 static inline void arch_read_lock(arch_rwlock_t *rw)
 {
 	asm volatile(LOCK_PREFIX READ_LOCK_SIZE(dec) " (%0)\n\t"
+
+#ifdef CONFIG_PAX_REFCOUNT
+		     "jno 0f\n"
+		     LOCK_PREFIX READ_LOCK_SIZE(inc) " (%0)\n"
+		     "int $4\n0:\n"
+		     _ASM_EXTABLE(0b, 0b)
+#endif
+
 		     "jns 1f\n"
 		     "call __read_lock_failed\n\t"
 		     "1:\n"
@@ -184,6 +189,14 @@ static inline void arch_read_lock(arch_rwlock_t *rw)
 static inline void arch_write_lock(arch_rwlock_t *rw)
 {
 	asm volatile(LOCK_PREFIX WRITE_LOCK_SUB(%1) "(%0)\n\t"
+
+#ifdef CONFIG_PAX_REFCOUNT
+		     "jno 0f\n"
+		     LOCK_PREFIX WRITE_LOCK_ADD(%1) "(%0)\n"
+		     "int $4\n0:\n"
+		     _ASM_EXTABLE(0b, 0b)
+#endif
+
 		     "jz 1f\n"
 		     "call __write_lock_failed\n\t"
 		     "1:\n"
@@ -213,13 +226,29 @@ static inline int arch_write_trylock(arch_rwlock_t *lock)
 
 static inline void arch_read_unlock(arch_rwlock_t *rw)
 {
-	asm volatile(LOCK_PREFIX READ_LOCK_SIZE(inc) " %0"
+	asm volatile(LOCK_PREFIX READ_LOCK_SIZE(inc) " %0\n"
+
+#ifdef CONFIG_PAX_REFCOUNT
+		     "jno 0f\n"
+		     LOCK_PREFIX READ_LOCK_SIZE(dec) " %0\n"
+		     "int $4\n0:\n"
+		     _ASM_EXTABLE(0b, 0b)
+#endif
+
 		     :"+m" (rw->lock) : : "memory");
 }
 
 static inline void arch_write_unlock(arch_rwlock_t *rw)
 {
-	asm volatile(LOCK_PREFIX WRITE_LOCK_ADD(%1) "%0"
+	asm volatile(LOCK_PREFIX WRITE_LOCK_ADD(%1) "%0\n"
+
+#ifdef CONFIG_PAX_REFCOUNT
+		     "jno 0f\n"
+		     LOCK_PREFIX WRITE_LOCK_SUB(%1) "%0\n"
+		     "int $4\n0:\n"
+		     _ASM_EXTABLE(0b, 0b)
+#endif
+
 		     : "+m" (rw->write) : "i" (RW_LOCK_BIAS) : "memory");
 }
 

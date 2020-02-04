@@ -8,7 +8,9 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 
 #include <asm/octeon/octeon.h>
 #include <asm/octeon/cvmx-fpa.h>
@@ -21,6 +23,25 @@ int test_param;
 module_param(test_param, int, S_IRUGO);
 MODULE_PARM_DESC(test_param, "Parameter used in the test case.");
 
+static void octeon_error_injector_l1_dcache_parity(void)
+{
+	if (OCTEON_IS_OCTEON3()) {
+		u64 errctl = read_octeon_c0_errctl();
+		errctl |= (1ull << 11);
+		write_octeon_c0_errctl(errctl);
+	} else if (OCTEON_IS_OCTEON2())
+		write_octeon_c0_dcacheerr(1ull<<3);
+}
+
+static void octeon_error_injector_tlb_parity(void)
+{
+	if (OCTEON_IS_OCTEON3()) {
+		u64 errctl = read_octeon_c0_errctl();
+		errctl |= (1ull << 15);
+		write_octeon_c0_errctl(errctl);
+	} else if (OCTEON_IS_OCTEON2())
+		write_octeon_c0_dcacheerr(1ull<<6);
+}
 
 static void octeon_error_injector_memory_read(void)
 {
@@ -67,7 +88,7 @@ static void octeon_error_injector_fpa1(void)
 static int __init octeon_error_injector_init(void)
 {
 	/* We are injecting errors, so mark the kernel as tainted.*/
-	add_taint(TAINT_CRAP);
+	add_taint(TAINT_CRAP, LOCKDEP_STILL_OK);
 
 	switch (test_number) {
 	case 1:
@@ -75,6 +96,12 @@ static int __init octeon_error_injector_init(void)
 		break;
 	case 2:
 		octeon_error_injector_fpa1();
+		break;
+	case 3:
+		octeon_error_injector_l1_dcache_parity();
+		break;
+	case 4:
+		octeon_error_injector_tlb_parity();
 		break;
 	default:
 		pr_err("Error: Unrecognized test number: %d\n",  test_number);

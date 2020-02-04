@@ -73,9 +73,11 @@ int main(void)
 	ENTRY(cr3);
 	ENTRY(cr4);
 	ENTRY(cr8);
+	ENTRY(gdt_desc);
 	BLANK();
 #undef ENTRY
 
+	DEFINE(TSS_size, sizeof(struct tss_struct));
 	OFFSET(TSS_ist, tss_struct, x86_tss.ist);
 	BLANK();
 

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) ST-Ericsson AB 2010
- * Author:	Sjur Brendeland/sjur.brandeland@stericsson.com
+ * Author:	Sjur Brendeland
  * License terms: GNU General Public License (GPL) version 2
  */
 
@@ -9,6 +9,8 @@
 #include <linux/stddef.h>
 #include <linux/spinlock.h>
 #include <linux/slab.h>
+#include <linux/pkt_sched.h>
+#include <linux/sched.h>
 #include <net/caif/caif_layer.h>
 #include <net/caif/cfpkt.h>
 #include <net/caif/cfctrl.h>
@@ -19,12 +21,12 @@
 
 #ifdef CAIF_NO_LOOP
 static int handle_loop(struct cfctrl *ctrl,
-			      int cmd, struct cfpkt *pkt){
+		       int cmd, struct cfpkt *pkt){
 	return -1;
 }
 #else
 static int handle_loop(struct cfctrl *ctrl,
-		int cmd, struct cfpkt *pkt);
+		       int cmd, struct cfpkt *pkt);
 #endif
 static int cfctrl_recv(struct cflayer *layr, struct cfpkt *pkt);
 static void cfctrl_ctrlcmd(struct cflayer *layr, enum caif_ctrlcmd ctrl,
@@ -42,8 +44,8 @@ struct cflayer *cfctrl_create(void)
 	memset(&dev_info, 0, sizeof(dev_info));
 	dev_info.id = 0xff;
 	cfsrvl_init(&this->serv, 0, &dev_info, false);
-	atomic_set(&this->req_seq_no, 1);
-	atomic_set(&this->rsp_seq_no, 1);
+	atomic_set_unchecked(&this->req_seq_no, 1);
+	atomic_set_unchecked(&this->rsp_seq_no, 1);
 	this->serv.layer.receive = cfctrl_recv;
 	sprintf(this->serv.layer.name, "ctrl");
 	this->serv.layer.ctrlcmd = cfctrl_ctrlcmd;
@@ -71,7 +73,7 @@ void cfctrl_remove(struct cflayer *layer)
 }
 
 static bool param_eq(const struct cfctrl_link_param *p1,
-			const struct cfctrl_link_param *p2)
+		     const struct cfctrl_link_param *p2)
 {
 	bool eq =
 	    p1->linktype == p2->linktype &&
@@ -129,8 +131,8 @@ static void cfctrl_insert_req(struct cfctrl *ctrl,
 			      struct cfctrl_request_info *req)
 {
 	spin_lock_bh(&ctrl->info_list_lock);
-	atomic_inc(&ctrl->req_seq_no);
-	req->sequence_no = atomic_read(&ctrl->req_seq_no);
+	atomic_inc_unchecked(&ctrl->req_seq_no);
+	req->sequence_no = atomic_read_unchecked(&ctrl->req_seq_no);
 	list_add_tail(&req->list, &ctrl->list);
 	spin_unlock_bh(&ctrl->info_list_lock);
 }
@@ -148,7 +150,7 @@ static struct cfctrl_request_info *cfctrl_remove_req(struct cfctrl *ctrl,
 			if (p != first)
 				pr_warn("Requests are not received in order\n");
 
-			atomic_set(&ctrl->rsp_seq_no,
+			atomic_set_unchecked(&ctrl->rsp_seq_no,
 					 p->sequence_no);
 			list_del(&p->list);
 			goto out;
@@ -174,27 +176,30 @@ static void init_info(struct caif_payload_info *info, struct cfctrl *cfctrl)
 
 void cfctrl_enum_req(struct cflayer *layer, u8 physlinkid)
 {
+	struct cfpkt *pkt;
 	struct cfctrl *cfctrl = container_obj(layer);
-	struct cfpkt *pkt = cfpkt_create(CFPKT_CTRL_PKT_LEN);
 	struct cflayer *dn = cfctrl->serv.layer.dn;
-	if (!pkt)
-		return;
+
 	if (!dn) {
 		pr_debug("not able to send enum request\n");
 		return;
 	}
+	pkt = cfpkt_create(CFPKT_CTRL_PKT_LEN);
+	if (!pkt)
+		return;
 	caif_assert(offsetof(struct cfctrl, serv.layer) == 0);
 	init_info(cfpkt_info(pkt), cfctrl);
 	cfpkt_info(pkt)->dev_info->id = physlinkid;
 	cfctrl->serv.dev_info.id = physlinkid;
 	cfpkt_addbdy(pkt, CFCTRL_CMD_ENUM);
 	cfpkt_addbdy(pkt, physlinkid);
+	cfpkt_set_prio(pkt, TC_PRIO_CONTROL);
 	dn->transmit(dn, pkt);
 }
 
 int cfctrl_linkup_request(struct cflayer *layer,
-			   struct cfctrl_link_param *param,
-			   struct cflayer *user_layer)
+			  struct cfctrl_link_param *param,
+			  struct cflayer *user_layer)
 {
 	struct cfctrl *cfctrl = container_obj(layer);
 	u32 tmp32;
@@ -281,6 +286,7 @@ int cfctrl_linkup_request(struct cflayer *layer,
 	 *	might arrive with the newly allocated channel ID.
 	 */
 	cfpkt_info(pkt)->dev_info->id = param->phyid;
+	cfpkt_set_prio(pkt, TC_PRIO_CONTROL);
 	ret =
 	    dn->transmit(dn, pkt);
 	if (ret < 0) {
@@ -288,32 +294,33 @@ int cfctrl_linkup_request(struct cflayer *layer,
 
 		count = cfctrl_cancel_req(&cfctrl->serv.layer,
 						user_layer);
-		if (count != 1)
+		if (count != 1) {
 			pr_err("Could not remove request (%d)", count);
 			return -ENODEV;
+		}
 	}
 	return 0;
 }
 
 int cfctrl_linkdown_req(struct cflayer *layer, u8 channelid,
-				struct cflayer *client)
+			struct cflayer *client)
 {
 	int ret;
+	struct cfpkt *pkt;
 	struct cfctrl *cfctrl = container_obj(layer);
-	struct cfpkt *pkt = cfpkt_create(CFPKT_CTRL_PKT_LEN);
 	struct cflayer *dn = cfctrl->serv.layer.dn;
-
-	if (!pkt)
-		return -ENOMEM;
 
 	if (!dn) {
 		pr_debug("not able to send link-down request\n");
 		return -ENODEV;
 	}
-
+	pkt = cfpkt_create(CFPKT_CTRL_PKT_LEN);
+	if (!pkt)
+		return -ENOMEM;
 	cfpkt_addbdy(pkt, CFCTRL_CMD_LINK_DESTROY);
 	cfpkt_addbdy(pkt, channelid);
 	init_info(cfpkt_info(pkt), cfctrl);
+	cfpkt_set_prio(pkt, TC_PRIO_CONTROL);
 	ret =
 	    dn->transmit(dn, pkt);
 #ifndef CAIF_NO_LOOP
@@ -510,8 +517,7 @@ static int cfctrl_recv(struct cflayer *layer, struct cfpkt *pkt)
 							  client_layer : NULL);
 			}
 
-			if (req != NULL)
-				kfree(req);
+			kfree(req);
 
 			spin_unlock_bh(&cfctrl->info_list_lock);
 		}
@@ -551,7 +557,7 @@ error:
 }
 
 static void cfctrl_ctrlcmd(struct cflayer *layr, enum caif_ctrlcmd ctrl,
-			int phyid)
+			   int phyid)
 {
 	struct cfctrl *this = container_obj(layr);
 	switch (ctrl) {

@@ -14,8 +14,9 @@
 #define CP0_DCACHE_ERR_REG $27, 1
 #define CP0_PRID_OCTEON_PASS1 0x000d0000
 #define CP0_PRID_OCTEON_CN30XX 0x000d0200
+#define CP0_MDEBUG $22, 0
 
-.macro  kernel_entry_setup
+.macro	kernel_entry_setup
 	# Registers set by bootloader:
 	# (only 32 bits set by bootloader, all addresses are physical
 	# addresses, and need to have the appropriate memory region set
@@ -28,6 +29,7 @@
 	.set arch=octeon
 #ifdef CONFIG_HOTPLUG_CPU
 	b	7f
+	nop
 
 FEXPORT(octeon_hotplug_entry)
 	move	a0, zero
@@ -35,7 +37,20 @@ FEXPORT(octeon_hotplug_entry)
 	move	a2, zero
 	move	a3, zero
 7:
-#endif
+#endif	/* CONFIG_HOTPLUG_CPU */
+#ifdef	CONFIG_CPU_LITTLE_ENDIAN
+	.set push
+	.set noreorder
+	/* Hotpplugged CPUs enter in Big-Endian mode, switch here to LE */
+	dmfc0   v0, CP0_CVMCTL_REG
+	nop
+	ori     v0, v0, 2
+	nop
+	dmtc0   v0, CP0_CVMCTL_REG	/* little-endian */
+	nop
+	synci	0($0)
+	.set pop
+#endif	/* CONFIG_CPU_LITTLE_ENDIAN */
 	mfc0	v0, CP0_STATUS
 	/* Force 64-bit addressing enabled */
 	ori	v0, v0, (ST0_UX | ST0_SX | ST0_KX)
@@ -148,12 +163,12 @@ FEXPORT(octeon_hotplug_entry)
 continue_in_mapped_space:
 #endif
 	# Read the cavium mem control register
-	dmfc0   v0, CP0_CVMMEMCTL_REG
+	dmfc0	v0, CP0_CVMMEMCTL_REG
 	# Clear the lower 6 bits, the CVMSEG size
-	dins    v0, $0, 0, 6
-	ori     v0, CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE
-	dmtc0   v0, CP0_CVMMEMCTL_REG	# Write the cavium mem control register
-	dmfc0   v0, CP0_CVMCTL_REG	# Read the cavium control register
+	dins	v0, $0, 0, 6
+	ori	v0, CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE
+	dmtc0	v0, CP0_CVMMEMCTL_REG	# Write the cavium mem control register
+	dmfc0	v0, CP0_CVMCTL_REG	# Read the cavium control register
 	# Disable unaligned load/store support but leave HW fixup enabled
 	# Needed for octeon specific memcpy
 	or  v0, v0, 0x5001
@@ -186,10 +201,20 @@ continue_in_mapped_space:
 
 5:	# No core-16057 work around
 	# Write the cavium control register
-	dmtc0   v0, CP0_CVMCTL_REG
+	dmtc0	v0, CP0_CVMCTL_REG
 	sync
 	# Flush dcache after config change
-	cache   9, 0($0)
+	cache	9, 0($0)
+
+#ifdef	CONFIG_CAVIUM_GDB
+	# Pulse MCD0 signal on CTRL-C to stop all the cores, and set the MCD0
+	# to be not masked by this core so we know the signal is received by
+	# someone
+	dmfc0	v0, CP0_MDEBUG
+	ori	v0, v0, 0x9100
+	dmtc0	v0, CP0_MDEBUG
+#endif
+
 	# Zero all of CVMSEG to make sure parity is correct
 	dli	v0, CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE
 	dsll	v0, 7
@@ -201,13 +226,16 @@ continue_in_mapped_space:
 	mfc0	v0, CP0_PRID_REG
 	bbit0	v0, 15, 1f
 	# OCTEON II or better have bit 15 set.  Clear the error bits.
+	and	t1, v0, 0xff00
+	dli	v0, 0x9500
+	bge	t1, v0, 1f  # OCTEON III has no DCACHE_ERR_REG COP0
 	dli	v0, 0x27
 	dmtc0	v0, CP0_DCACHE_ERR_REG
 1:
 	# Get my core id
-	rdhwr   v0, $0
+	rdhwr	v0, $0
 	# Jump the master to kernel_entry
-	bne     a2, zero, octeon_main_processor
+	bne	a2, zero, octeon_main_processor
 	nop
 
 #ifdef CONFIG_SMP
@@ -218,21 +246,21 @@ continue_in_mapped_space:
 	#
 
 	# This is the variable where the next core to boot os stored
-	PTR_LA  t0, octeon_processor_boot
+	PTR_LA	t0, octeon_processor_boot
 octeon_spin_wait_boot:
 	# Get the core id of the next to be booted
-	LONG_L  t1, (t0)
+	LONG_L	t1, (t0)
 	# Keep looping if it isn't me
 	bne t1, v0, octeon_spin_wait_boot
 	nop
 	# Get my GP from the global variable
-	PTR_LA  t0, octeon_processor_gp
-	LONG_L  gp, (t0)
+	PTR_LA	t0, octeon_processor_gp
+	LONG_L	gp, (t0)
 	# Get my SP from the global variable
-	PTR_LA  t0, octeon_processor_sp
-	LONG_L  sp, (t0)
+	PTR_LA	t0, octeon_processor_sp
+	LONG_L	sp, (t0)
 	# Set the SP global variable to zero so the master knows we've started
-	LONG_S  zero, (t0)
+	LONG_S	zero, (t0)
 #ifdef __OCTEON__
 	syncw
 	syncw
@@ -261,7 +289,7 @@ octeon_main_processor:
 /*
  * Do SMP slave processor setup necessary before we can savely execute C code.
  */
-	.macro  smp_slave_setup
+	.macro	smp_slave_setup
 	.endm
 
 #endif /* __ASM_MACH_CAVIUM_OCTEON_KERNEL_ENTRY_H */

@@ -10,17 +10,13 @@
 #include <linux/interrupt.h>
 #include <linux/spi/spi.h>
 #include <linux/module.h>
+#include <linux/delay.h>
 #include <linux/init.h>
-#include <linux/of_spi.h>
 #include <linux/io.h>
 #include <linux/of.h>
 
 #include <asm/octeon/octeon.h>
 #include <asm/octeon/cvmx-mpi-defs.h>
-
-#define DRV_VERSION "2.0" /* Version 1 was the out-of-tree driver */
-#define DRV_DESCRIPTION "Cavium, Inc. OCTEON SPI bus driver"
-
 
 #define OCTEON_SPI_CFG 0
 #define OCTEON_SPI_STS 0x08
@@ -73,6 +69,8 @@ static int octeon_spi_do_transfer(struct octeon_spi *p,
 	u8 *rx_buf;
 	int len;
 	int i;
+	u32 max_freq;
+	struct device_node *np = p->my_master->dev.of_node;
 
 	struct octeon_spi_setup *msg_setup = spi_get_ctldata(msg->spi);
 
@@ -87,8 +85,14 @@ static int octeon_spi_do_transfer(struct octeon_spi *p,
 	if (xfer->bits_per_word)
 		bits_per_word = xfer->bits_per_word;
 
+	if (!of_property_read_u32(np, "spi-max-frequency", &max_freq)) {
+		if (speed_hz > max_freq)
+			speed_hz = max_freq;
+	}
+	else {
 	if (speed_hz > OCTEON_SPI_MAX_CLOCK_HZ)
 		speed_hz = OCTEON_SPI_MAX_CLOCK_HZ;
+	}
 
 	clkdiv = octeon_get_io_clock_rate() / (2 * speed_hz);
 
@@ -270,7 +274,7 @@ static int octeon_spi_nop_transfer_hardware(struct spi_master *master)
 	return 0;
 }
 
-static int __devinit octeon_spi_probe(struct platform_device *pdev)
+static int octeon_spi_probe(struct platform_device *pdev)
 {
 
 	struct resource *res_mem;
@@ -322,7 +326,7 @@ static int __devinit octeon_spi_probe(struct platform_device *pdev)
 		goto fail;
 	}
 
-	dev_info(&pdev->dev, "Version " DRV_VERSION "\n");
+	dev_info(&pdev->dev, "OCTEON SPI bus driver\n");
 
 	return 0;
 fail:
@@ -330,23 +334,21 @@ fail:
 	return err;
 }
 
-static int __devexit octeon_spi_remove(struct platform_device *pdev)
+static int octeon_spi_remove(struct platform_device *pdev)
 {
 	struct octeon_spi *p = platform_get_drvdata(pdev);
-	struct spi_master *master = p->my_master;
+	u64 register_base = p->register_base;
 
-	spi_unregister_master(master);
+	spi_unregister_master(p->my_master);
 
 	/* Clear the CSENA* and put everything in a known state. */
-	cvmx_write_csr(p->register_base + OCTEON_SPI_CFG, 0);
-	spi_master_put(master);
+	cvmx_write_csr(register_base + OCTEON_SPI_CFG, 0);
+
 	return 0;
 }
 
 static struct of_device_id octeon_spi_match[] = {
-	{
-		.compatible = "cavium,octeon-3010-spi",
-	},
+	{ .compatible = "cavium,octeon-3010-spi", },
 	{},
 };
 MODULE_DEVICE_TABLE(of, octeon_spi_match);
@@ -358,12 +360,11 @@ static struct platform_driver octeon_spi_driver = {
 		.of_match_table = octeon_spi_match,
 	},
 	.probe		= octeon_spi_probe,
-	.remove		= __exit_p(octeon_spi_remove),
+	.remove		= octeon_spi_remove,
 };
 
 module_platform_driver(octeon_spi_driver);
 
-MODULE_DESCRIPTION(DRV_DESCRIPTION);
-MODULE_VERSION(DRV_VERSION);
+MODULE_DESCRIPTION("Cavium, Inc. OCTEON SPI bus driver");
 MODULE_AUTHOR("David Daney");
 MODULE_LICENSE("GPL");

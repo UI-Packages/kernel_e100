@@ -200,11 +200,7 @@ void locks_release_private(struct file_lock *fl)
 			fl->fl_ops->fl_release_private(fl);
 		fl->fl_ops = NULL;
 	}
-	if (fl->fl_lmops) {
-		if (fl->fl_lmops->lm_release_private)
-			fl->fl_lmops->lm_release_private(fl);
-		fl->fl_lmops = NULL;
-	}
+	fl->fl_lmops = NULL;
 
 }
 EXPORT_SYMBOL_GPL(locks_release_private);
@@ -338,7 +334,7 @@ static int flock_to_posix_lock(struct file *filp, struct file_lock *fl,
 		start = filp->f_pos;
 		break;
 	case SEEK_END:
-		start = i_size_read(filp->f_path.dentry->d_inode);
+		start = i_size_read(file_inode(filp));
 		break;
 	default:
 		return -EINVAL;
@@ -388,7 +384,7 @@ static int flock64_to_posix_lock(struct file *filp, struct file_lock *fl,
 		start = filp->f_pos;
 		break;
 	case SEEK_END:
-		start = i_size_read(filp->f_path.dentry->d_inode);
+		start = i_size_read(file_inode(filp));
 		break;
 	default:
 		return -EINVAL;
@@ -427,18 +423,8 @@ static void lease_break_callback(struct file_lock *fl)
 	kill_fasync(&fl->fl_fasync, SIGIO, POLL_MSG);
 }
 
-static void lease_release_private_callback(struct file_lock *fl)
-{
-	if (!fl->fl_file)
-		return;
-
-	f_delown(fl->fl_file);
-	fl->fl_file->f_owner.signum = 0;
-}
-
 static const struct lock_manager_operations lease_manager_ops = {
 	.lm_break = lease_break_callback,
-	.lm_release_private = lease_release_private_callback,
 	.lm_change = lease_modify,
 };
 
@@ -492,6 +478,14 @@ static inline int locks_overlap(struct file_lock *fl1, struct file_lock *fl2)
  */
 static int posix_same_owner(struct file_lock *fl1, struct file_lock *fl2)
 {
+#ifdef CONFIG_FUMOUNT
+	/*
+	 * This is a forced unmount remove, always match as we are
+	 * removing all owners.
+	 */
+	if (!fl1->fl_owner)
+		return 1;
+#endif
 	if (fl1->fl_lmops && fl1->fl_lmops->lm_compare_owner)
 		return fl2->fl_lmops == fl1->fl_lmops &&
 			fl1->fl_lmops->lm_compare_owner(fl1, fl2);
@@ -507,6 +501,23 @@ static void __locks_delete_block(struct file_lock *waiter)
 	list_del_init(&waiter->fl_link);
 	waiter->fl_next = NULL;
 }
+
+#ifdef CONFIG_FUMOUNT
+void lock_fumount_wake_waiters(struct file *file)
+{
+	struct inode *inode = file->f_path.dentry->d_inode;
+	struct file_lock **before;
+
+	lock_flocks();
+	for_each_lock(inode, before) {
+		struct file_lock *fl = *before;
+
+		if (fl->fl_file == file)
+			wake_up(&fl->fl_wait);
+	}
+	unlock_flocks();
+}
+#endif
 
 /*
  */
@@ -580,12 +591,6 @@ static void locks_delete_lock(struct file_lock **thisfl_p)
 	fl->fl_next = NULL;
 	list_del_init(&fl->fl_link);
 
-	fasync_helper(0, fl->fl_file, 0, &fl->fl_fasync);
-	if (fl->fl_fasync != NULL) {
-		printk(KERN_ERR "locks_delete_lock: fasync == %p\n", fl->fl_fasync);
-		fl->fl_fasync = NULL;
-	}
-
 	if (fl->fl_nspid) {
 		put_pid(fl->fl_nspid);
 		fl->fl_nspid = NULL;
@@ -647,7 +652,7 @@ posix_test_lock(struct file *filp, struct file_lock *fl)
 	struct file_lock *cfl;
 
 	lock_flocks();
-	for (cfl = filp->f_path.dentry->d_inode->i_flock; cfl; cfl = cfl->fl_next) {
+	for (cfl = file_inode(filp)->i_flock; cfl; cfl = cfl->fl_next) {
 		if (!IS_POSIX(cfl))
 			continue;
 		if (posix_locks_conflict(fl, cfl))
@@ -728,7 +733,7 @@ static int flock_lock_file(struct file *filp, struct file_lock *request)
 {
 	struct file_lock *new_fl = NULL;
 	struct file_lock **before;
-	struct inode * inode = filp->f_path.dentry->d_inode;
+	struct inode * inode = file_inode(filp);
 	int error = 0;
 	int found = 0;
 
@@ -1022,7 +1027,7 @@ static int __posix_lock_file(struct inode *inode, struct file_lock *request, str
 int posix_lock_file(struct file *filp, struct file_lock *fl,
 			struct file_lock *conflock)
 {
-	return __posix_lock_file(filp->f_path.dentry->d_inode, fl, conflock);
+	return __posix_lock_file(file_inode(filp), fl, conflock);
 }
 EXPORT_SYMBOL(posix_lock_file);
 
@@ -1040,6 +1045,11 @@ int posix_lock_file_wait(struct file *filp, struct file_lock *fl)
 	int error;
 	might_sleep ();
 	for (;;) {
+#ifdef CONFIG_FUMOUNT
+		smp_rmb();
+		if (filp->f_mode & FMODE_FUMOUNT)
+			return -EBADF;
+#endif
 		error = posix_lock_file(filp, fl, NULL);
 		if (error != FILE_LOCK_DEFERRED)
 			break;
@@ -1112,6 +1122,11 @@ int locks_mandatory_area(int read_write, struct inode *inode,
 	fl.fl_end = offset + count - 1;
 
 	for (;;) {
+#ifdef CONFIG_FUMOUNT
+		smp_rmb();
+		if (filp->f_mode & FMODE_FUMOUNT)
+			return -EBADF;
+#endif
 		error = __posix_lock_file(inode, &fl, NULL);
 		if (error != FILE_LOCK_DEFERRED)
 			break;
@@ -1155,8 +1170,18 @@ int lease_modify(struct file_lock **before, int arg)
 		return error;
 	lease_clear_pending(fl, arg);
 	locks_wake_up_blocks(fl);
-	if (arg == F_UNLCK)
+	if (arg == F_UNLCK) {
+		struct file *filp = fl->fl_file;
+
+		f_delown(filp);
+		filp->f_owner.signum = 0;
+		fasync_helper(0, fl->fl_file, 0, &fl->fl_fasync);
+		if (fl->fl_fasync != NULL) {
+			printk(KERN_ERR "locks_delete_lock: fasync == %p\n", fl->fl_fasync);
+			fl->fl_fasync = NULL;
+		}
 		locks_delete_lock(before);
+	}
 	return 0;
 }
 
@@ -1299,7 +1324,7 @@ EXPORT_SYMBOL(__break_lease);
 void lease_get_mtime(struct inode *inode, struct timespec *time)
 {
 	struct file_lock *flock = inode->i_flock;
-	if (flock && IS_LEASE(flock) && (flock->fl_type & F_WRLCK))
+	if (flock && IS_LEASE(flock) && (flock->fl_type == F_WRLCK))
 		*time = current_fs_time(inode->i_sb);
 	else
 		*time = inode->i_mtime;
@@ -1336,8 +1361,8 @@ int fcntl_getlease(struct file *filp)
 	int type = F_UNLCK;
 
 	lock_flocks();
-	time_out_leases(filp->f_path.dentry->d_inode);
-	for (fl = filp->f_path.dentry->d_inode->i_flock; fl && IS_LEASE(fl);
+	time_out_leases(file_inode(filp));
+	for (fl = file_inode(filp)->i_flock; fl && IS_LEASE(fl);
 			fl = fl->fl_next) {
 		if (fl->fl_file == filp) {
 			type = target_leasetype(fl);
@@ -1446,7 +1471,7 @@ int generic_setlease(struct file *filp, long arg, struct file_lock **flp)
 	struct inode *inode = dentry->d_inode;
 	int error;
 
-	if ((current_fsuid() != inode->i_uid) && !capable(CAP_LEASE))
+	if ((!uid_eq(current_fsuid(), inode->i_uid)) && !capable(CAP_LEASE))
 		return -EACCES;
 	if (!S_ISREG(inode->i_mode))
 		return -EINVAL;
@@ -1599,6 +1624,11 @@ int flock_lock_file_wait(struct file *filp, struct file_lock *fl)
 	int error;
 	might_sleep();
 	for (;;) {
+#ifdef CONFIG_FUMOUNT
+		smp_rmb();
+		if (filp->f_mode & FMODE_FUMOUNT)
+			return -EBADF;
+#endif
 		error = flock_lock_file(filp, fl);
 		if (error != FILE_LOCK_DEFERRED)
 			break;
@@ -1635,14 +1665,13 @@ EXPORT_SYMBOL(flock_lock_file_wait);
  */
 SYSCALL_DEFINE2(flock, unsigned int, fd, unsigned int, cmd)
 {
-	struct file *filp;
+	struct fd f = fdget(fd);
 	struct file_lock *lock;
 	int can_sleep, unlock;
 	int error;
 
 	error = -EBADF;
-	filp = fget(fd);
-	if (!filp)
+	if (!f.file)
 		goto out;
 
 	can_sleep = !(cmd & LOCK_NB);
@@ -1650,31 +1679,31 @@ SYSCALL_DEFINE2(flock, unsigned int, fd, unsigned int, cmd)
 	unlock = (cmd == LOCK_UN);
 
 	if (!unlock && !(cmd & LOCK_MAND) &&
-	    !(filp->f_mode & (FMODE_READ|FMODE_WRITE)))
+	    !(f.file->f_mode & (FMODE_READ|FMODE_WRITE)))
 		goto out_putf;
 
-	error = flock_make_lock(filp, &lock, cmd);
+	error = flock_make_lock(f.file, &lock, cmd);
 	if (error)
 		goto out_putf;
 	if (can_sleep)
 		lock->fl_flags |= FL_SLEEP;
 
-	error = security_file_lock(filp, lock->fl_type);
+	error = security_file_lock(f.file, lock->fl_type);
 	if (error)
 		goto out_free;
 
-	if (filp->f_op && filp->f_op->flock)
-		error = filp->f_op->flock(filp,
+	if (f.file->f_op && f.file->f_op->flock)
+		error = f.file->f_op->flock(f.file,
 					  (can_sleep) ? F_SETLKW : F_SETLK,
 					  lock);
 	else
-		error = flock_lock_file_wait(filp, lock);
+		error = flock_lock_file_wait(f.file, lock);
 
  out_free:
 	locks_free_lock(lock);
 
  out_putf:
-	fput(filp);
+	fdput(f);
  out:
 	return error;
 }
@@ -1818,6 +1847,11 @@ static int do_lock_file_wait(struct file *filp, unsigned int cmd,
 		return error;
 
 	for (;;) {
+#ifdef CONFIG_FUMOUNT
+		smp_rmb();
+		if (filp->f_mode & FMODE_FUMOUNT)
+			return -EBADF;
+#endif
 		error = vfs_lock_file(filp, cmd, fl, NULL);
 		if (error != FILE_LOCK_DEFERRED)
 			break;
@@ -1854,7 +1888,7 @@ int fcntl_setlk(unsigned int fd, struct file *filp, unsigned int cmd,
 	if (copy_from_user(&flock, l, sizeof(flock)))
 		goto out;
 
-	inode = filp->f_path.dentry->d_inode;
+	inode = file_inode(filp);
 
 	/* Don't allow mandatory locks on files that may be memory mapped
 	 * and shared.
@@ -1972,7 +2006,7 @@ int fcntl_setlk64(unsigned int fd, struct file *filp, unsigned int cmd,
 	if (copy_from_user(&flock, l, sizeof(flock)))
 		goto out;
 
-	inode = filp->f_path.dentry->d_inode;
+	inode = file_inode(filp);
 
 	/* Don't allow mandatory locks on files that may be memory mapped
 	 * and shared.
@@ -2041,7 +2075,7 @@ void locks_remove_posix(struct file *filp, fl_owner_t owner)
 	 * posix_lock_file().  Another process could be setting a lock on this
 	 * file at the same time, but we wouldn't remove that lock anyway.
 	 */
-	if (!filp->f_path.dentry->d_inode->i_flock)
+	if (!file_inode(filp)->i_flock)
 		return;
 
 	lock.fl_type = F_UNLCK;
@@ -2067,7 +2101,7 @@ EXPORT_SYMBOL(locks_remove_posix);
  */
 void locks_remove_flock(struct file *filp)
 {
-	struct inode * inode = filp->f_path.dentry->d_inode;
+	struct inode * inode = file_inode(filp);
 	struct file_lock *fl;
 	struct file_lock **before;
 
@@ -2075,16 +2109,16 @@ void locks_remove_flock(struct file *filp)
 		return;
 
 	if (filp->f_op && filp->f_op->flock) {
-		struct file_lock fl = {
+		struct file_lock flock = {
 			.fl_pid = current->tgid,
 			.fl_file = filp,
 			.fl_flags = FL_FLOCK,
 			.fl_type = F_UNLCK,
 			.fl_end = OFFSET_MAX,
 		};
-		filp->f_op->flock(filp, F_SETLKW, &fl);
-		if (fl.fl_ops && fl.fl_ops->fl_release_private)
-			fl.fl_ops->fl_release_private(&fl);
+		filp->f_op->flock(filp, F_SETLKW, &flock);
+		if (flock.fl_ops && flock.fl_ops->fl_release_private)
+			flock.fl_ops->fl_release_private(&flock);
 	}
 
 	lock_flocks();
@@ -2163,7 +2197,7 @@ static void lock_get_status(struct seq_file *f, struct file_lock *fl,
 		fl_pid = fl->fl_pid;
 
 	if (fl->fl_file != NULL)
-		inode = fl->fl_file->f_path.dentry->d_inode;
+		inode = file_inode(fl->fl_file);
 
 	seq_printf(f, "%lld:%s ", id, pfx);
 	if (IS_POSIX(fl)) {
@@ -2196,8 +2230,8 @@ static void lock_get_status(struct seq_file *f, struct file_lock *fl,
 	} else {
 		seq_printf(f, "%s ",
 			       (lease_breaking(fl))
-			       ? (fl->fl_type & F_UNLCK) ? "UNLCK" : "READ "
-			       : (fl->fl_type & F_WRLCK) ? "WRITE" : "READ ");
+			       ? (fl->fl_type == F_UNLCK) ? "UNLCK" : "READ "
+			       : (fl->fl_type == F_WRLCK) ? "WRITE" : "READ ");
 	}
 	if (inode) {
 #ifdef WE_CAN_BREAK_LSLK_NOW

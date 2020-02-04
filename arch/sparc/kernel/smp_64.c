@@ -103,8 +103,6 @@ void __cpuinit smp_callin(void)
 	if (cheetah_pcache_forced_on)
 		cheetah_enable_pcache();
 
-	local_irq_enable();
-
 	callin_flag = 1;
 	__asm__ __volatile__("membar #Sync\n\t"
 			     "flush  %%g6" : : : "memory");
@@ -124,12 +122,13 @@ void __cpuinit smp_callin(void)
 	while (!cpumask_test_cpu(cpuid, &smp_commenced_mask))
 		rmb();
 
-	ipi_call_lock_irq();
 	set_cpu_online(cpuid, true);
-	ipi_call_unlock_irq();
+	local_irq_enable();
 
 	/* idle thread is expected to have preempt disabled */
 	preempt_disable();
+
+	cpu_startup_entry(CPUHP_ONLINE);
 }
 
 void cpu_panic(void)
@@ -343,21 +342,17 @@ extern unsigned long sparc64_cpu_startup;
  */
 static struct thread_info *cpu_new_thread = NULL;
 
-static int __cpuinit smp_boot_one_cpu(unsigned int cpu)
+static int __cpuinit smp_boot_one_cpu(unsigned int cpu, struct task_struct *idle)
 {
 	unsigned long entry =
 		(unsigned long)(&sparc64_cpu_startup);
 	unsigned long cookie =
 		(unsigned long)(&cpu_new_thread);
-	struct task_struct *p;
 	void *descr = NULL;
 	int timeout, ret;
 
-	p = fork_idle(cpu);
-	if (IS_ERR(p))
-		return PTR_ERR(p);
 	callin_flag = 0;
-	cpu_new_thread = task_thread_info(p);
+	cpu_new_thread = task_thread_info(idle);
 
 	if (tlb_type == hypervisor) {
 #if defined(CONFIG_SUN_LDOMS) && defined(CONFIG_HOTPLUG_CPU)
@@ -856,9 +851,11 @@ void smp_tsb_sync(struct mm_struct *mm)
 }
 
 extern unsigned long xcall_flush_tlb_mm;
-extern unsigned long xcall_flush_tlb_pending;
+extern unsigned long xcall_flush_tlb_page;
 extern unsigned long xcall_flush_tlb_kernel_range;
 extern unsigned long xcall_fetch_glob_regs;
+extern unsigned long xcall_fetch_glob_pmu;
+extern unsigned long xcall_fetch_glob_pmu_n4;
 extern unsigned long xcall_receive_signal;
 extern unsigned long xcall_new_mmu_context_version;
 #ifdef CONFIG_KGDB
@@ -871,8 +868,8 @@ extern unsigned long xcall_flush_dcache_page_cheetah;
 extern unsigned long xcall_flush_dcache_page_spitfire;
 
 #ifdef CONFIG_DEBUG_DCFLUSH
-extern atomic_t dcpage_flushes;
-extern atomic_t dcpage_flushes_xcall;
+extern atomic_unchecked_t dcpage_flushes;
+extern atomic_unchecked_t dcpage_flushes_xcall;
 #endif
 
 static inline void __local_flush_dcache_page(struct page *page)
@@ -896,7 +893,7 @@ void smp_flush_dcache_page_impl(struct page *page, int cpu)
 		return;
 
 #ifdef CONFIG_DEBUG_DCFLUSH
-	atomic_inc(&dcpage_flushes);
+	atomic_inc_unchecked(&dcpage_flushes);
 #endif
 
 	this_cpu = get_cpu();
@@ -920,7 +917,7 @@ void smp_flush_dcache_page_impl(struct page *page, int cpu)
 			xcall_deliver(data0, __pa(pg_addr),
 				      (u64) pg_addr, cpumask_of(cpu));
 #ifdef CONFIG_DEBUG_DCFLUSH
-			atomic_inc(&dcpage_flushes_xcall);
+			atomic_inc_unchecked(&dcpage_flushes_xcall);
 #endif
 		}
 	}
@@ -939,7 +936,7 @@ void flush_dcache_page_all(struct mm_struct *mm, struct page *page)
 	preempt_disable();
 
 #ifdef CONFIG_DEBUG_DCFLUSH
-	atomic_inc(&dcpage_flushes);
+	atomic_inc_unchecked(&dcpage_flushes);
 #endif
 	data0 = 0;
 	pg_addr = page_address(page);
@@ -956,7 +953,7 @@ void flush_dcache_page_all(struct mm_struct *mm, struct page *page)
 		xcall_deliver(data0, __pa(pg_addr),
 			      (u64) pg_addr, cpu_online_mask);
 #ifdef CONFIG_DEBUG_DCFLUSH
-		atomic_inc(&dcpage_flushes_xcall);
+		atomic_inc_unchecked(&dcpage_flushes_xcall);
 #endif
 	}
 	__local_flush_dcache_page(page);
@@ -1005,6 +1002,15 @@ void kgdb_roundup_cpus(unsigned long flags)
 void smp_fetch_global_regs(void)
 {
 	smp_cross_call(&xcall_fetch_glob_regs, 0, 0, 0);
+}
+
+void smp_fetch_global_pmu(void)
+{
+	if (tlb_type == hypervisor &&
+	    sun4v_chip_type >= SUN4V_CHIP_NIAGARA4)
+		smp_cross_call(&xcall_fetch_glob_pmu_n4, 0, 0, 0);
+	else
+		smp_cross_call(&xcall_fetch_glob_pmu, 0, 0, 0);
 }
 
 /* We know that the window frames of the user have been flushed
@@ -1070,19 +1076,52 @@ local_flush_and_out:
 	put_cpu();
 }
 
+struct tlb_pending_info {
+	unsigned long ctx;
+	unsigned long nr;
+	unsigned long *vaddrs;
+};
+
+static void tlb_pending_func(void *info)
+{
+	struct tlb_pending_info *t = info;
+
+	__flush_tlb_pending(t->ctx, t->nr, t->vaddrs);
+}
+
 void smp_flush_tlb_pending(struct mm_struct *mm, unsigned long nr, unsigned long *vaddrs)
 {
 	u32 ctx = CTX_HWBITS(mm->context);
+	struct tlb_pending_info info;
+	int cpu = get_cpu();
+
+	info.ctx = ctx;
+	info.nr = nr;
+	info.vaddrs = vaddrs;
+
+	if (mm == current->mm && atomic_read(&mm->mm_users) == 1)
+		cpumask_copy(mm_cpumask(mm), cpumask_of(cpu));
+	else
+		smp_call_function_many(mm_cpumask(mm), tlb_pending_func,
+				       &info, 1);
+
+	__flush_tlb_pending(ctx, nr, vaddrs);
+
+	put_cpu();
+}
+
+void smp_flush_tlb_page(struct mm_struct *mm, unsigned long vaddr)
+{
+	unsigned long context = CTX_HWBITS(mm->context);
 	int cpu = get_cpu();
 
 	if (mm == current->mm && atomic_read(&mm->mm_users) == 1)
 		cpumask_copy(mm_cpumask(mm), cpumask_of(cpu));
 	else
-		smp_cross_call_masked(&xcall_flush_tlb_pending,
-				      ctx, nr, (unsigned long) vaddrs,
+		smp_cross_call_masked(&xcall_flush_tlb_page,
+				      context, vaddr, 0,
 				      mm_cpumask(mm));
-
-	__flush_tlb_pending(ctx, nr, vaddrs);
+	__flush_tlb_page(context, vaddr);
 
 	put_cpu();
 }
@@ -1176,7 +1215,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 {
 }
 
-void __devinit smp_prepare_boot_cpu(void)
+void smp_prepare_boot_cpu(void)
 {
 }
 
@@ -1190,7 +1229,7 @@ void __init smp_setup_processor_id(void)
 		xcall_deliver_impl = hypervisor_xcall_deliver;
 }
 
-void __devinit smp_fill_in_sib_core_maps(void)
+void smp_fill_in_sib_core_maps(void)
 {
 	unsigned int i;
 
@@ -1227,9 +1266,9 @@ void __devinit smp_fill_in_sib_core_maps(void)
 	}
 }
 
-int __cpuinit __cpu_up(unsigned int cpu)
+int __cpuinit __cpu_up(unsigned int cpu, struct task_struct *tidle)
 {
-	int ret = smp_boot_one_cpu(cpu);
+	int ret = smp_boot_one_cpu(cpu, tidle);
 
 	if (!ret) {
 		cpumask_set_cpu(cpu, &smp_commenced_mask);
@@ -1312,9 +1351,7 @@ int __cpu_disable(void)
 	mdelay(1);
 	local_irq_disable();
 
-	ipi_call_lock();
 	set_cpu_online(cpu, false);
-	ipi_call_unlock();
 
 	cpu_map_rebuild();
 

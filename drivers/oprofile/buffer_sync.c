@@ -216,7 +216,7 @@ static inline unsigned long fast_get_dcookie(struct path *path)
 }
 
 
-/* Look up the dcookie for the task's first VM_EXECUTABLE mapping,
+/* Look up the dcookie for the task's mm->exe_file,
  * which corresponds loosely to "application name". This is
  * not strictly necessary but allows oprofile to associate
  * shared-library samples with particular applications
@@ -224,21 +224,10 @@ static inline unsigned long fast_get_dcookie(struct path *path)
 static unsigned long get_exec_dcookie(struct mm_struct *mm)
 {
 	unsigned long cookie = NO_COOKIE;
-	struct vm_area_struct *vma;
 
-	if (!mm)
-		goto out;
+	if (mm && mm->exe_file)
+		cookie = fast_get_dcookie(&mm->exe_file->f_path);
 
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		if (!vma->vm_file)
-			continue;
-		if (!(vma->vm_flags & VM_EXECUTABLE))
-			continue;
-		cookie = fast_get_dcookie(&vma->vm_file->f_path);
-		break;
-	}
-
-out:
 	return cookie;
 }
 
@@ -343,7 +332,7 @@ static void add_data(struct op_entry *entry, struct mm_struct *mm)
 		if (cookie == NO_COOKIE)
 			offset = pc;
 		if (cookie == INVALID_COOKIE) {
-			atomic_inc(&oprofile_stats.sample_lost_no_mapping);
+			atomic_inc_unchecked(&oprofile_stats.sample_lost_no_mapping);
 			offset = pc;
 		}
 		if (cookie != last_cookie) {
@@ -387,14 +376,14 @@ add_sample(struct mm_struct *mm, struct op_sample *s, int in_kernel)
 	/* add userspace sample */
 
 	if (!mm) {
-		atomic_inc(&oprofile_stats.sample_lost_no_mm);
+		atomic_inc_unchecked(&oprofile_stats.sample_lost_no_mm);
 		return 0;
 	}
 
 	cookie = lookup_dcookie(mm, s->eip, &offset);
 
 	if (cookie == INVALID_COOKIE) {
-		atomic_inc(&oprofile_stats.sample_lost_no_mapping);
+		atomic_inc_unchecked(&oprofile_stats.sample_lost_no_mapping);
 		return 0;
 	}
 
@@ -563,7 +552,7 @@ void sync_buffer(int cpu)
 		/* ignore backtraces if failed to add a sample */
 		if (state == sb_bt_start) {
 			state = sb_bt_ignore;
-			atomic_inc(&oprofile_stats.bt_lost_no_mapping);
+			atomic_inc_unchecked(&oprofile_stats.bt_lost_no_mapping);
 		}
 	}
 	release_mm(mm);

@@ -69,7 +69,6 @@
 #include <linux/sound.h>
 #include <linux/slab.h>
 #include <linux/soundcard.h>
-#include <linux/ac97_codec.h>
 #include <linux/pci.h>
 #include <linux/bitops.h>
 #include <linux/interrupt.h>
@@ -198,6 +197,22 @@ static const char invalid_magic[] =
                 return -ENXIO;                     \
         }                                          \
 })
+
+/* AC97 registers */
+#define AC97_MASTER_VOL_STEREO   0x0002      /* Line Out		*/
+#define AC97_PCBEEP_VOL          0x000a      /* none			*/
+#define AC97_PHONE_VOL           0x000c      /* TAD Input (mono)	*/
+#define AC97_MIC_VOL             0x000e      /* MIC Input (mono)	*/
+#define AC97_LINEIN_VOL          0x0010      /* Line Input (stereo)	*/
+#define AC97_CD_VOL              0x0012      /* CD Input (stereo)	*/
+#define AC97_AUX_VOL             0x0016      /* Aux Input (stereo)	*/
+#define AC97_PCMOUT_VOL          0x0018      /* Wave Output (stereo)	*/
+#define AC97_RECORD_SELECT       0x001a      /*			*/
+#define AC97_RECORD_GAIN         0x001c
+#define AC97_GENERAL_PURPOSE     0x0020
+#define AC97_3D_CONTROL          0x0022
+#define AC97_POWER_CONTROL       0x0026
+#define AC97_VENDOR_ID1           0x007c
 
 struct list_head cs4297a_devs = { &cs4297a_devs, &cs4297a_devs };
 
@@ -2606,7 +2621,6 @@ static int __init cs4297a_init(void)
 {
 	struct cs4297a_state *s;
 	u32 pwr, id;
-	mm_segment_t fs;
 	int rval;
 #ifndef CONFIG_BCM_CS4297A_CSWARM
 	u64 cfg;
@@ -2696,22 +2710,23 @@ static int __init cs4297a_init(void)
         if (!rval) {
 		char *sb1250_duart_present;
 
+#if 0
+                mm_segment_t fs;
                 fs = get_fs();
                 set_fs(KERNEL_DS);
-#if 0
                 val = SOUND_MASK_LINE;
                 mixer_ioctl(s, SOUND_MIXER_WRITE_RECSRC, (unsigned long) &val);
                 for (i = 0; i < ARRAY_SIZE(initvol); i++) {
                         val = initvol[i].vol;
                         mixer_ioctl(s, initvol[i].mixch, (unsigned long) &val);
                 }
+                set_fs(fs);
 //                cs4297a_write_ac97(s, 0x18, 0x0808);
 #else
                 //                cs4297a_write_ac97(s, 0x5e, 0x180);
                 cs4297a_write_ac97(s, 0x02, 0x0808);
                 cs4297a_write_ac97(s, 0x18, 0x0808);
 #endif
-                set_fs(fs);
 
                 list_add(&s->list, &cs4297a_devs);
 

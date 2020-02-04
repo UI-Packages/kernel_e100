@@ -19,7 +19,7 @@
 #include <asm/mce.h>
 #include <asm/hw_irq.h>
 
-atomic_t irq_err_count;
+atomic_unchecked_t irq_err_count;
 
 /* Function pointer for generic interrupt vector handling */
 void (*x86_platform_ipi_callback)(void) = NULL;
@@ -93,7 +93,8 @@ int arch_show_interrupts(struct seq_file *p, int prec)
 	seq_printf(p, "  Rescheduling interrupts\n");
 	seq_printf(p, "%*s: ", prec, "CAL");
 	for_each_online_cpu(j)
-		seq_printf(p, "%10u ", irq_stats(j)->irq_call_count);
+		seq_printf(p, "%10u ", irq_stats(j)->irq_call_count -
+					irq_stats(j)->irq_tlb_count);
 	seq_printf(p, "  Function call interrupts\n");
 	seq_printf(p, "%*s: ", prec, "TLB");
 	for_each_online_cpu(j)
@@ -122,9 +123,9 @@ int arch_show_interrupts(struct seq_file *p, int prec)
 		seq_printf(p, "%10u ", per_cpu(mce_poll_count, j));
 	seq_printf(p, "  Machine check polls\n");
 #endif
-	seq_printf(p, "%*s: %10u\n", prec, "ERR", atomic_read(&irq_err_count));
+	seq_printf(p, "%*s: %10u\n", prec, "ERR", atomic_read_unchecked(&irq_err_count));
 #if defined(CONFIG_X86_IO_APIC)
-	seq_printf(p, "%*s: %10u\n", prec, "MIS", atomic_read(&irq_mis_count));
+	seq_printf(p, "%*s: %10u\n", prec, "MIS", atomic_read_unchecked(&irq_mis_count));
 #endif
 	return 0;
 }
@@ -148,7 +149,6 @@ u64 arch_irq_stat_cpu(unsigned int cpu)
 #ifdef CONFIG_SMP
 	sum += irq_stats(cpu)->irq_resched_count;
 	sum += irq_stats(cpu)->irq_call_count;
-	sum += irq_stats(cpu)->irq_tlb_count;
 #endif
 #ifdef CONFIG_X86_THERMAL_VECTOR
 	sum += irq_stats(cpu)->irq_thermal_count;
@@ -165,11 +165,7 @@ u64 arch_irq_stat_cpu(unsigned int cpu)
 
 u64 arch_irq_stat(void)
 {
-	u64 sum = atomic_read(&irq_err_count);
-
-#ifdef CONFIG_X86_IO_APIC
-	sum += atomic_read(&irq_mis_count);
-#endif
+	u64 sum = atomic_read_unchecked(&irq_err_count);
 	return sum;
 }
 
@@ -231,6 +227,28 @@ void smp_x86_platform_ipi(struct pt_regs *regs)
 	set_irq_regs(old_regs);
 }
 
+#ifdef CONFIG_HAVE_KVM
+/*
+ * Handler for POSTED_INTERRUPT_VECTOR.
+ */
+void smp_kvm_posted_intr_ipi(struct pt_regs *regs)
+{
+	struct pt_regs *old_regs = set_irq_regs(regs);
+
+	ack_APIC_irq();
+
+	irq_enter();
+
+	exit_idle();
+
+	inc_irq_stat(kvm_posted_intr_ipis);
+
+	irq_exit();
+
+	set_irq_regs(old_regs);
+}
+#endif
+
 EXPORT_SYMBOL_GPL(vector_used_by_percpu_irq);
 
 #ifdef CONFIG_HOTPLUG_CPU
@@ -273,7 +291,7 @@ void fixup_irqs(void)
 
 		if (cpumask_any_and(affinity, cpu_online_mask) >= nr_cpu_ids) {
 			break_affinity = 1;
-			affinity = cpu_all_mask;
+			affinity = cpu_online_mask;
 		}
 
 		chip = irq_data_get_irq_chip(data);
@@ -331,6 +349,7 @@ void fixup_irqs(void)
 				chip->irq_retrigger(data);
 			raw_spin_unlock(&desc->lock);
 		}
+		__this_cpu_write(vector_irq[vector], -1);
 	}
 }
 #endif

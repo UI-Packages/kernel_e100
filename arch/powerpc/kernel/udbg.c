@@ -64,6 +64,9 @@ void __init udbg_early_init(void)
 	udbg_init_usbgecko();
 #elif defined(CONFIG_PPC_EARLY_DEBUG_WSP)
 	udbg_init_wsp();
+#elif defined(CONFIG_PPC_EARLY_DEBUG_MEMCONS)
+	/* In memory console */
+	udbg_init_memcons();
 #elif defined(CONFIG_PPC_EARLY_DEBUG_EHV_BC)
 	udbg_init_ehv_bc();
 #elif defined(CONFIG_PPC_EARLY_DEBUG_PS3GELIC)
@@ -120,29 +123,6 @@ int udbg_write(const char *s, int n)
 		udbg_flush();
 
 	return n - remain;
-}
-
-int udbg_read(char *buf, int buflen)
-{
-	char *p = buf;
-	int i, c;
-
-	if (!udbg_getc)
-		return 0;
-
-	for (i = 0; i < buflen; ++i) {
-		do {
-			c = udbg_getc();
-			if (c == -1 && i == 0)
-				return -1;
-
-		} while (c == 0x11 || c == 0x13);
-		if (c == 0 || c == -1)
-			break;
-		*p++ = c;
-	}
-
-	return i;
 }
 
 #define UDBG_BUFSIZE 256

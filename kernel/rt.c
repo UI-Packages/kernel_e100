@@ -359,6 +359,13 @@ void  rt_down_write_nested(struct rw_semaphore *rwsem, int subclass)
 }
 EXPORT_SYMBOL(rt_down_write_nested);
 
+void rt_down_write_nested_lock(struct rw_semaphore *rwsem,
+		struct lockdep_map *nest)
+{
+	rwsem_acquire_nest(&rwsem->dep_map, 0, 0, nest, _RET_IP_);
+	rt_mutex_lock(&rwsem->lock);
+}
+
 int  rt_down_read_trylock(struct rw_semaphore *rwsem)
 {
 	struct rt_mutex *lock = &rwsem->lock;
@@ -406,7 +413,7 @@ void  rt_down_read_nested(struct rw_semaphore *rwsem, int subclass)
 }
 EXPORT_SYMBOL(rt_down_read_nested);
 
-void  __rt_rwsem_init(struct rw_semaphore *rwsem, char *name,
+void  __rt_rwsem_init(struct rw_semaphore *rwsem, const char *name,
 			      struct lock_class_key *key)
 {
 #ifdef CONFIG_DEBUG_LOCK_ALLOC

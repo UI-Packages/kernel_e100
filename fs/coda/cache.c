@@ -24,7 +24,7 @@
 #include "coda_linux.h"
 #include "coda_cache.h"
 
-static atomic_t permission_epoch = ATOMIC_INIT(0);
+static atomic_unchecked_t permission_epoch = ATOMIC_INIT(0);
 
 /* replace or extend an acl cache hit */
 void coda_cache_enter(struct inode *inode, int mask)
@@ -32,8 +32,8 @@ void coda_cache_enter(struct inode *inode, int mask)
 	struct coda_inode_info *cii = ITOC(inode);
 
 	spin_lock(&cii->c_lock);
-	cii->c_cached_epoch = atomic_read(&permission_epoch);
-	if (cii->c_uid != current_fsuid()) {
+	cii->c_cached_epoch = atomic_read_unchecked(&permission_epoch);
+	if (!uid_eq(cii->c_uid, current_fsuid())) {
 		cii->c_uid = current_fsuid();
                 cii->c_cached_perm = mask;
         } else
@@ -46,14 +46,14 @@ void coda_cache_clear_inode(struct inode *inode)
 {
 	struct coda_inode_info *cii = ITOC(inode);
 	spin_lock(&cii->c_lock);
-	cii->c_cached_epoch = atomic_read(&permission_epoch) - 1;
+	cii->c_cached_epoch = atomic_read_unchecked(&permission_epoch) - 1;
 	spin_unlock(&cii->c_lock);
 }
 
 /* remove all acl caches */
 void coda_cache_clear_all(struct super_block *sb)
 {
-	atomic_inc(&permission_epoch);
+	atomic_inc_unchecked(&permission_epoch);
 }
 
 
@@ -65,8 +65,8 @@ int coda_cache_check(struct inode *inode, int mask)
 	
 	spin_lock(&cii->c_lock);
 	hit = (mask & cii->c_cached_perm) == mask &&
-	    cii->c_uid == current_fsuid() &&
-	    cii->c_cached_epoch == atomic_read(&permission_epoch);
+	    uid_eq(cii->c_uid, current_fsuid()) &&
+	    cii->c_cached_epoch == atomic_read_unchecked(&permission_epoch);
 	spin_unlock(&cii->c_lock);
 
 	return hit;
@@ -89,17 +89,13 @@ int coda_cache_check(struct inode *inode, int mask)
 /* this won't do any harm: just flag all children */
 static void coda_flag_children(struct dentry *parent, int flag)
 {
-	struct list_head *child;
 	struct dentry *de;
 
 	spin_lock(&parent->d_lock);
-	list_for_each(child, &parent->d_subdirs)
-	{
-		de = list_entry(child, struct dentry, d_u.d_child);
+	list_for_each_entry(de, &parent->d_subdirs, d_u.d_child) {
 		/* don't know what to do with negative dentries */
-		if ( ! de->d_inode ) 
-			continue;
-		coda_flag_inode(de->d_inode, flag);
+		if (de->d_inode ) 
+			coda_flag_inode(de->d_inode, flag);
 	}
 	spin_unlock(&parent->d_lock);
 	return; 

@@ -144,21 +144,27 @@
 
 /* Register access macros */
 #define mci_readl(dev, reg)			\
-	__raw_readl((dev)->regs + SDMMC_##reg)
+	readl_relaxed((dev)->regs + SDMMC_##reg)
 #define mci_writel(dev, reg, value)			\
-	__raw_writel((value), (dev)->regs + SDMMC_##reg)
+	writel_relaxed((value), (dev)->regs + SDMMC_##reg)
 
 /* 16-bit FIFO access macros */
-#define mci_readw(dev, reg)			\
+#define mci_readw_data(dev, reg)			\
 	__raw_readw((dev)->regs + SDMMC_##reg)
-#define mci_writew(dev, reg, value)			\
+#define mci_writew_data(dev, reg, value)			\
 	__raw_writew((value), (dev)->regs + SDMMC_##reg)
+
+/* 32-bit FIFO access macros */
+#define mci_readl_data(dev, reg)                             \
+	__raw_readl((dev)->regs + SDMMC_##reg)
+#define mci_writel_data(dev, reg, value)			\
+	__raw_writel((value), (dev)->regs + SDMMC_##reg)
 
 /* 64-bit FIFO access macros */
 #ifdef readq
-#define mci_readq(dev, reg)			\
+#define mci_readq_data(dev, reg)			\
 	__raw_readq((dev)->regs + SDMMC_##reg)
-#define mci_writeq(dev, reg, value)			\
+#define mci_writeq_data(dev, reg, value)			\
 	__raw_writeq((value), (dev)->regs + SDMMC_##reg)
 #else
 /*
@@ -169,10 +175,10 @@
  * executed on those machines. Defining these macros here keeps the
  * rest of the code free from ifdefs.
  */
-#define mci_readq(dev, reg)			\
-	(*(volatile u64 __force *)((dev)->regs + SDMMC_##reg))
-#define mci_writeq(dev, reg, value)			\
-	(*(volatile u64 __force *)((dev)->regs + SDMMC_##reg) = (value))
+#define mci_readq_data(dev, reg)			\
+         ({ u64 __r = le64_to_cpu(*(volatile u64 __force *)((dev)->regs + SDMMC_##reg)); __r; })
+#define mci_writeq_data(dev, reg, value)			\
+         (*(volatile u64 __force *)((dev)->regs + SDMMC_##reg) = (cpu_to_le64(value)))
 #endif
 
 extern int dw_mci_probe(struct dw_mci *host);
@@ -182,4 +188,25 @@ extern int dw_mci_suspend(struct dw_mci *host);
 extern int dw_mci_resume(struct dw_mci *host);
 #endif
 
+/**
+ * dw_mci driver data - dw-mshc implementation specific driver data.
+ * @caps: mmc subsystem specified capabilities of the controller(s).
+ * @init: early implementation specific initialization.
+ * @setup_clock: implementation specific clock configuration.
+ * @prepare_command: handle CMD register extensions.
+ * @set_ios: handle bus specific extensions.
+ * @parse_dt: parse implementation specific device tree properties.
+ *
+ * Provide controller implementation specific extensions. The usage of this
+ * data structure is fully optional and usage of each member in this structure
+ * is optional as well.
+ */
+struct dw_mci_drv_data {
+	unsigned long	*caps;
+	int		(*init)(struct dw_mci *host);
+	int		(*setup_clock)(struct dw_mci *host);
+	void		(*prepare_command)(struct dw_mci *host, u32 *cmdr);
+	void		(*set_ios)(struct dw_mci *host, struct mmc_ios *ios);
+	int		(*parse_dt)(struct dw_mci *host);
+} __do_const;
 #endif /* _DW_MMC_H_ */

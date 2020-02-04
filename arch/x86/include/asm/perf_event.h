@@ -29,8 +29,13 @@
 #define ARCH_PERFMON_EVENTSEL_INV			(1ULL << 23)
 #define ARCH_PERFMON_EVENTSEL_CMASK			0xFF000000ULL
 
-#define AMD_PERFMON_EVENTSEL_GUESTONLY			(1ULL << 40)
-#define AMD_PERFMON_EVENTSEL_HOSTONLY			(1ULL << 41)
+#define AMD64_EVENTSEL_INT_CORE_ENABLE			(1ULL << 36)
+#define AMD64_EVENTSEL_GUESTONLY			(1ULL << 40)
+#define AMD64_EVENTSEL_HOSTONLY				(1ULL << 41)
+
+#define AMD64_EVENTSEL_INT_CORE_SEL_SHIFT		37
+#define AMD64_EVENTSEL_INT_CORE_SEL_MASK		\
+	(0xFULL << AMD64_EVENTSEL_INT_CORE_SEL_SHIFT)
 
 #define AMD64_EVENTSEL_EVENT	\
 	(ARCH_PERFMON_EVENTSEL_EVENT | (0x0FULL << 32))
@@ -46,8 +51,12 @@
 #define AMD64_RAW_EVENT_MASK		\
 	(X86_RAW_EVENT_MASK          |  \
 	 AMD64_EVENTSEL_EVENT)
+#define AMD64_RAW_EVENT_MASK_NB		\
+	(AMD64_EVENTSEL_EVENT        |  \
+	 ARCH_PERFMON_EVENTSEL_UMASK)
 #define AMD64_NUM_COUNTERS				4
 #define AMD64_NUM_COUNTERS_CORE				6
+#define AMD64_NUM_COUNTERS_NB				4
 
 #define ARCH_PERFMON_UNHALTED_CORE_CYCLES_SEL		0x3c
 #define ARCH_PERFMON_UNHALTED_CORE_CYCLES_UMASK		(0x00 << 8)
@@ -186,7 +195,11 @@ struct x86_pmu_capability {
 #define IBS_OP_MAX_CNT_EXT	0x007FFFFFULL	/* not a register bit mask */
 #define IBS_RIP_INVALID		(1ULL<<38)
 
+#ifdef CONFIG_X86_LOCAL_APIC
 extern u32 get_ibs_caps(void);
+#else
+static inline u32 get_ibs_caps(void) { return 0; }
+#endif
 
 #ifdef CONFIG_PERF_EVENTS
 extern void perf_events_lapic_init(void);
@@ -235,7 +248,7 @@ extern struct perf_guest_switch_msr *perf_guest_get_msrs(int *nr);
 extern void perf_get_x86_pmu_capability(struct x86_pmu_capability *cap);
 extern void perf_check_microcode(void);
 #else
-static inline perf_guest_switch_msr *perf_guest_get_msrs(int *nr)
+static inline struct perf_guest_switch_msr *perf_guest_get_msrs(int *nr)
 {
 	*nr = 0;
 	return NULL;
@@ -257,5 +270,7 @@ static inline void perf_check_microcode(void) { }
  static inline void amd_pmu_enable_virt(void) { }
  static inline void amd_pmu_disable_virt(void) { }
 #endif
+
+#define arch_perf_out_copy_user copy_from_user_nmi
 
 #endif /* _ASM_X86_PERF_EVENT_H */

@@ -27,4 +27,3 @@ static inline char *getaction(int action)
 }
 
 #endif /* _LATENCY_HIST_H */
-

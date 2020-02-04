@@ -174,7 +174,7 @@ static int dn_node_address_handler(ctl_table *table, int write,
 
 	if (len > *lenp) len = *lenp;
 
-	if (copy_to_user(buffer, addr, len))
+	if (len > sizeof addr || copy_to_user(buffer, addr, len))
 		return -EFAULT;
 
 	*lenp = len;
@@ -237,7 +237,7 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 
 	if (len > *lenp) len = *lenp;
 
-	if (copy_to_user(buffer, devname, len))
+	if (len > sizeof devname || copy_to_user(buffer, devname, len))
 		return -EFAULT;
 
 	*lenp = len;
@@ -351,20 +351,14 @@ static ctl_table dn_table[] = {
 	{ }
 };
 
-static struct ctl_path dn_path[] = {
-	{ .procname = "net", },
-	{ .procname = "decnet", },
-	{ }
-};
-
 void dn_register_sysctl(void)
 {
-	dn_table_header = register_sysctl_paths(dn_path, dn_table);
+	dn_table_header = register_net_sysctl(&init_net, "net/decnet", dn_table);
 }
 
 void dn_unregister_sysctl(void)
 {
-	unregister_sysctl_table(dn_table_header);
+	unregister_net_sysctl_table(dn_table_header);
 }
 
 #else  /* CONFIG_SYSCTL */

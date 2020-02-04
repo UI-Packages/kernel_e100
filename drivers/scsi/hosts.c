@@ -42,7 +42,7 @@
 #include "scsi_logging.h"
 
 
-static atomic_t scsi_host_next_hn;	/* host_no for next new host */
+static atomic_unchecked_t scsi_host_next_hn = ATOMIC_INIT(0);	/* host_no for next new host */
 
 
 static void scsi_host_cls_release(struct device *dev)
@@ -361,7 +361,7 @@ struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
 	 * subtract one because we increment first then return, but we need to
 	 * know what the next host number was before increment
 	 */
-	shost->host_no = atomic_inc_return(&scsi_host_next_hn) - 1;
+	shost->host_no = atomic_inc_return_unchecked(&scsi_host_next_hn) - 1;
 	shost->dma_channel = 0xff;
 
 	/* These three are default values which can be overridden */
@@ -468,10 +468,10 @@ void scsi_unregister(struct Scsi_Host *shost)
 }
 EXPORT_SYMBOL(scsi_unregister);
 
-static int __scsi_host_match(struct device *dev, void *data)
+static int __scsi_host_match(struct device *dev, const void *data)
 {
 	struct Scsi_Host *p;
-	unsigned short *hostnum = (unsigned short *)data;
+	const unsigned short *hostnum = data;
 
 	p = class_to_shost(dev);
 	return p->host_no == *hostnum;

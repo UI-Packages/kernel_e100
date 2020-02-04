@@ -15,6 +15,7 @@
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/unistd.h>
 
 #include <asm/uaccess.h>
 #include <asm/traps.h>
@@ -52,7 +53,7 @@ DEFINE_PER_CPU(struct exception_data, exception_data);
 static unsigned long
 parisc_acctyp(unsigned long code, unsigned int inst)
 {
-	if (code == 6 || code == 16)
+	if (code == 6 || code == 7 || code == 16)
 	    return VM_EXEC;
 
 	switch (inst & 0xf0000000) {
@@ -138,6 +139,116 @@ parisc_acctyp(unsigned long code, unsigned int inst)
 			}
 #endif
 
+#ifdef CONFIG_PAX_PAGEEXEC
+/*
+ * PaX: decide what to do with offenders (instruction_pointer(regs) = fault address)
+ *
+ * returns 1 when task should be killed
+ *         2 when rt_sigreturn trampoline was detected
+ *         3 when unpatched PLT trampoline was detected
+ */
+static int pax_handle_fetch_fault(struct pt_regs *regs)
+{
+
+#ifdef CONFIG_PAX_EMUPLT
+	int err;
+
+	do { /* PaX: unpatched PLT emulation */
+		unsigned int bl, depwi;
+
+		err = get_user(bl, (unsigned int *)instruction_pointer(regs));
+		err |= get_user(depwi, (unsigned int *)(instruction_pointer(regs)+4));
+
+		if (err)
+			break;
+
+		if (bl == 0xEA9F1FDDU && depwi == 0xD6801C1EU) {
+			unsigned int ldw, bv, ldw2, addr = instruction_pointer(regs)-12;
+
+			err = get_user(ldw, (unsigned int *)addr);
+			err |= get_user(bv, (unsigned int *)(addr+4));
+			err |= get_user(ldw2, (unsigned int *)(addr+8));
+
+			if (err)
+				break;
+
+			if (ldw == 0x0E801096U &&
+			    bv == 0xEAC0C000U &&
+			    ldw2 == 0x0E881095U)
+			{
+				unsigned int resolver, map;
+
+				err = get_user(resolver, (unsigned int *)(instruction_pointer(regs)+8));
+				err |= get_user(map, (unsigned int *)(instruction_pointer(regs)+12));
+				if (err)
+					break;
+
+				regs->gr[20] = instruction_pointer(regs)+8;
+				regs->gr[21] = map;
+				regs->gr[22] = resolver;
+				regs->iaoq[0] = resolver | 3UL;
+				regs->iaoq[1] = regs->iaoq[0] + 4;
+				return 3;
+			}
+		}
+	} while (0);
+#endif
+
+#ifdef CONFIG_PAX_EMUTRAMP
+
+#ifndef CONFIG_PAX_EMUSIGRT
+	if (!(current->mm->pax_flags & MF_PAX_EMUTRAMP))
+		return 1;
+#endif
+
+	do { /* PaX: rt_sigreturn emulation */
+		unsigned int ldi1, ldi2, bel, nop;
+
+		err = get_user(ldi1, (unsigned int *)instruction_pointer(regs));
+		err |= get_user(ldi2, (unsigned int *)(instruction_pointer(regs)+4));
+		err |= get_user(bel, (unsigned int *)(instruction_pointer(regs)+8));
+		err |= get_user(nop, (unsigned int *)(instruction_pointer(regs)+12));
+
+		if (err)
+			break;
+
+		if ((ldi1 == 0x34190000U || ldi1 == 0x34190002U) &&
+		    ldi2 == 0x3414015AU &&
+		    bel == 0xE4008200U &&
+		    nop == 0x08000240U)
+		{
+			regs->gr[25] = (ldi1 & 2) >> 1;
+			regs->gr[20] = __NR_rt_sigreturn;
+			regs->gr[31] = regs->iaoq[1] + 16;
+			regs->sr[0] = regs->iasq[1];
+			regs->iaoq[0] = 0x100UL;
+			regs->iaoq[1] = regs->iaoq[0] + 4;
+			regs->iasq[0] = regs->sr[2];
+			regs->iasq[1] = regs->sr[2];
+			return 2;
+		}
+	} while (0);
+#endif
+
+	return 1;
+}
+
+void pax_report_insns(struct pt_regs *regs, void *pc, void *sp)
+{
+	unsigned long i;
+
+	printk(KERN_ERR "PAX: bytes at PC: ");
+	for (i = 0; i < 5; i++) {
+		unsigned int c;
+		if (get_user(c, (unsigned int *)pc+i))
+			printk(KERN_CONT "???????? ");
+		else
+			printk(KERN_CONT "%08x ", c);
+	}
+	printk("\n");
+}
+#endif
+
 int fixup_exception(struct pt_regs *regs)
 {
 	const struct exception_table_entry *fix;
@@ -175,10 +286,12 @@ void do_page_fault(struct pt_regs *regs, unsigned long code,
 	struct mm_struct *mm = tsk->mm;
 	unsigned long acc_type;
 	int fault;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	if (!mm || pagefault_disabled())
 		goto no_context;
 
+retry:
 	down_read(&mm->mmap_sem);
 	vma = find_vma_prev(mm, address, &prev_vma);
 	if (!vma || address < vma->vm_start)
@@ -192,8 +305,33 @@ good_area:
 
 	acc_type = parisc_acctyp(code,regs->iir);
 
-	if ((vma->vm_flags & acc_type) != acc_type)
+	if ((vma->vm_flags & acc_type) != acc_type) {
+
+#ifdef CONFIG_PAX_PAGEEXEC
+		if ((mm->pax_flags & MF_PAX_PAGEEXEC) && (acc_type & VM_EXEC) &&
+		    (address & ~3UL) == instruction_pointer(regs))
+		{
+			up_read(&mm->mmap_sem);
+			switch (pax_handle_fetch_fault(regs)) {
+
+#ifdef CONFIG_PAX_EMUPLT
+			case 3:
+				return;
+#endif
+
+#ifdef CONFIG_PAX_EMUTRAMP
+			case 2:
+				return;
+#endif
+
+			}
+			pax_report_fault(regs, (void *)instruction_pointer(regs), (void *)regs->gr[30]);
+			do_group_exit(SIGKILL);
+		}
+#endif
+
 		goto bad_area;
+	}
 
 	/*
 	 * If for any reason at all we couldn't handle the fault, make
@@ -201,7 +339,12 @@ good_area:
 	 * fault.
 	 */
 
-	fault = handle_mm_fault(mm, vma, address, (acc_type & VM_WRITE) ? FAULT_FLAG_WRITE : 0);
+	fault = handle_mm_fault(mm, vma, address,
+			flags | ((acc_type & VM_WRITE) ? FAULT_FLAG_WRITE : 0));
+
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+		return;
+
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		/*
 		 * We hit a shared mapping outside of the file, or some
@@ -214,10 +357,23 @@ good_area:
 			goto bad_area;
 		BUG();
 	}
-	if (fault & VM_FAULT_MAJOR)
-		current->maj_flt++;
-	else
-		current->min_flt++;
+	if (flags & FAULT_FLAG_ALLOW_RETRY) {
+		if (fault & VM_FAULT_MAJOR)
+			current->maj_flt++;
+		else
+			current->min_flt++;
+		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+
+			/*
+			 * No need to up_read(&mm->mmap_sem) as we would
+			 * have already released it in __lock_page_or_retry
+			 * in mm/filemap.c.
+			 */
+
+			goto retry;
+		}
+	}
 	up_read(&mm->mmap_sem);
 	return;
 

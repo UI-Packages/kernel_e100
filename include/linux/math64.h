@@ -6,7 +6,8 @@
 
 #if BITS_PER_LONG == 64
 
-#define div64_long(x,y) div64_s64((x),(y))
+#define div64_long(x, y) div64_s64((x), (y))
+#define div64_ul(x, y)   div64_u64((x), (y))
 
 /**
  * div_u64_rem - unsigned 64bit divide with 32bit divisor with remainder
@@ -14,7 +15,7 @@
  * This is commonly provided by 32bit archs to provide an optimized 64bit
  * divide.
  */
-static inline u64 div_u64_rem(u64 dividend, u32 divisor, u32 *remainder)
+static inline u64 __intentional_overflow(-1) div_u64_rem(u64 dividend, u32 divisor, u32 *remainder)
 {
 	*remainder = dividend % divisor;
 	return dividend / divisor;
@@ -32,7 +33,7 @@ static inline s64 div_s64_rem(s64 dividend, s32 divisor, s32 *remainder)
 /**
  * div64_u64 - unsigned 64bit divide with 64bit divisor
  */
-static inline u64 div64_u64(u64 dividend, u64 divisor)
+static inline u64 __intentional_overflow(0) div64_u64(u64 dividend, u64 divisor)
 {
 	return dividend / divisor;
 }
@@ -47,10 +48,11 @@ static inline s64 div64_s64(s64 dividend, s64 divisor)
 
 #elif BITS_PER_LONG == 32
 
-#define div64_long(x,y) div_s64((x),(y))
+#define div64_long(x, y) div_s64((x), (y))
+#define div64_ul(x, y)   div_u64((x), (y))
 
 #ifndef div_u64_rem
-static inline u64 div_u64_rem(u64 dividend, u32 divisor, u32 *remainder)
+static inline u64 __intentional_overflow(-1) div_u64_rem(u64 dividend, u32 divisor, u32 *remainder)
 {
 	*remainder = do_div(dividend, divisor);
 	return dividend;
@@ -79,7 +81,7 @@ extern s64 div64_s64(s64 dividend, s64 divisor);
  * divide.
  */
 #ifndef div_u64
-static inline u64 div_u64(u64 dividend, u32 divisor)
+static inline u64 __intentional_overflow(-1) div_u64(u64 dividend, u32 divisor)
 {
 	u32 remainder;
 	return div_u64_rem(dividend, divisor, &remainder);

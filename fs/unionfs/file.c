@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2011 Erez Zadok
+ * Copyright (c) 2003-2014 Erez Zadok
  * Copyright (c) 2003-2006 Charles P. Wright
  * Copyright (c) 2005-2007 Josef 'Jeff' Sipek
  * Copyright (c) 2005-2006 Junjiro Okajima
@@ -8,8 +8,8 @@
  * Copyright (c) 2003-2004 Mohammad Nayyer Zubair
  * Copyright (c) 2003      Puja Gupta
  * Copyright (c) 2003      Harikesavan Krishnan
- * Copyright (c) 2003-2011 Stony Brook University
- * Copyright (c) 2003-2011 The Research Foundation of SUNY
+ * Copyright (c) 2003-2014 Stony Brook University
+ * Copyright (c) 2003-2014 The Research Foundation of SUNY
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -156,8 +156,9 @@ static int unionfs_mmap(struct file *file, struct vm_area_struct *vma)
 			goto out;
 		}
 		saved_vm_ops = vma->vm_ops;
-		err = do_munmap(current->mm, vma->vm_start,
-				vma->vm_end - vma->vm_start);
+		up_write(&current->mm->mmap_sem); /* VFS already holds sema... */
+		err = vm_munmap(vma->vm_start, vma->vm_end - vma->vm_start);
+		down_write(&current->mm->mmap_sem);
 		if (err) {
 			printk(KERN_ERR "unionfs: do_munmap failed %d\n", err);
 			goto out;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2011 Erez Zadok
+ * Copyright (c) 2003-2014 Erez Zadok
  * Copyright (c) 2003-2006 Charles P. Wright
  * Copyright (c) 2005-2007 Josef 'Jeff' Sipek
  * Copyright (c) 2005-2006 Junjiro Okajima
@@ -8,8 +8,8 @@
  * Copyright (c) 2003-2004 Mohammad Nayyer Zubair
  * Copyright (c) 2003      Puja Gupta
  * Copyright (c) 2003      Harikesavan Krishnan
- * Copyright (c) 2003-2011 Stony Brook University
- * Copyright (c) 2003-2011 The Research Foundation of SUNY
+ * Copyright (c) 2003-2014 Stony Brook University
+ * Copyright (c) 2003-2014 The Research Foundation of SUNY
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -602,7 +602,7 @@ static int unionfs_read_super(struct super_block *sb, void *raw_data,
 	sb->s_root = d_make_root(inode);
 	if (unlikely(!sb->s_root)) {
 		err = -ENOMEM;
-		goto out_dput;
+		goto out_iput;
 	}
 	d_set_d_op(sb->s_root, &unionfs_dops);
 
@@ -636,7 +636,7 @@ static int unionfs_read_super(struct super_block *sb, void *raw_data,
 
 	/*
 	 * No need to call interpose because we already have a positive
-	 * dentry, which was instantiated by d_make_root.  Just need to
+	 * dentry, which was instantiated by d_alloc_root.  Just need to
 	 * d_rehash it.
 	 */
 	d_rehash(sb->s_root);
@@ -651,6 +651,7 @@ out_freedpd:
 	}
 	dput(sb->s_root);
 
+out_iput:
 	iput(inode);
 
 out_dput:
@@ -699,8 +700,9 @@ static struct file_system_type unionfs_fs_type = {
 	.name		= UNIONFS_NAME,
 	.mount		= unionfs_mount,
 	.kill_sb	= generic_shutdown_super,
-	.fs_flags	= FS_REVAL_DOT,
+	.fs_flags	= 0,
 };
+MODULE_ALIAS_FS(UNIONFS_NAME);
 
 static int __init init_unionfs_fs(void)
 {

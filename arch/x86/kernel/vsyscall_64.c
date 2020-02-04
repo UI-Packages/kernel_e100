@@ -28,7 +28,7 @@
 #include <linux/jiffies.h>
 #include <linux/sysctl.h>
 #include <linux/topology.h>
-#include <linux/clocksource.h>
+#include <linux/timekeeper_internal.h>
 #include <linux/getcpu.h>
 #include <linux/cpu.h>
 #include <linux/smp.h>
@@ -56,15 +56,13 @@
 DEFINE_VVAR(int, vgetcpu_mode);
 DEFINE_VVAR(struct vsyscall_gtod_data, vsyscall_gtod_data);
 
-static enum { EMULATE, NATIVE, NONE } vsyscall_mode = EMULATE;
+static enum { EMULATE, NONE } vsyscall_mode = EMULATE;
 
 static int __init vsyscall_setup(char *str)
 {
 	if (str) {
 		if (!strcmp("emulate", str))
 			vsyscall_mode = EMULATE;
-		else if (!strcmp("native", str))
-			vsyscall_mode = NATIVE;
 		else if (!strcmp("none", str))
 			vsyscall_mode = NONE;
 		else
@@ -82,32 +80,41 @@ void update_vsyscall_tz(void)
 	vsyscall_gtod_data.sys_tz = sys_tz;
 }
 
-void update_vsyscall(struct timespec *wall_time, struct timespec *wtm,
-			struct clocksource *clock, u32 mult)
+void update_vsyscall(struct timekeeper *tk)
 {
-	struct timespec monotonic;
+	struct vsyscall_gtod_data *vdata = &vsyscall_gtod_data;
 
-	write_seqcount_begin(&vsyscall_gtod_data.seq);
+	write_seqcount_begin(&vdata->seq);
 
 	/* copy vsyscall data */
-	vsyscall_gtod_data.clock.vclock_mode	= clock->archdata.vclock_mode;
-	vsyscall_gtod_data.clock.cycle_last	= clock->cycle_last;
-	vsyscall_gtod_data.clock.mask		= clock->mask;
-	vsyscall_gtod_data.clock.mult		= mult;
-	vsyscall_gtod_data.clock.shift		= clock->shift;
+	vdata->clock.vclock_mode	= tk->clock->archdata.vclock_mode;
+	vdata->clock.cycle_last		= tk->clock->cycle_last;
+	vdata->clock.mask		= tk->clock->mask;
+	vdata->clock.mult		= tk->mult;
+	vdata->clock.shift		= tk->shift;
 
-	vsyscall_gtod_data.wall_time_sec	= wall_time->tv_sec;
-	vsyscall_gtod_data.wall_time_nsec	= wall_time->tv_nsec;
+	vdata->wall_time_sec		= tk->xtime_sec;
+	vdata->wall_time_snsec		= tk->xtime_nsec;
 
-	monotonic = timespec_add(*wall_time, *wtm);
-	vsyscall_gtod_data.monotonic_time_sec	= monotonic.tv_sec;
-	vsyscall_gtod_data.monotonic_time_nsec	= monotonic.tv_nsec;
+	vdata->monotonic_time_sec	= tk->xtime_sec
+					+ tk->wall_to_monotonic.tv_sec;
+	vdata->monotonic_time_snsec	= tk->xtime_nsec
+					+ (tk->wall_to_monotonic.tv_nsec
+						<< tk->shift);
+	while (vdata->monotonic_time_snsec >=
+					(((u64)NSEC_PER_SEC) << tk->shift)) {
+		vdata->monotonic_time_snsec -=
+					((u64)NSEC_PER_SEC) << tk->shift;
+		vdata->monotonic_time_sec++;
+	}
 
-	vsyscall_gtod_data.wall_time_coarse	= __current_kernel_time();
-	vsyscall_gtod_data.monotonic_time_coarse =
-		timespec_add(vsyscall_gtod_data.wall_time_coarse, *wtm);
+	vdata->wall_time_coarse.tv_sec	= tk->xtime_sec;
+	vdata->wall_time_coarse.tv_nsec	= (long)(tk->xtime_nsec >> tk->shift);
 
-	write_seqcount_end(&vsyscall_gtod_data.seq);
+	vdata->monotonic_time_coarse	= timespec_add(vdata->wall_time_coarse,
+							tk->wall_to_monotonic);
+
+	write_seqcount_end(&vdata->seq);
 }
 
 static void warn_bad_vsyscall(const char *level, struct pt_regs *regs,
@@ -168,7 +175,7 @@ bool emulate_vsyscall(struct pt_regs *regs, unsigned long address)
 {
 	struct task_struct *tsk;
 	unsigned long caller;
-	int vsyscall_nr;
+	int vsyscall_nr, syscall_nr, tmp;
 	int prev_sig_on_uaccess_error;
 	long ret;
 
@@ -202,8 +209,63 @@ bool emulate_vsyscall(struct pt_regs *regs, unsigned long address)
 	}
 
 	tsk = current;
-	if (seccomp_mode(&tsk->seccomp))
-		do_exit(SIGKILL);
+
+	/*
+	 * Check for access_ok violations and find the syscall nr.
+	 *
+	 * NULL is a valid user pointer (in the access_ok sense) on 32-bit and
+	 * 64-bit, so we don't need to special-case it here.  For all the
+	 * vsyscalls, NULL means "don't write anything" not "write it at
+	 * address 0".
+	 */
+	switch (vsyscall_nr) {
+	case 0:
+		if (!write_ok_or_segv(regs->di, sizeof(struct timeval)) ||
+		    !write_ok_or_segv(regs->si, sizeof(struct timezone))) {
+			ret = -EFAULT;
+			goto check_fault;
+		}
+
+		syscall_nr = __NR_gettimeofday;
+		break;
+
+	case 1:
+		if (!write_ok_or_segv(regs->di, sizeof(time_t))) {
+			ret = -EFAULT;
+			goto check_fault;
+		}
+
+		syscall_nr = __NR_time;
+		break;
+
+	case 2:
+		if (!write_ok_or_segv(regs->di, sizeof(unsigned)) ||
+		    !write_ok_or_segv(regs->si, sizeof(unsigned))) {
+			ret = -EFAULT;
+			goto check_fault;
+		}
+
+		syscall_nr = __NR_getcpu;
+		break;
+	}
+
+	/*
+	 * Handle seccomp.  regs->ip must be the original value.
+	 * See seccomp_send_sigsys and Documentation/prctl/seccomp_filter.txt.
+	 *
+	 * We could optimize the seccomp disabled case, but performance
+	 * here doesn't matter.
+	 */
+	regs->orig_ax = syscall_nr;
+	regs->ax = -ENOSYS;
+	tmp = secure_computing(syscall_nr);
+	if ((!tmp && regs->orig_ax != syscall_nr) || regs->ip != address) {
+		warn_bad_vsyscall(KERN_DEBUG, regs,
+				  "seccomp tried to change syscall nr or ip");
+		do_exit(SIGSYS);
+	}
+	if (tmp)
+		goto do_ret;  /* skip requested */
 
 	/*
 	 * With a real vsyscall, page faults cause SIGSEGV.  We want to
@@ -212,36 +274,19 @@ bool emulate_vsyscall(struct pt_regs *regs, unsigned long address)
 	prev_sig_on_uaccess_error = current_thread_info()->sig_on_uaccess_error;
 	current_thread_info()->sig_on_uaccess_error = 1;
 
-	/*
-	 * NULL is a valid user pointer (in the access_ok sense) on 32-bit and
-	 * 64-bit, so we don't need to special-case it here.  For all the
-	 * vsyscalls, NULL means "don't write anything" not "write it at
-	 * address 0".
-	 */
 	ret = -EFAULT;
 	switch (vsyscall_nr) {
 	case 0:
-		if (!write_ok_or_segv(regs->di, sizeof(struct timeval)) ||
-		    !write_ok_or_segv(regs->si, sizeof(struct timezone)))
-			break;
-
 		ret = sys_gettimeofday(
 			(struct timeval __user *)regs->di,
 			(struct timezone __user *)regs->si);
 		break;
 
 	case 1:
-		if (!write_ok_or_segv(regs->di, sizeof(time_t)))
-			break;
-
 		ret = sys_time((time_t __user *)regs->di);
 		break;
 
 	case 2:
-		if (!write_ok_or_segv(regs->di, sizeof(unsigned)) ||
-		    !write_ok_or_segv(regs->si, sizeof(unsigned)))
-			break;
-
 		ret = sys_getcpu((unsigned __user *)regs->di,
 				 (unsigned __user *)regs->si,
 				 NULL);
@@ -250,6 +295,7 @@ bool emulate_vsyscall(struct pt_regs *regs, unsigned long address)
 
 	current_thread_info()->sig_on_uaccess_error = prev_sig_on_uaccess_error;
 
+check_fault:
 	if (ret == -EFAULT) {
 		/* Bad news -- userspace fed a bad pointer to a vsyscall. */
 		warn_bad_vsyscall(KERN_INFO, regs,
@@ -268,15 +314,14 @@ bool emulate_vsyscall(struct pt_regs *regs, unsigned long address)
 
 	regs->ax = ret;
 
+do_ret:
 	/* Emulate a ret instruction. */
 	regs->ip = caller;
 	regs->sp += 8;
-
 	return true;
 
 sigsegv:
-	force_sig(SIGSEGV, current);
-	return true;
+	do_group_exit(SIGKILL);
 }
 
 /*
@@ -329,10 +374,7 @@ void __init map_vsyscall(void)
 	extern char __vvar_page;
 	unsigned long physaddr_vvar_page = __pa_symbol(&__vvar_page);
 
-	__set_fixmap(VSYSCALL_FIRST_PAGE, physaddr_vsyscall,
-		     vsyscall_mode == NATIVE
-		     ? PAGE_KERNEL_VSYSCALL
-		     : PAGE_KERNEL_VVAR);
+	__set_fixmap(VSYSCALL_FIRST_PAGE, physaddr_vsyscall, PAGE_KERNEL_VVAR);
 	BUILD_BUG_ON((unsigned long)__fix_to_virt(VSYSCALL_FIRST_PAGE) !=
 		     (unsigned long)VSYSCALL_START);
 

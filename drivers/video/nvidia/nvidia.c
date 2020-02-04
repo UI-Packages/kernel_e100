@@ -70,34 +70,34 @@ static struct pci_device_id nvidiafb_pci_tbl[] = {
 MODULE_DEVICE_TABLE(pci, nvidiafb_pci_tbl);
 
 /* command line data, set in nvidiafb_setup() */
-static int flatpanel __devinitdata = -1;	/* Autodetect later */
-static int fpdither __devinitdata = -1;
-static int forceCRTC __devinitdata = -1;
-static int hwcur __devinitdata = 0;
-static int noaccel __devinitdata = 0;
-static int noscale __devinitdata = 0;
-static int paneltweak __devinitdata = 0;
-static int vram __devinitdata = 0;
-static int bpp __devinitdata = 8;
-static int reverse_i2c __devinitdata;
+static int flatpanel = -1;	/* Autodetect later */
+static int fpdither = -1;
+static int forceCRTC = -1;
+static int hwcur = 0;
+static int noaccel = 0;
+static int noscale = 0;
+static int paneltweak = 0;
+static int vram = 0;
+static int bpp = 8;
+static int reverse_i2c;
 #ifdef CONFIG_MTRR
-static bool nomtrr __devinitdata = false;
+static bool nomtrr = false;
 #endif
 #ifdef CONFIG_PMAC_BACKLIGHT
-static int backlight __devinitdata = 1;
+static int backlight = 1;
 #else
-static int backlight __devinitdata = 0;
+static int backlight = 0;
 #endif
 
-static char *mode_option __devinitdata = NULL;
+static char *mode_option = NULL;
 
-static struct fb_fix_screeninfo __devinitdata nvidiafb_fix = {
+static struct fb_fix_screeninfo nvidiafb_fix = {
 	.type = FB_TYPE_PACKED_PIXELS,
 	.xpanstep = 8,
 	.ypanstep = 1,
 };
 
-static struct fb_var_screeninfo __devinitdata nvidiafb_default_var = {
+static struct fb_var_screeninfo nvidiafb_default_var = {
 	.xres = 640,
 	.yres = 480,
 	.xres_virtual = 640,
@@ -669,19 +669,23 @@ static int nvidiafb_set_par(struct fb_info *info)
 	info->fix.line_length = (info->var.xres_virtual *
 				 info->var.bits_per_pixel) >> 3;
 	if (info->var.accel_flags) {
-		info->fbops->fb_imageblit = nvidiafb_imageblit;
-		info->fbops->fb_fillrect = nvidiafb_fillrect;
-		info->fbops->fb_copyarea = nvidiafb_copyarea;
-		info->fbops->fb_sync = nvidiafb_sync;
+		pax_open_kernel();
+		*(void **)&info->fbops->fb_imageblit = nvidiafb_imageblit;
+		*(void **)&info->fbops->fb_fillrect = nvidiafb_fillrect;
+		*(void **)&info->fbops->fb_copyarea = nvidiafb_copyarea;
+		*(void **)&info->fbops->fb_sync = nvidiafb_sync;
+		pax_close_kernel();
 		info->pixmap.scan_align = 4;
 		info->flags &= ~FBINFO_HWACCEL_DISABLED;
 		info->flags |= FBINFO_READS_FAST;
 		NVResetGraphics(info);
 	} else {
-		info->fbops->fb_imageblit = cfb_imageblit;
-		info->fbops->fb_fillrect = cfb_fillrect;
-		info->fbops->fb_copyarea = cfb_copyarea;
-		info->fbops->fb_sync = NULL;
+		pax_open_kernel();
+		*(void **)&info->fbops->fb_imageblit = cfb_imageblit;
+		*(void **)&info->fbops->fb_fillrect = cfb_fillrect;
+		*(void **)&info->fbops->fb_copyarea = cfb_copyarea;
+		*(void **)&info->fbops->fb_sync = NULL;
+		pax_close_kernel();
 		info->pixmap.scan_align = 1;
 		info->flags |= FBINFO_HWACCEL_DISABLED;
 		info->flags &= ~FBINFO_READS_FAST;
@@ -1105,7 +1109,7 @@ fail:
 #define nvidiafb_resume NULL
 #endif
 
-static int __devinit nvidia_set_fbinfo(struct fb_info *info)
+static int nvidia_set_fbinfo(struct fb_info *info)
 {
 	struct fb_monspecs *specs = &info->monspecs;
 	struct fb_videomode modedb;
@@ -1173,8 +1177,11 @@ static int __devinit nvidia_set_fbinfo(struct fb_info *info)
 	info->pixmap.size = 8 * 1024;
 	info->pixmap.flags = FB_PIXMAP_SYSTEM;
 
-	if (!hwcur)
-	    info->fbops->fb_cursor = NULL;
+	if (!hwcur) {
+		pax_open_kernel();
+		*(void **)&info->fbops->fb_cursor = NULL;
+		pax_close_kernel();
+	}
 
 	info->var.accel_flags = (!noaccel);
 
@@ -1201,7 +1208,7 @@ static int __devinit nvidia_set_fbinfo(struct fb_info *info)
 	return nvidiafb_check_var(&info->var, info);
 }
 
-static u32 __devinit nvidia_get_chipset(struct fb_info *info)
+static u32 nvidia_get_chipset(struct fb_info *info)
 {
 	struct nvidia_par *par = info->par;
 	u32 id = (par->pci_dev->vendor << 16) | par->pci_dev->device;
@@ -1224,7 +1231,7 @@ static u32 __devinit nvidia_get_chipset(struct fb_info *info)
 	return id;
 }
 
-static u32 __devinit nvidia_get_arch(struct fb_info *info)
+static u32 nvidia_get_arch(struct fb_info *info)
 {
 	struct nvidia_par *par = info->par;
 	u32 arch = 0;
@@ -1276,8 +1283,7 @@ static u32 __devinit nvidia_get_arch(struct fb_info *info)
 	return arch;
 }
 
-static int __devinit nvidiafb_probe(struct pci_dev *pd,
-				    const struct pci_device_id *ent)
+static int nvidiafb_probe(struct pci_dev *pd, const struct pci_device_id *ent)
 {
 	struct nvidia_par *par;
 	struct fb_info *info;
@@ -1438,7 +1444,7 @@ err_out:
 	return -ENODEV;
 }
 
-static void __devexit nvidiafb_remove(struct pci_dev *pd)
+static void nvidiafb_remove(struct pci_dev *pd)
 {
 	struct fb_info *info = pci_get_drvdata(pd);
 	struct nvidia_par *par = info->par;
@@ -1473,7 +1479,7 @@ static void __devexit nvidiafb_remove(struct pci_dev *pd)
  * ------------------------------------------------------------------------- */
 
 #ifndef MODULE
-static int __devinit nvidiafb_setup(char *options)
+static int nvidiafb_setup(char *options)
 {
 	char *this_opt;
 
@@ -1529,7 +1535,7 @@ static struct pci_driver nvidiafb_driver = {
 	.probe    = nvidiafb_probe,
 	.suspend  = nvidiafb_suspend,
 	.resume   = nvidiafb_resume,
-	.remove   = __devexit_p(nvidiafb_remove),
+	.remove   = nvidiafb_remove,
 };
 
 /* ------------------------------------------------------------------------- *
@@ -1538,7 +1544,7 @@ static struct pci_driver nvidiafb_driver = {
  *
  * ------------------------------------------------------------------------- */
 
-static int __devinit nvidiafb_init(void)
+static int nvidiafb_init(void)
 {
 #ifndef MODULE
 	char *option = NULL;

@@ -25,6 +25,7 @@
 #include <linux/kobject.h>
 #include <linux/cdev.h>
 #include <linux/uio_driver.h>
+#include <asm/local.h>
 
 #define UIO_MAX_DEVICES		(1U << MINORBITS)
 
@@ -32,10 +33,10 @@ struct uio_device {
 	struct module		*owner;
 	struct device		*dev;
 	int			minor;
-	atomic_t		event;
+	atomic_unchecked_t	event;
 	struct fasync_struct	*async_queue;
 	wait_queue_head_t	wait;
-	int			vma_count;
+	local_t			vma_count;
 	struct uio_info		*info;
 	struct kobject		*map_dir;
 	struct kobject		*portio_dir;
@@ -242,7 +243,7 @@ static ssize_t show_event(struct device *dev,
 			  struct device_attribute *attr, char *buf)
 {
 	struct uio_device *idev = dev_get_drvdata(dev);
-	return sprintf(buf, "%u\n", (unsigned int)atomic_read(&idev->event));
+	return sprintf(buf, "%u\n", (unsigned int)atomic_read_unchecked(&idev->event));
 }
 
 static struct device_attribute uio_class_attributes[] = {
@@ -369,26 +370,16 @@ static void uio_dev_del_attributes(struct uio_device *idev)
 static int uio_get_minor(struct uio_device *idev)
 {
 	int retval = -ENOMEM;
-	int id;
 
 	mutex_lock(&minor_lock);
-	if (idr_pre_get(&uio_idr, GFP_KERNEL) == 0)
-		goto exit;
-
-	retval = idr_get_new(&uio_idr, idev, &id);
-	if (retval < 0) {
-		if (retval == -EAGAIN)
-			retval = -ENOMEM;
-		goto exit;
-	}
-	if (id < UIO_MAX_DEVICES) {
-		idev->minor = id;
-	} else {
+	retval = idr_alloc(&uio_idr, idev, 0, UIO_MAX_DEVICES, GFP_KERNEL);
+	if (retval >= 0) {
+		idev->minor = retval;
+		retval = 0;
+	} else if (retval == -ENOSPC) {
 		dev_err(idev->dev, "too many uio devices\n");
 		retval = -EINVAL;
-		idr_remove(&uio_idr, id);
 	}
-exit:
 	mutex_unlock(&minor_lock);
 	return retval;
 }
@@ -408,7 +399,7 @@ void uio_event_notify(struct uio_info *info)
 {
 	struct uio_device *idev = info->uio_dev;
 
-	atomic_inc(&idev->event);
+	atomic_inc_unchecked(&idev->event);
 	wake_up_interruptible(&idev->wait);
 	kill_fasync(&idev->async_queue, SIGIO, POLL_IN);
 }
@@ -461,7 +452,7 @@ static int uio_open(struct inode *inode, struct file *filep)
 	}
 
 	listener->dev = idev;
-	listener->event_count = atomic_read(&idev->event);
+	listener->event_count = atomic_read_unchecked(&idev->event);
 	filep->private_data = listener;
 
 	if (idev->info->open) {
@@ -512,7 +503,7 @@ static unsigned int uio_poll(struct file *filep, poll_table *wait)
 		return -EIO;
 
 	poll_wait(filep, &idev->wait, wait);
-	if (listener->event_count != atomic_read(&idev->event))
+	if (listener->event_count != atomic_read_unchecked(&idev->event))
 		return POLLIN | POLLRDNORM;
 	return 0;
 }
@@ -537,7 +528,7 @@ static ssize_t uio_read(struct file *filep, char __user *buf,
 	do {
 		set_current_state(TASK_INTERRUPTIBLE);
 
-		event_count = atomic_read(&idev->event);
+		event_count = atomic_read_unchecked(&idev->event);
 		if (event_count != listener->event_count) {
 			if (copy_to_user(buf, &event_count, count))
 				retval = -EFAULT;
@@ -606,13 +597,13 @@ static int uio_find_mem_index(struct vm_area_struct *vma)
 static void uio_vma_open(struct vm_area_struct *vma)
 {
 	struct uio_device *idev = vma->vm_private_data;
-	idev->vma_count++;
+	local_inc(&idev->vma_count);
 }
 
 static void uio_vma_close(struct vm_area_struct *vma)
 {
 	struct uio_device *idev = vma->vm_private_data;
-	idev->vma_count--;
+	local_dec(&idev->vma_count);
 }
 
 static int uio_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
@@ -640,36 +631,55 @@ static int uio_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	return 0;
 }
 
-static const struct vm_operations_struct uio_vm_ops = {
+static const struct vm_operations_struct uio_logical_vm_ops = {
 	.open = uio_vma_open,
 	.close = uio_vma_close,
 	.fault = uio_vma_fault,
+};
+
+static int uio_mmap_logical(struct vm_area_struct *vma)
+{
+	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+	vma->vm_ops = &uio_logical_vm_ops;
+	uio_vma_open(vma);
+	return 0;
+}
+
+static const struct vm_operations_struct uio_physical_vm_ops = {
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+	.access = generic_access_phys,
+#endif
 };
 
 static int uio_mmap_physical(struct vm_area_struct *vma)
 {
 	struct uio_device *idev = vma->vm_private_data;
 	int mi = uio_find_mem_index(vma);
+	struct uio_mem *mem;
 	if (mi < 0)
 		return -EINVAL;
+	mem = idev->info->mem + mi;
 
-	vma->vm_flags |= VM_IO | VM_RESERVED;
+	if (vma->vm_end - vma->vm_start > mem->size)
+		return -EINVAL;
 
+	vma->vm_ops = &uio_physical_vm_ops;
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
+	/*
+	 * We cannot use the vm_iomap_memory() helper here,
+	 * because vma->vm_pgoff is the map index we looked
+	 * up above in uio_find_mem_index(), rather than an
+	 * actual page offset into the mmap.
+	 *
+	 * So we just do the physical mmap without a page
+	 * offset.
+	 */
 	return remap_pfn_range(vma,
 			       vma->vm_start,
-			       idev->info->mem[mi].addr >> PAGE_SHIFT,
+			       mem->addr >> PAGE_SHIFT,
 			       vma->vm_end - vma->vm_start,
 			       vma->vm_page_prot);
-}
-
-static int uio_mmap_logical(struct vm_area_struct *vma)
-{
-	vma->vm_flags |= VM_RESERVED;
-	vma->vm_ops = &uio_vm_ops;
-	uio_vma_open(vma);
-	return 0;
 }
 
 static int uio_mmap(struct file *filep, struct vm_area_struct *vma)
@@ -821,7 +831,7 @@ int __uio_register_device(struct module *owner,
 	idev->owner = owner;
 	idev->info = info;
 	init_waitqueue_head(&idev->wait);
-	atomic_set(&idev->event, 0);
+	atomic_set_unchecked(&idev->event, 0);
 
 	ret = uio_get_minor(idev);
 	if (ret)

@@ -71,6 +71,20 @@ static inline uint32_t cvmx_get_proc_id(void)
 }
 
 #include "cvmx-asm.h"
+
+static inline unsigned int cvmx_get_core_num(void)
+{
+	unsigned int core_num;
+	CVMX_RDHWRNV(core_num, 0);
+	return core_num;
+}
+
+static inline unsigned int cvmx_get_node_num(void)
+{
+	unsigned int core_num = cvmx_get_core_num();
+	return (core_num >> CVMX_NODE_NO_SHIFT) & CVMX_NODE_MASK;
+}
+
 #include "cvmx-packet.h"
 #include "cvmx-sysinfo.h"
 
@@ -89,9 +103,10 @@ static inline uint32_t cvmx_get_proc_id(void)
 #include "cvmx-led-defs.h"
 #include "cvmx-mio-defs.h"
 #include "cvmx-pow-defs.h"
+#include "cvmx-rst-defs.h"
 #include "cvmx-rnm-defs.h"
 
-#include "cvmx-bootinfo.h"
+#include "cvmx-app-init.h"
 #include "cvmx-bootmem.h"
 #include "cvmx-l2c.h"
 
@@ -101,8 +116,10 @@ static inline uint32_t cvmx_get_proc_id(void)
 
 #if CVMX_ENABLE_DEBUG_PRINTS
 #define cvmx_dprintf        printk
+#define cvmx_dvprintf       vprintk
 #else
 #define cvmx_dprintf(...)   {}
+#define cvmx_dvprintf(a, b)   {(void)(a);(void)(b);}
 #endif
 
 #define CVMX_CACHE_LINE_SIZE    (128)	/* In bytes */
@@ -263,6 +280,20 @@ static inline void cvmx_write_csr(uint64_t csr_addr, uint64_t val)
 	if (((csr_addr >> 40) & 0x7ffff) == (0x118))
 		cvmx_read64(CVMX_MIO_BOOT_BIST_STAT);
 }
+static inline void cvmx_write_csr_node(uint64_t node, uint64_t csr_addr,
+				       uint64_t val)
+{
+	uint64_t node_addr;
+
+	node_addr = (node & CVMX_NODE_MASK) << CVMX_NODE_IO_SHIFT;
+
+	csr_addr = (csr_addr & ~CVMX_NODE_IO_MASK) | node_addr;
+
+	cvmx_write64_uint64(csr_addr, val);
+	if (((csr_addr >> 40) & 0x7ffff) == (0x118)) {
+		cvmx_read64_uint64(CVMX_MIO_BOOT_BIST_STAT | node_addr);
+	}
+}
 
 static inline void cvmx_write_io(uint64_t io_addr, uint64_t val)
 {
@@ -276,6 +307,13 @@ static inline uint64_t cvmx_read_csr(uint64_t csr_addr)
 	return val;
 }
 
+static inline uint64_t cvmx_read_csr_node(uint64_t node, uint64_t csr_addr)
+{
+	uint64_t node_addr;
+
+	node_addr = (csr_addr & ~CVMX_NODE_IO_MASK) | (node & CVMX_NODE_MASK) << CVMX_NODE_IO_SHIFT;
+	return cvmx_read_csr(node_addr);
+}
 
 static inline void cvmx_send_single(uint64_t data)
 {
@@ -312,13 +350,6 @@ static inline int cvmx_octeon_is_pass1(void)
 	return 0;	/* Built for non CN38XX chip, we're not CN38XX pass1 */
 #endif
 #endif
-}
-
-static inline unsigned int cvmx_get_core_num(void)
-{
-	unsigned int core_num;
-	CVMX_RDHWRNV(core_num, 0);
-	return core_num;
 }
 
 /**
@@ -427,14 +458,6 @@ extern uint64_t octeon_get_clock_rate(void);
 })
 
 /***************************************************************************/
-
-static inline void cvmx_reset_octeon(void)
-{
-	union cvmx_ciu_soft_rst ciu_soft_rst;
-	ciu_soft_rst.u64 = 0;
-	ciu_soft_rst.s.soft_rst = 1;
-	cvmx_write_csr(CVMX_CIU_SOFT_RST, ciu_soft_rst.u64);
-}
 
 /* Return the number of cores available in the chip */
 static inline uint32_t cvmx_octeon_num_cores(void)

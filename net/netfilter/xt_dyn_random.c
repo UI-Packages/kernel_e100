@@ -20,38 +20,37 @@ struct dyn_rand {
 	struct proc_dir_entry 	*proc;
 	unsigned int 		refcnt;
 	uint32_t 		prob;
+	char 			name[MAX_DYN_RAND_NAME_LEN + 1];
 };
 
 static struct proc_dir_entry *proc_root;
 static LIST_HEAD(proc_list);
 static DEFINE_MUTEX(proc_lock);
 
-static int read_proc(char *page, char **start, off_t off, int count,
-		     int *eof, void *data)
+static ssize_t _read_proc(struct file *file, char __user *buf,
+			  size_t size, loff_t *loff)
 {
-	const struct dyn_rand *e = data;
-	int len = sprintf(page, "%u\n", e->prob);
+	struct dyn_rand *e = PDE_DATA(file_inode(file));
+	char tmp[16];
+	int len;
 
-	if (len <= (off + count))
-		*eof = 1;
-
-	if (off >= len)
+	if (size < 16 || *loff != 0)
 		return 0;
 
-	if (count > (len - off))
-		return (len - off);
-
-	return count;
+	len = sprintf(tmp, "%u\n", e->prob);
+	return simple_read_from_buffer(buf, size, loff, tmp, len);
 }
 
-static int write_proc(struct file *file, const char __user *buf,
-		      unsigned long count, void *data)
+static ssize_t _write_proc(struct file *file, const char __user *buf,
+			   size_t count, loff_t *loff)
 {
-	struct dyn_rand *e = data;
+	struct dyn_rand *e = PDE_DATA(file_inode(file));
 	char tmp[16];
 	uint32_t p;
 
 	if (count >= 16)
+		return -EACCES;
+	if (*loff != 0)
 		return -EACCES;
 
 	memset(tmp, 0, count + 1);
@@ -65,6 +64,13 @@ static int write_proc(struct file *file, const char __user *buf,
 	e->prob = p;
 	return count;
 }
+
+static const struct file_operations fops = {
+	.read    = _read_proc,
+	.write   = _write_proc,
+	.owner   = THIS_MODULE,
+	.llseek  = default_llseek,
+};
 
 static bool dyn_rand_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
@@ -87,7 +93,7 @@ static int dyn_rand_mt_check(const struct xt_mtchk_param *par)
 
 	mutex_lock(&proc_lock);
 	list_for_each_entry(e, &proc_list, list) {
-		if (strcmp(info->name, e->proc->name) == 0) {
+		if (strcmp(info->name, e->name) == 0) {
 			e->refcnt++;
 			mutex_unlock(&proc_lock);
 			info->dyn_rand = e;
@@ -100,20 +106,17 @@ static int dyn_rand_mt_check(const struct xt_mtchk_param *par)
 		return -EINVAL;
 	}
 
-	e->proc = create_proc_entry(info->name, S_IRUSR | S_IWUSR, proc_root);
+	e->proc = proc_create_data(info->name, S_IRUSR | S_IWUSR, proc_root,
+				   &fops, e);
 	if (e->proc == NULL) {
 		kfree(e);
 		mutex_unlock(&proc_lock);
 		return -EINVAL;
 	}
 
+	strcpy(e->name, info->name);
 	e->refcnt = 1;
 	e->prob = 0;
-	e->proc->data = e;
-	e->proc->read_proc = read_proc;
-	e->proc->write_proc = write_proc;
-	e->proc->uid = S_IRUSR | S_IWUSR;
-	e->proc->gid = S_IRUSR | S_IWUSR;
 	list_add(&(e->list), &proc_list);
 	mutex_unlock(&proc_lock);
 	info->dyn_rand = e;
@@ -128,7 +131,7 @@ static void dyn_rand_mt_destroy(const struct xt_mtdtor_param *par)
 	mutex_lock(&proc_lock);
 	if (--e->refcnt == 0) {
 		list_del(&(e->list));
-		remove_proc_entry(e->proc->name, proc_root);
+		remove_proc_entry(e->name, proc_root);
 		mutex_unlock(&proc_lock);
 		kfree(e);
 		return;

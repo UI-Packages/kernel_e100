@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2011 Erez Zadok
+ * Copyright (c) 2003-2014 Erez Zadok
  * Copyright (c) 2003-2006 Charles P. Wright
  * Copyright (c) 2005-2007 Josef 'Jeff' Sipek
  * Copyright (c) 2005-2006 Junjiro Okajima
@@ -8,8 +8,8 @@
  * Copyright (c) 2003-2004 Mohammad Nayyer Zubair
  * Copyright (c) 2003      Puja Gupta
  * Copyright (c) 2003      Harikesavan Krishnan
- * Copyright (c) 2003-2011 Stony Brook University
- * Copyright (c) 2003-2011 The Research Foundation of SUNY
+ * Copyright (c) 2003-2014 Stony Brook University
+ * Copyright (c) 2003-2014 The Research Foundation of SUNY
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -78,6 +78,7 @@ int check_empty(struct dentry *dentry, struct dentry *parent,
 	struct file *lower_file;
 	struct unionfs_rdutil_callback *buf = NULL;
 	int bindex, bstart, bend, bopaque;
+	struct path path;
 
 	sb = dentry->d_sb;
 
@@ -120,7 +121,10 @@ int check_empty(struct dentry *dentry, struct dentry *parent,
 		dget(lower_dentry);
 		mnt = unionfs_mntget(dentry, bindex);
 		branchget(sb, bindex);
-		lower_file = dentry_open(lower_dentry, mnt, O_RDONLY, current_cred());
+		path.dentry = lower_dentry;
+		path.mnt = mnt;
+		lower_file = dentry_open(&path, O_RDONLY, current_cred());
+		path_put(&path);
 		if (IS_ERR(lower_file)) {
 			err = PTR_ERR(lower_file);
 			branchput(sb, bindex);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2011 Erez Zadok
+ * Copyright (c) 2003-2014 Erez Zadok
  * Copyright (c) 2003-2006 Charles P. Wright
  * Copyright (c) 2005-2007 Josef 'Jeff' Sipek
  * Copyright (c) 2005-2006 Junjiro Okajima
@@ -8,8 +8,8 @@
  * Copyright (c) 2003-2004 Mohammad Nayyer Zubair
  * Copyright (c) 2003      Puja Gupta
  * Copyright (c) 2003      Harikesavan Krishnan
- * Copyright (c) 2003-2011 Stony Brook University
- * Copyright (c) 2003-2011 The Research Foundation of SUNY
+ * Copyright (c) 2003-2014 Stony Brook University
+ * Copyright (c) 2003-2014 The Research Foundation of SUNY
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -135,7 +135,7 @@ static int unionfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	parent = unionfs_lock_parent(dentry, UNIONFS_DMUTEX_PARENT);
 	unionfs_lock_dentry(dentry, UNIONFS_DMUTEX_CHILD);
 
-	valid = __unionfs_d_revalidate(dentry, parent, false);
+	valid = __unionfs_d_revalidate(dentry, parent, false, 0);
 	if (unlikely(!valid)) {
 		err = -ESTALE;
 		goto out;
@@ -835,7 +835,7 @@ static void unionfs_evict_inode(struct inode *inode)
 	struct unionfs_dir_state *rdstate;
 
 	truncate_inode_pages(&inode->i_data, 0);
-	end_writeback(inode);
+	clear_inode(inode);
 
 	list_for_each_safe(pos, n, &UNIONFS_I(inode)->readdircache) {
 		rdstate = list_entry(pos, struct unionfs_dir_state, cache);

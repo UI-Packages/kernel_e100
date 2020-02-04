@@ -15,7 +15,6 @@
 #include <asm/fpregdef.h>
 #include <asm/mipsregs.h>
 #include <asm/asm-offsets.h>
-#include <asm/page.h>
 #include <asm/pgtable-bits.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
@@ -29,6 +28,7 @@
  */
 #define ST_OFF (_THREAD_SIZE - 32 - PT_SIZE + PT_STATUS)
 
+#ifndef USE_ALTERNATE_RESUME_IMPL
 /*
  * FPU context is saved iff the process has used it's FPU in the current
  * time slice as indicated by _TIF_USEDFPU.  In any case, the CU1 bit for user
@@ -41,7 +41,7 @@
 
 /*
  * task_struct *resume(task_struct *prev, task_struct *next,
- *                     struct thread_info *next_ti)
+ *		       struct thread_info *next_ti, int usedfpu)
  */
 	.align	5
 	LEAF(resume)
@@ -53,16 +53,10 @@
 	/*
 	 * check if we need to save FPU registers
 	 */
+
+	beqz	a3, 1f
+
 	PTR_L	t3, TASK_THREAD_INFO(a0)
-	LONG_L	t0, TI_FLAGS(t3)
-	li	t1, _TIF_USEDFPU
-	and	t2, t0, t1
-	beqz	t2, 1f
-	nor	t1, zero, t1
-
-	and	t0, t0, t1
-	LONG_S	t0, TI_FLAGS(t3)
-
 	/*
 	 * clear saved user stack CU1 bit
 	 */
@@ -119,6 +113,8 @@
 	move	v0, a0
 	jr	ra
 	END(resume)
+
+#endif /* USE_ALTERNATE_RESUME_IMPL */
 
 /*
  * Save a thread's fp context.

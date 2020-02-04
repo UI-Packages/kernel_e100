@@ -43,7 +43,7 @@
 extern struct i2c_adapter amd756_smbus;
 
 static struct i2c_adapter *s4882_adapter;
-static struct i2c_algorithm *s4882_algo;
+static i2c_algorithm_no_const *s4882_algo;
 
 /* Wrapper access functions for multiplexed SMBus */
 static DEFINE_MUTEX(amd756_lock);
@@ -169,11 +169,7 @@ static int __init amd756_s4882_init(void)
 	}
 
 	/* Unregister physical bus */
-	error = i2c_del_adapter(&amd756_smbus);
-	if (error) {
-		dev_err(&amd756_smbus.dev, "Physical bus removal failed\n");
-		goto ERROR0;
-	}
+	i2c_del_adapter(&amd756_smbus);
 
 	printk(KERN_INFO "Enabling SMBus multiplexing for Tyan S4882\n");
 	/* Define the 5 virtual adapters and algorithms structures */

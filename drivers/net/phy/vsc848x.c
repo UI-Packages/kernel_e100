@@ -662,7 +662,7 @@ static int vsc848x_nexus_write(struct mii_bus *bus, int phy_id,
 					regnum, val);
 }
 
-static int  __devinit vsc848x_nexus_probe(struct platform_device *pdev)
+static int vsc848x_nexus_probe(struct platform_device *pdev)
 {
 	struct vsc848x_nexus_mdiobus *bus;
 	const char *bus_id;
@@ -719,7 +719,7 @@ fail_register:
 	return err;
 }
 
-static int __devexit vsc848x_nexus_remove(struct platform_device *pdev)
+static int vsc848x_nexus_remove(struct platform_device *pdev)
 {
 	return 0;
 }
@@ -745,7 +745,7 @@ static struct platform_driver mdio_mux_gpio_driver = {
 		.of_match_table = vsc848x_nexus_match,
 	},
 	.probe		= vsc848x_nexus_probe,
-	.remove		= __devexit_p(vsc848x_nexus_remove),
+	.remove		= vsc848x_nexus_remove,
 };
 
 static int __init vsc848x_mod_init(void)

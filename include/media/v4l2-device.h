@@ -95,7 +95,7 @@ int __must_check v4l2_device_register(struct device *dev, struct v4l2_device *v4
    this function returns 0. If the name ends with a digit (e.g. cx18),
    then the name will be set to cx18-0 since cx180 looks really odd. */
 int v4l2_device_set_name(struct v4l2_device *v4l2_dev, const char *basename,
-						atomic_t *instance);
+						atomic_unchecked_t *instance);
 
 /* Set v4l2_dev->dev to NULL. Call when the USB parent disconnects.
    Since the parent disappears this ensures that v4l2_dev doesn't have an
@@ -188,6 +188,19 @@ v4l2_device_register_subdev_nodes(struct v4l2_device *v4l2_dev);
 	__v4l2_device_call_subdevs_until_err_p(v4l2_dev, __sd,		\
 			!(grpid) || __sd->grp_id == (grpid), o, f ,	\
 			##args);					\
+})
+
+#define v4l2_device_has_op(v4l2_dev, o, f)				\
+({									\
+	struct v4l2_subdev *__sd;					\
+	bool __result = false;						\
+	list_for_each_entry(__sd, &(v4l2_dev)->subdevs, list) {		\
+		if (v4l2_subdev_has_op(__sd, o, f)) {			\
+			__result = true;				\
+			break;						\
+		}							\
+	}								\
+	__result;							\
 })
 
 #endif

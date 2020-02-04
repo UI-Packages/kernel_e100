@@ -176,7 +176,7 @@ int b1_load_t4file(avmcard *card, capiloaddatapart *t4file)
 	}
 	if (left) {
 		if (t4file->user) {
-			if (copy_from_user(buf, dp, left))
+			if (left > sizeof buf || copy_from_user(buf, dp, left))
 				return -EFAULT;
 		} else {
 			memcpy(buf, dp, left);
@@ -224,7 +224,7 @@ int b1_load_config(avmcard *card, capiloaddatapart *config)
 	}
 	if (left) {
 		if (config->user) {
-			if (copy_from_user(buf, dp, left))
+			if (left > sizeof buf || copy_from_user(buf, dp, left))
 				return -EFAULT;
 		} else {
 			memcpy(buf, dp, left);
@@ -702,7 +702,7 @@ static int b1ctl_proc_show(struct seq_file *m, void *v)
 
 static int b1ctl_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, b1ctl_proc_show, PDE(inode)->data);
+	return single_open(file, b1ctl_proc_show, PDE_DATA(inode));
 }
 
 const struct file_operations b1ctl_proc_fops = {

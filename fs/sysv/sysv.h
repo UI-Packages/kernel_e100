@@ -58,6 +58,7 @@ struct sysv_sb_info {
 	u32            s_nzones;	/* same as s_sbd->s_fsize */
 	u16	       s_namelen;       /* max length of dir entry */
 	int	       s_forced_ro;
+	struct mutex s_lock;
 };
 
 /*
@@ -117,7 +118,6 @@ static inline void dirty_sb(struct super_block *sb)
 	mark_buffer_dirty(sbi->s_bh1);
 	if (sbi->s_bh1 != sbi->s_bh2)
 		mark_buffer_dirty(sbi->s_bh2);
-	sb->s_dirt = 1;
 }
 
 
@@ -188,7 +188,7 @@ static inline u32 PDP_swab(u32 x)
 #endif
 }
 
-static inline __u32 fs32_to_cpu(struct sysv_sb_info *sbi, __fs32 n)
+static inline __u32 __intentional_overflow(-1) fs32_to_cpu(struct sysv_sb_info *sbi, __fs32 n)
 {
 	if (sbi->s_bytesex == BYTESEX_PDP)
 		return PDP_swab((__force __u32)n);

@@ -79,8 +79,7 @@ static int octeon_mdiobus_c45_addr(struct octeon_mdiobus *p,
 	cvmx_write_csr(p->register_base + SMI_CMD, smi_cmd.u64);
 
 	do {
-		/*
-		 * Wait 1000 clocks so we don't saturate the RSL bus
+		/* Wait 1000 clocks so we don't saturate the RSL bus
 		 * doing reads.
 		 */
 		__delay(1000);
@@ -113,14 +112,13 @@ static int octeon_mdiobus_read(struct mii_bus *bus, int phy_id, int regnum)
 
 
 	smi_cmd.u64 = 0;
-	smi_cmd.s.phy_op = op; /* MDIO_CLAUSE_22_READ */
+	smi_cmd.s.phy_op = op;
 	smi_cmd.s.phy_adr = phy_id;
 	smi_cmd.s.reg_adr = regnum;
 	cvmx_write_csr(p->register_base + SMI_CMD, smi_cmd.u64);
 
 	do {
-		/*
-		 * Wait 1000 clocks so we don't saturate the RSL bus
+		/* Wait 1000 clocks so we don't saturate the RSL bus
 		 * doing reads.
 		 */
 		__delay(1000);
@@ -165,8 +163,7 @@ static int octeon_mdiobus_write(struct mii_bus *bus, int phy_id,
 	cvmx_write_csr(p->register_base + SMI_CMD, smi_cmd.u64);
 
 	do {
-		/*
-		 * Wait 1000 clocks so we don't saturate the RSL bus
+		/* Wait 1000 clocks so we don't saturate the RSL bus
 		 * doing reads.
 		 */
 		__delay(1000);
@@ -179,7 +176,7 @@ static int octeon_mdiobus_write(struct mii_bus *bus, int phy_id,
 	return 0;
 }
 
-static int __devinit octeon_mdiobus_probe(struct platform_device *pdev)
+static int octeon_mdiobus_probe(struct platform_device *pdev)
 {
 	struct octeon_mdiobus *bus;
 	struct resource *res_mem;
@@ -242,7 +239,7 @@ fail:
 	return err;
 }
 
-static int __devexit octeon_mdiobus_remove(struct platform_device *pdev)
+static int octeon_mdiobus_remove(struct platform_device *pdev)
 {
 	struct octeon_mdiobus *bus;
 	union cvmx_smix_en smi_en;
@@ -271,7 +268,7 @@ static struct platform_driver octeon_mdiobus_driver = {
 		.of_match_table = octeon_mdiobus_match,
 	},
 	.probe		= octeon_mdiobus_probe,
-	.remove		= __devexit_p(octeon_mdiobus_remove),
+	.remove		= octeon_mdiobus_remove,
 };
 
 void octeon_mdiobus_force_mod_depencency(void)

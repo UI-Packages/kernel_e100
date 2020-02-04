@@ -33,20 +33,29 @@ struct rw_semaphore {
 #define DECLARE_RWSEM(lockname) \
 	struct rw_semaphore lockname = __RWSEM_INITIALIZER(lockname)
 
-extern void  __rt_rwsem_init(struct rw_semaphore *rwsem, char *name,
+extern void  __rt_rwsem_init(struct rw_semaphore *rwsem, const char *name,
 				     struct lock_class_key *key);
+
+#define __rt_init_rwsem(sem, name, key)			\
+	do {						\
+		rt_mutex_init(&(sem)->lock);		\
+		__rt_rwsem_init((sem), (name), (key));\
+	} while (0)
+
+#define __init_rwsem(sem, name, key) __rt_init_rwsem(sem, name, key)
 
 # define rt_init_rwsem(sem)				\
 do {							\
 	static struct lock_class_key __key;		\
 							\
-	rt_mutex_init(&(sem)->lock);			\
-	__rt_rwsem_init((sem), #sem, &__key);		\
+	__rt_init_rwsem((sem), #sem, &__key);		\
 } while (0)
 
 extern void  rt_down_write(struct rw_semaphore *rwsem);
 extern void rt_down_read_nested(struct rw_semaphore *rwsem, int subclass);
 extern void rt_down_write_nested(struct rw_semaphore *rwsem, int subclass);
+extern void rt_down_write_nested_lock(struct rw_semaphore *rwsem,
+		struct lockdep_map *nest);
 extern void  rt_down_read(struct rw_semaphore *rwsem);
 extern int  rt_down_write_trylock(struct rw_semaphore *rwsem);
 extern int  rt_down_read_trylock(struct rw_semaphore *rwsem);
@@ -101,5 +110,19 @@ static inline void down_write_nested(struct rw_semaphore *sem, int subclass)
 {
 	rt_down_write_nested(sem, subclass);
 }
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+static inline void down_write_nest_lock(struct rw_semaphore *sem,
+		struct rw_semaphore *nest_lock)
+{
+	rt_down_write_nested_lock(sem, &nest_lock->dep_map);
+}
 
+#else
+
+static inline void down_write_nest_lock(struct rw_semaphore *sem,
+		struct rw_semaphore *nest_lock)
+{
+	rt_down_write_nested_lock(sem, NULL);
+}
+#endif
 #endif

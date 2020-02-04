@@ -13,18 +13,6 @@
 #include <linux/if_pppox.h>
 #include <linux/ppp_defs.h>
 #include <net/flow_keys.h>
-#include <net/addrconf.h>
-
-static u32 ipv6_addr_hash(const struct in6_addr *addr)
-{
-	/*
-	 * We perform the hash function over the last 64 bits of the address
-	 * This will include the IEEE address token on links that support it.
-	 */
-	return jhash_2words((__force u32)addr->s6_addr32[2],
-			    (__force u32)addr->s6_addr32[3], 0)
-		& (IN6_ADDR_HSIZE - 1);
-}
 
 /* copy saddr & daddr, possibly using 64bit load/store
  * Equivalent to :	flow->src = iph->saddr;
@@ -77,7 +65,6 @@ ipv6:
 		nhoff += sizeof(struct ipv6hdr);
 		break;
 	}
-	case __constant_htons(ETH_P_8021AD):
 	case __constant_htons(ETH_P_8021Q): {
 		const struct vlan_hdr *vlan;
 		struct vlan_hdr _vlan;
@@ -152,11 +139,7 @@ ipv6:
 		break;
 	}
 	case IPPROTO_IPIP:
-		proto = htons(ETH_P_IP);
-		goto ip;
-	case IPPROTO_IPV6:
-		proto = htons(ETH_P_IPV6);
-		goto ipv6;
+		goto again;
 	default:
 		break;
 	}
@@ -179,6 +162,75 @@ ipv6:
 EXPORT_SYMBOL(skb_flow_dissect);
 
 static u32 hashrnd __read_mostly;
+
+/*
+ * __skb_get_rxhash: calculate a flow hash based on src/dst addresses
+ * and src/dst port numbers.  Sets rxhash in skb to non-zero hash value
+ * on success, zero indicates no valid hash.  Also, sets l4_rxhash in skb
+ * if hash is a canonical 4-tuple hash over transport ports.
+ */
+void __skb_get_rxhash(struct sk_buff *skb)
+{
+	struct flow_keys keys;
+	u32 hash;
+
+	if (!skb_flow_dissect(skb, &keys))
+		return;
+
+	if (keys.ports)
+		skb->l4_rxhash = 1;
+
+	/* get a consistent hash (same value on both flow directions) */
+	if (((__force u32)keys.dst < (__force u32)keys.src) ||
+	    (((__force u32)keys.dst == (__force u32)keys.src) &&
+	     ((__force u16)keys.port16[1] < (__force u16)keys.port16[0]))) {
+		swap(keys.dst, keys.src);
+		swap(keys.port16[0], keys.port16[1]);
+	}
+
+	hash = jhash_3words((__force u32)keys.dst,
+			    (__force u32)keys.src,
+			    (__force u32)keys.ports, hashrnd);
+	if (!hash)
+		hash = 1;
+
+	skb->rxhash = hash;
+}
+EXPORT_SYMBOL(__skb_get_rxhash);
+
+/*
+ * Returns a Tx hash based on the given packet descriptor a Tx queues' number
+ * to be used as a distribution range.
+ */
+u16 __skb_tx_hash(const struct net_device *dev, const struct sk_buff *skb,
+		  unsigned int num_tx_queues)
+{
+	u32 hash;
+	u16 qoffset = 0;
+	u16 qcount = num_tx_queues;
+
+	if (skb_rx_queue_recorded(skb)) {
+		hash = skb_get_rx_queue(skb);
+		while (unlikely(hash >= num_tx_queues))
+			hash -= num_tx_queues;
+		return hash;
+	}
+
+	if (dev->num_tc) {
+		u8 tc = netdev_get_prio_tc_map(dev, skb->priority);
+		qoffset = dev->tc_to_txq[tc].offset;
+		qcount = dev->tc_to_txq[tc].count;
+	}
+
+	if (skb->sk && skb->sk->sk_hash)
+		hash = skb->sk->sk_hash;
+	else
+		hash = (__force u16) skb->protocol;
+	hash = jhash_1word(hash, hashrnd);
+
+	return (u16) (((u64) hash * qcount) >> 32) + qoffset;
+}
+EXPORT_SYMBOL(__skb_tx_hash);
 
 /* __skb_get_poff() returns the offset to the payload as far as it could
  * be dissected. The main user is currently BPF, so that we can dynamically
@@ -236,7 +288,7 @@ u32 __skb_get_poff(const struct sk_buff *skb)
 static inline u16 dev_cap_txqueue(struct net_device *dev, u16 queue_index)
 {
 	if (unlikely(queue_index >= dev->real_num_tx_queues)) {
-		printk("%s selects TX queue %d, but real number of TX queues is %d\n",
+		net_warn_ratelimited("%s selects TX queue %d, but real number of TX queues is %d\n",
 				     dev->name, queue_index,
 				     dev->real_num_tx_queues);
 		return 0;
@@ -293,14 +345,9 @@ u16 __netdev_pick_tx(struct net_device *dev, struct sk_buff *skb)
 		if (new_index < 0)
 			new_index = skb_tx_hash(dev, skb);
 
-		if (queue_index != new_index && sk) {
-			struct dst_entry *dst =
-				    rcu_dereference_check(sk->sk_dst_cache, 1);
-
-			if (dst && skb_dst(skb) == dst)
-				sk_tx_queue_set(sk, queue_index);
-
-		}
+		if (queue_index != new_index && sk &&
+		    rcu_access_pointer(sk->sk_dst_cache))
+			sk_tx_queue_set(sk, new_index);
 
 		queue_index = new_index;
 	}

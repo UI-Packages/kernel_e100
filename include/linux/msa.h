@@ -11,35 +11,7 @@
 #ifndef _LINUX_MSA_H
 #define _LINUX_MSA_H
 
-#include <linux/types.h>
-
-typedef uint64_t msa_time_t;
-
-/*
- * Tracked states
- */
-enum msa_thread_state {
-	MSA_UNKNOWN = -1,
-	MSA_ONCPU_USER,
-	MSA_ONCPU_SYS,
-	MSA_INTERRUPTIBLE_SLEEP,
-	MSA_UNINTERRUPTIBLE_SLEEP,
-	MSA_ONRUNQUEUE,
-	MSA_ZOMBIE,
-	MSA_STOPPED,
-	MSA_INTERRUPTED,
-	MSA_PAGING_SLEEP,
-	MSA_FUTEX_SLEEP,
-	MSA_POLL_SLEEP,
-
-	MSA_NR_STATES /* Must be last */
-};
-
-/* Values for "which" in the msa syscall */
-#define MSA_THREAD	0	/* Just the current thread */
-#define MSA_CHILDREN	1	/* All dead and waited-for threads */
-#define MSA_SELF	2	/* All threads in current process */
-#define MSA_GET_NOW	3	/* Current MSA timer in the first value */
+#include <uapi/linux/msa.h>
 
 #ifdef __KERNEL__
 
@@ -82,9 +54,6 @@ void msa_start_irq_raw(int irq);
 void msa_continue_irq(int oldirq, int newirq);
 void msa_irq_exit(int irq, int is_going_to_user);
 void msa_irq_exit_raw(int irq);
-#ifdef CONFIG_MIPS
-void msa_irq_exit_raw(int irq);
-#endif
 asmlinkage void msa_kernel(void);
 asmlinkage void msa_user(void);
 

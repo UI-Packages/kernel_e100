@@ -33,6 +33,7 @@
 #include <linux/pagemap.h>
 #include <linux/idr.h>
 #include <linux/sched.h>
+#include <linux/aio.h>
 #include <net/9p/9p.h>
 #include <net/9p/client.h>
 
@@ -185,7 +186,7 @@ static int v9fs_vfs_writepage_locked(struct page *page)
 
 	retval = v9fs_file_write_internal(inode,
 					  v9inode->writeback_fid,
-					  (__force const char __user *)buffer,
+					  (const char __force_user *)buffer,
 					  len, &offset, 0);
 	if (retval > 0)
 		retval = 0;

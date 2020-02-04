@@ -2,7 +2,7 @@
  * (C) Copyright 2009-2010
  * Nokia Siemens Networks, michael.lawnick.ext@nsn.com
  *
- * Portions Copyright (C) 2010 - 2012 Cavium, Inc.
+ * Portions Copyright (C) 2010 - 2013 Cavium, Inc.
  *
  * This is a driver for the i2c adapter in Cavium Networks' OCTEON processors.
  *
@@ -29,7 +29,7 @@
 #define DRV_NAME "i2c-octeon"
 
 /* The previous out-of-tree version was implicitly version 1.0. */
-#define DRV_VERSION	"2.0"
+#define DRV_VERSION	"2.5"
 
 /* register offsets */
 #define SW_TWSI		0x00
@@ -194,7 +194,7 @@ static irqreturn_t octeon_i2c_isr(int irq, void *dev_id)
 	struct octeon_i2c *i2c = dev_id;
 
 	octeon_i2c_int_disable(i2c);
-	wake_up_interruptible(&i2c->queue);
+	wake_up(&i2c->queue);
 
 	return IRQ_HANDLED;
 }
@@ -231,9 +231,9 @@ static int octeon_i2c_wait(struct octeon_i2c *i2c)
 
 	octeon_i2c_int_enable(i2c);
 
-	result = wait_event_interruptible_timeout(i2c->queue,
-						  octeon_i2c_test_iflg(i2c),
-						  i2c->adap.timeout);
+	result = wait_event_timeout(i2c->queue,
+					octeon_i2c_test_iflg(i2c),
+					i2c->adap.timeout);
 
 	octeon_i2c_int_disable(i2c);
 
@@ -836,7 +836,7 @@ static struct i2c_adapter octeon_i2c_ops = {
 /**
  * octeon_i2c_setclock - Calculate and set clock divisors.
  */
-static int __devinit octeon_i2c_setclock(struct octeon_i2c *i2c)
+static int octeon_i2c_setclock(struct octeon_i2c *i2c)
 {
 	int tclk, thp_base, inc, thp_idx, mdiv_idx, ndiv_idx, foscl, diff;
 	int thp = 0x18, mdiv = 2, ndiv = 0, delta_hz = 1000000;
@@ -879,7 +879,7 @@ static int __devinit octeon_i2c_setclock(struct octeon_i2c *i2c)
 	return 0;
 }
 
-static int __devinit octeon_i2c_initlowlevel(struct octeon_i2c *i2c)
+static int octeon_i2c_initlowlevel(struct octeon_i2c *i2c)
 {
 	u8 status;
 	int tries;
@@ -917,7 +917,7 @@ int octeon_i2c_cvmx2i2c(unsigned int cvmx_twsi_bus_num)
 }
 EXPORT_SYMBOL(octeon_i2c_cvmx2i2c);
 
-static int __devinit octeon_i2c_probe(struct platform_device *pdev)
+static int octeon_i2c_probe(struct platform_device *pdev)
 {
 	int irq, result = 0;
 	struct octeon_i2c *i2c;
@@ -1013,7 +1013,7 @@ static int __devinit octeon_i2c_probe(struct platform_device *pdev)
 	result = i2c_add_adapter(&i2c->adap);
 	if (result < 0) {
 		dev_err(i2c->dev, "failed to add adapter\n");
-		goto fail_add;
+		goto out;
 	}
 	dev_info(i2c->dev, "version %s\n", DRV_VERSION);
 
@@ -1023,20 +1023,17 @@ static int __devinit octeon_i2c_probe(struct platform_device *pdev)
 
 	return 0;
 
-fail_add:
-	platform_set_drvdata(pdev, NULL);
 out:
 	return result;
 };
 
-static int __devexit octeon_i2c_remove(struct platform_device *pdev)
+static int octeon_i2c_remove(struct platform_device *pdev)
 {
 	struct octeon_i2c *i2c = platform_get_drvdata(pdev);
 
 	if (i2c->cvmx_channel >= 0)
 		octeon_i2c_cvmx_map[i2c->cvmx_channel] = -ENODEV;
 	i2c_del_adapter(&i2c->adap);
-	platform_set_drvdata(pdev, NULL);
 	return 0;
 };
 
@@ -1050,7 +1047,7 @@ MODULE_DEVICE_TABLE(of, octeon_i2c_match);
 
 static struct platform_driver octeon_i2c_driver = {
 	.probe		= octeon_i2c_probe,
-	.remove		= __devexit_p(octeon_i2c_remove),
+	.remove		= octeon_i2c_remove,
 	.driver		= {
 		.owner	= THIS_MODULE,
 		.name	= DRV_NAME,

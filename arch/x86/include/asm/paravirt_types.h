@@ -84,20 +84,21 @@ struct pv_init_ops {
 	 */
 	unsigned (*patch)(u8 type, u16 clobber, void *insnbuf,
 			  unsigned long addr, unsigned len);
-};
+} __no_const;
 
 
 struct pv_lazy_ops {
 	/* Set deferred update mode, used for batching operations. */
 	void (*enter)(void);
 	void (*leave)(void);
+	void (*flush)(void);
 };
 
 struct pv_time_ops {
 	unsigned long long (*sched_clock)(void);
 	unsigned long long (*steal_clock)(int cpu);
 	unsigned long (*get_tsc_khz)(void);
-};
+} __no_const;
 
 struct pv_cpu_ops {
 	/* hooks for various privileged instructions */
@@ -122,7 +123,7 @@ struct pv_cpu_ops {
 	void (*load_tr_desc)(void);
 	void (*load_gdt)(const struct desc_ptr *);
 	void (*load_idt)(const struct desc_ptr *);
-	void (*store_gdt)(struct desc_ptr *);
+	/* store_gdt has been removed. */
 	void (*store_idt)(struct desc_ptr *);
 	void (*set_ldt)(const void *desc, unsigned entries);
 	unsigned long (*store_tr)(void);
@@ -153,9 +154,7 @@ struct pv_cpu_ops {
 	/* MSR, PMC and TSR operations.
 	   err = 0/-EFAULT.  wrmsr returns 0/-EFAULT. */
 	u64 (*read_msr)(unsigned int msr, int *err);
-	int (*rdmsr_regs)(u32 *regs);
 	int (*write_msr)(unsigned int msr, unsigned low, unsigned high);
-	int (*wrmsr_regs)(u32 *regs);
 
 	u64 (*read_tsc)(void);
 	u64 (*read_pmc)(int counter);
@@ -193,7 +192,7 @@ struct pv_cpu_ops {
 
 	void (*start_context_switch)(struct task_struct *prev);
 	void (*end_context_switch)(struct task_struct *next);
-};
+} __no_const;
 
 struct pv_irq_ops {
 	/*
@@ -224,7 +223,7 @@ struct pv_apic_ops {
 				 unsigned long start_eip,
 				 unsigned long start_esp);
 #endif
-};
+} __no_const;
 
 struct pv_mmu_ops {
 	unsigned long (*read_cr2)(void);
@@ -314,6 +313,7 @@ struct pv_mmu_ops {
 	struct paravirt_callee_save make_pud;
 
 	void (*set_pgd)(pgd_t *pudp, pgd_t pgdval);
+	void (*set_pgd_batched)(pgd_t *pudp, pgd_t pgdval);
 #endif	/* PAGETABLE_LEVELS == 4 */
 #endif	/* PAGETABLE_LEVELS >= 3 */
 
@@ -325,6 +325,12 @@ struct pv_mmu_ops {
 	   an mfn.  We can tell which is which from the index. */
 	void (*set_fixmap)(unsigned /* enum fixed_addresses */ idx,
 			   phys_addr_t phys, pgprot_t flags);
+
+#ifdef CONFIG_PAX_KERNEXEC
+	unsigned long (*pax_open_kernel)(void);
+	unsigned long (*pax_close_kernel)(void);
+#endif
+
 };
 
 struct arch_spinlock;
@@ -335,7 +341,7 @@ struct pv_lock_ops {
 	void (*spin_lock_flags)(struct arch_spinlock *lock, unsigned long flags);
 	int (*spin_trylock)(struct arch_spinlock *lock);
 	void (*spin_unlock)(struct arch_spinlock *lock);
-};
+} __no_const;
 
 /* This contains all the paravirt structures: we get a convenient
  * number for each function using the offset which we use to indicate
@@ -681,6 +687,7 @@ void paravirt_end_context_switch(struct task_struct *next);
 
 void paravirt_enter_lazy_mmu(void);
 void paravirt_leave_lazy_mmu(void);
+void paravirt_flush_lazy_mmu(void);
 
 void _paravirt_nop(void);
 u32 _paravirt_ident_32(u32);

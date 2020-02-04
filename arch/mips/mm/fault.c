@@ -5,6 +5,7 @@
  *
  * Copyright (C) 1995 - 2000 by Ralf Baechle
  */
+#include <linux/context_tracking.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
@@ -26,14 +27,32 @@
 #include <asm/ptrace.h>
 #include <asm/highmem.h>		/* For VMALLOC_END */
 #include <linux/kdebug.h>
+#include <asm/kvm_mips_vz.h>
+
+#ifdef CONFIG_PAX_PAGEEXEC
+void pax_report_insns(struct pt_regs *regs, void *pc, void *sp)
+{
+	unsigned long i;
+
+	printk(KERN_ERR "PAX: bytes at PC: ");
+	for (i = 0; i < 5; i++) {
+		unsigned int c;
+		if (get_user(c, (unsigned int *)pc+i))
+			printk(KERN_CONT "???????? ");
+		else
+			printk(KERN_CONT "%08x ", c);
+	}
+	printk("\n");
+}
+#endif
 
 /*
  * This routine handles page faults.  It determines the address,
  * and the problem, and then passes it off to one of the appropriate
  * routines.
  */
-asmlinkage void __kprobes do_page_fault(struct pt_regs *regs, unsigned long write,
-			      unsigned long address)
+static void __kprobes __do_page_fault(struct pt_regs *regs, unsigned long write,
+	unsigned long address)
 {
 	struct vm_area_struct * vma = NULL;
 	struct task_struct *tsk = current;
@@ -56,9 +75,16 @@ asmlinkage void __kprobes do_page_fault(struct pt_regs *regs, unsigned long writ
 	       field, regs->cp0_epc);
 #endif
 
+#ifdef CONFIG_KVM_MIPS_VZ
+	if (test_tsk_thread_flag(current, TIF_GUESTMODE)) {
+		if (mipsvz_page_fault(regs, write, address))
+			return;
+	}
+#endif
+
 #ifdef CONFIG_KPROBES
 	/*
-	 * This is to notify the fault handler of the kprobes.  The
+	 * This is to notify the fault handler of the kprobes.	The
 	 * exception code is redundant as it is also carried in REGS,
 	 * but we pass it anyhow.
 	 */
@@ -120,7 +146,7 @@ good_area:
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
 	} else {
-		if (kernel_uses_smartmips_rixi) {
+		if (cpu_has_rixi) {
 			if (address == regs->cp0_epc && !(vma->vm_flags & VM_EXEC)) {
 #if 0
 				pr_notice("Cpu%d[%s:%d:%0*lx:%ld:%0*lx] XI violation\n",
@@ -129,6 +155,17 @@ good_area:
 					  field, address, write,
 					  field, regs->cp0_epc);
 #endif
+#ifdef CONFIG_PAX_PAGEEXEC
+				if ((mm->pax_flags & MF_PAX_PAGEEXEC) &&
+				    (vma->vm_flags & (VM_READ | VM_WRITE))) {
+					up_read(&mm->mmap_sem);
+					pax_report_fault(regs,
+						       (void *) address,
+						       (void *) regs->regs[29]);
+					do_group_exit(SIGKILL);
+				}
+#endif
+
 				goto bad_area;
 			}
 			if (!(vma->vm_flags & VM_READ)) {
@@ -177,6 +214,7 @@ good_area:
 		}
 		if (fault & VM_FAULT_RETRY) {
 			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			flags |= FAULT_FLAG_TRIED;
 
 			/*
 			 * No need to up_read(&mm->mmap_sem) as we would
@@ -201,6 +239,14 @@ bad_area:
 bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
 	if (user_mode(regs)) {
+
+#ifdef CONFIG_PAX_PAGEEXEC
+		if (cpu_has_rixi && (mm->pax_flags & MF_PAX_PAGEEXEC) && !write && address == instruction_pointer(regs)) {
+			pax_report_fault(regs, (void *)address, (void *)user_stack_pointer(regs));
+			do_group_exit(SIGKILL);
+		}
+#endif
+
 		tsk->thread.cp0_badvaddr = address;
 		tsk->thread.error_code = write;
 #if 0
@@ -221,7 +267,7 @@ bad_area_nosemaphore:
 	}
 
 no_context:
-	/* Are we prepared to handle this kernel fault?  */
+	/* Are we prepared to handle this kernel fault?	 */
 	if (fixup_exception(regs)) {
 		current->thread.cp0_baduaddr = address;
 		return;
@@ -316,4 +362,14 @@ vmalloc_fault:
 		return;
 	}
 #endif
+}
+
+asmlinkage void __kprobes do_page_fault(struct pt_regs *regs,
+	unsigned long write, unsigned long address)
+{
+	enum ctx_state prev_state;
+
+	prev_state = exception_enter();
+	__do_page_fault(regs, write, address);
+	exception_exit(prev_state);
 }

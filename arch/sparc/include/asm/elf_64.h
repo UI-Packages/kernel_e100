@@ -86,6 +86,15 @@
 #define AV_SPARC_IMA		0x00400000 /* integer multiply-add */
 #define AV_SPARC_ASI_CACHE_SPARING \
 				0x00800000 /* cache sparing ASIs available */
+#define AV_SPARC_PAUSE		0x01000000 /* PAUSE available */
+#define AV_SPARC_CBCOND		0x02000000 /* CBCOND insns available */
+
+/* Solaris decided to enumerate every single crypto instruction type
+ * in the AT_HWCAP bits.  This is wasteful, since if crypto is present,
+ * you still need to look in the CFR register to see if the opcode is
+ * really available.  So we simply advertise only "crypto" support.
+ */
+#define HWCAP_SPARC_CRYPTO	0x04000000 /* CRYPTO insns available */
 
 #define CORE_DUMP_USE_REGSET
 
@@ -179,6 +188,13 @@ typedef struct {
 
 #define ELF_ET_DYN_BASE		0x0000010000000000UL
 #define COMPAT_ELF_ET_DYN_BASE	0x0000000070000000UL
+
+#ifdef CONFIG_PAX_ASLR
+#define PAX_ELF_ET_DYN_BASE	(test_thread_flag(TIF_32BIT) ? 0x10000UL : 0x100000UL)
+
+#define PAX_DELTA_MMAP_LEN	(test_thread_flag(TIF_32BIT) ? 14 : 28)
+#define PAX_DELTA_STACK_LEN	(test_thread_flag(TIF_32BIT) ? 15 : 29)
+#endif
 
 extern unsigned long sparc64_elf_hwcap;
 #define ELF_HWCAP	sparc64_elf_hwcap

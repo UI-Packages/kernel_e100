@@ -13,6 +13,9 @@
  * option) any later version.
  *
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
@@ -23,6 +26,7 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/of_device.h>
+#include <linux/of_mdio.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -89,15 +93,15 @@ static struct class mdio_bus_class = {
 	.dev_release	= mdiobus_release,
 };
 
-#ifdef CONFIG_OF_MDIO
+#if IS_ENABLED(CONFIG_OF_MDIO)
 /* Helper function for of_mdio_find_bus */
-static int of_mdio_bus_match(struct device *dev, void *mdio_bus_np)
+static int of_mdio_bus_match(struct device *dev, const void *mdio_bus_np)
 {
 	return dev->of_node == mdio_bus_np;
 }
 /**
  * of_mdio_find_bus - Given an mii_bus node, find the mii_bus.
- * @mdio_np: Pointer to the mii_bus.
+ * @mdio_bus_np: Pointer to the mii_bus.
  *
  * Returns a pointer to the mii_bus, or NULL if none found.
  *
@@ -149,7 +153,7 @@ int mdiobus_register(struct mii_bus *bus)
 
 	err = device_register(&bus->dev);
 	if (err) {
-		printk(KERN_ERR "mii_bus %s failed to register\n", bus->id);
+		pr_err("mii_bus %s failed to register\n", bus->id);
 		return -EINVAL;
 	}
 
@@ -230,7 +234,7 @@ struct phy_device *mdiobus_scan(struct mii_bus *bus, int addr)
 	struct phy_device *phydev;
 	int err;
 
-	phydev = get_phy_device(bus, addr);
+	phydev = get_phy_device(bus, addr, false);
 	if (IS_ERR(phydev) || phydev == NULL)
 		return phydev;
 
@@ -427,10 +431,24 @@ static struct dev_pm_ops mdio_bus_pm_ops = {
 
 #endif /* CONFIG_PM */
 
+static ssize_t
+phy_id_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct phy_device *phydev = to_phy_device(dev);
+
+	return sprintf(buf, "0x%.8lx\n", (unsigned long)phydev->phy_id);
+}
+
+static struct device_attribute mdio_dev_attrs[] = {
+	__ATTR_RO(phy_id),
+	__ATTR_NULL
+};
+
 struct bus_type mdio_bus_type = {
 	.name		= "mdio_bus",
 	.match		= mdio_bus_match,
 	.pm		= MDIO_BUS_PM_OPS,
+	.dev_attrs	= mdio_dev_attrs,
 };
 EXPORT_SYMBOL(mdio_bus_type);
 

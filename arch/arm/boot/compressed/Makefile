@@ -24,11 +24,18 @@ endif
 AFLAGS_head.o += -DTEXT_OFFSET=$(TEXT_OFFSET)
 HEAD	= head.o
 OBJS	+= misc.o decompress.o
+ifeq ($(CONFIG_DEBUG_UNCOMPRESS),y)
+OBJS	+= debug.o
+endif
 FONTC	= $(srctree)/drivers/video/console/font_acorn_8x8.c
 
 # string library code (-Os is enforced to keep it much smaller)
 OBJS		+= string.o
 CFLAGS_string.o	:= -Os
+
+ifeq ($(CONFIG_ARM_VIRT_EXT),y)
+OBJS		+= hyp-stub.o
+endif
 
 #
 # Architecture dependencies
@@ -41,17 +48,8 @@ ifeq ($(CONFIG_ARCH_SHARK),y)
 OBJS		+= head-shark.o ofw-shark.o
 endif
 
-ifeq ($(CONFIG_ARCH_P720T),y)
-# Borrow this code from SA1100
-OBJS		+= head-sa1100.o
-endif
-
 ifeq ($(CONFIG_ARCH_SA1100),y)
 OBJS		+= head-sa1100.o
-endif
-
-ifeq ($(CONFIG_ARCH_VT8500),y)
-OBJS		+= head-vt8500.o
 endif
 
 ifeq ($(CONFIG_CPU_XSCALE),y)
@@ -118,15 +116,16 @@ targets       := vmlinux vmlinux.lds \
 
 # Make sure files are removed during clean
 extra-y       += piggy.gzip piggy.lzo piggy.lzma piggy.xzkern \
-		 lib1funcs.S ashldi3.S $(libfdt) $(libfdt_hdrs)
+		 lib1funcs.S ashldi3.S $(libfdt) $(libfdt_hdrs) \
+		 hyp-stub.S
 
 ifeq ($(CONFIG_FUNCTION_TRACER),y)
 ORIG_CFLAGS := $(KBUILD_CFLAGS)
 KBUILD_CFLAGS = $(subst -pg, , $(ORIG_CFLAGS))
 endif
 
-ccflags-y := -fpic -fno-builtin -I$(obj)
-asflags-y := -Wa,-march=all
+ccflags-y := -fpic -mno-single-pic-base -fno-builtin -I$(obj)
+asflags-y := -DZIMAGE
 
 # Supply kernel BSS size to the decompressor via a linker symbol.
 KBSS_SZ = $(shell $(CROSS_COMPILE)size $(obj)/../../../../vmlinux | \
@@ -139,6 +138,25 @@ endif
 ifeq ($(CONFIG_CPU_ENDIAN_BE8),y)
 LDFLAGS_vmlinux += --be8
 endif
+
+# Passing endian compilation flag in both CPPFLAGS ad CFLAGS. There are
+# places where CFLAGS alone are used (cmd_record_mcount). And it has to
+# be in CPPFLAGS because it affects what macros (__ARMEB__, __BYTE_ORDER__,
+# __FLOAT_WORD_ORDER__) are defined. So replication of flag seems to be
+# good compromise
+ifeq ($(CONFIG_CPU_BIG_ENDIAN),y)
+KBUILD_CPPFLAGS	+= -mbig-endian
+KBUILD_CFLAGS	+= -mbig-endian
+AS		+= -EB
+LD		+= -EB
+else
+KBUILD_CPPFLAGS	+= -mlittle-endian
+KBUILD_CFLAGS	+= -mlittle-endian
+AS		+= -EL
+LD		+= -EL
+endif
+
+
 # ?
 LDFLAGS_vmlinux += -p
 # Report unresolved symbol references
@@ -196,5 +214,11 @@ CFLAGS_font.o := -Dstatic=
 $(obj)/font.c: $(FONTC)
 	$(call cmd,shipped)
 
-$(obj)/vmlinux.lds: $(obj)/vmlinux.lds.in arch/arm/boot/Makefile $(KCONFIG_CONFIG)
+$(obj)/vmlinux.lds.S: $(obj)/vmlinux.lds.in arch/arm/boot/Makefile $(KCONFIG_CONFIG)
 	@sed "$(SEDFLAGS)" < $< > $@
+
+$(obj)/vmlinux.lds: $(obj)/vmlinux.lds.S
+	$(call if_changed,cpp_lds_S)
+
+$(obj)/hyp-stub.S: $(srctree)/arch/$(SRCARCH)/kernel/hyp-stub.S
+	$(call cmd,shipped)

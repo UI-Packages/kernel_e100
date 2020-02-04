@@ -427,7 +427,7 @@ struct ipmi_smi {
 	struct proc_dir_entry *proc_dir;
 	char                  proc_dir_name[10];
 
-	atomic_t stats[IPMI_NUM_STATS];
+	atomic_unchecked_t stats[IPMI_NUM_STATS];
 
 	/*
 	 * run_to_completion duplicate of smb_info, smi_info
@@ -460,9 +460,9 @@ static DEFINE_MUTEX(smi_watchers_mutex);
 
 
 #define ipmi_inc_stat(intf, stat) \
-	atomic_inc(&(intf)->stats[IPMI_STAT_ ## stat])
+	atomic_inc_unchecked(&(intf)->stats[IPMI_STAT_ ## stat])
 #define ipmi_get_stat(intf, stat) \
-	((unsigned int) atomic_read(&(intf)->stats[IPMI_STAT_ ## stat]))
+	((unsigned int) atomic_read_unchecked(&(intf)->stats[IPMI_STAT_ ## stat]))
 
 static int is_lan_addr(struct ipmi_addr *addr)
 {
@@ -1862,7 +1862,7 @@ int ipmi_request_settime(ipmi_user_t      user,
 			 int              retries,
 			 unsigned int     retry_time_ms)
 {
-	unsigned char saddr, lun;
+	unsigned char saddr = 0, lun = 0;
 	int           rv;
 
 	if (!user)
@@ -1894,7 +1894,7 @@ int ipmi_request_supply_msgs(ipmi_user_t          user,
 			     struct ipmi_recv_msg *supplied_recv,
 			     int                  priority)
 {
-	unsigned char saddr, lun;
+	unsigned char saddr = 0, lun = 0;
 	int           rv;
 
 	if (!user)
@@ -1931,7 +1931,7 @@ static int smi_ipmb_proc_show(struct seq_file *m, void *v)
 
 static int smi_ipmb_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, smi_ipmb_proc_show, PDE(inode)->data);
+	return single_open(file, smi_ipmb_proc_show, PDE_DATA(inode));
 }
 
 static const struct file_operations smi_ipmb_proc_ops = {
@@ -1952,7 +1952,7 @@ static int smi_version_proc_show(struct seq_file *m, void *v)
 
 static int smi_version_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, smi_version_proc_show, PDE(inode)->data);
+	return single_open(file, smi_version_proc_show, PDE_DATA(inode));
 }
 
 static const struct file_operations smi_version_proc_ops = {
@@ -2027,7 +2027,7 @@ static int smi_stats_proc_show(struct seq_file *m, void *v)
 
 static int smi_stats_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, smi_stats_proc_show, PDE(inode)->data);
+	return single_open(file, smi_stats_proc_show, PDE_DATA(inode));
 }
 
 static const struct file_operations smi_stats_proc_ops = {
@@ -2051,12 +2051,11 @@ int ipmi_smi_add_proc_entry(ipmi_smi_t smi, char *name,
 	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
 		return -ENOMEM;
-	entry->name = kmalloc(strlen(name)+1, GFP_KERNEL);
+	entry->name = kstrdup(name, GFP_KERNEL);
 	if (!entry->name) {
 		kfree(entry);
 		return -ENOMEM;
 	}
-	strcpy(entry->name, name);
 
 	file = proc_create_data(name, 0, smi->proc_dir, proc_ops, data);
 	if (!file) {
@@ -2898,7 +2897,7 @@ int ipmi_register_smi(struct ipmi_smi_handlers *handlers,
 	INIT_LIST_HEAD(&intf->cmd_rcvrs);
 	init_waitqueue_head(&intf->waitq);
 	for (i = 0; i < IPMI_NUM_STATS; i++)
-		atomic_set(&intf->stats[i], 0);
+		atomic_set_unchecked(&intf->stats[i], 0);
 	intf->all_cmd_rcvr = NULL;
 
 	intf->proc_dir = NULL;
@@ -3810,7 +3809,7 @@ static int handle_one_recv_msg(ipmi_smi_t          intf,
 
 	} else if ((msg->rsp[0] == ((IPMI_NETFN_APP_REQUEST|1) << 2))
 		   && (msg->rsp[1] == IPMI_READ_EVENT_MSG_BUFFER_CMD)) {
-		/* It's an asyncronous event. */
+		/* It's an asynchronous event. */
 		requeue = handle_read_event_rsp(intf, msg);
 	} else {
 		/* It's a response from the local BMC. */
@@ -4617,7 +4616,7 @@ static void __exit cleanup_ipmi(void)
 	del_timer_sync(&ipmi_timer);
 
 #ifdef CONFIG_PROC_FS
-	remove_proc_entry(proc_ipmi_root->name, NULL);
+	proc_remove(proc_ipmi_root);
 #endif /* CONFIG_PROC_FS */
 
 	driver_unregister(&ipmidriver.driver);

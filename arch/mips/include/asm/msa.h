@@ -10,7 +10,9 @@
 #ifndef _ASM_MIPS_MSA_H
 #define _ASM_MIPS_MSA_H
 
-# if defined(CONFIG_MICROSTATE_C0_COUNT_REGISTER)
+# if defined(CONFIG_MICROSTATE_ACCT_SCHED_CLOCK_CLOCKSOURCE)
+#  include <asm-generic/msa.h>
+# elif defined(CONFIG_MICROSTATE_C0_COUNT_REGISTER)
 /*
  * MSA uses MIPS 32 bit C0 counter register.
  */

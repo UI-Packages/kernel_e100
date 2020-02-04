@@ -28,12 +28,12 @@
 static int valid_policy = 1;
 #define TMPBUFLEN 12
 static ssize_t ima_show_htable_value(char __user *buf, size_t count,
-				     loff_t *ppos, atomic_long_t *val)
+				     loff_t *ppos, atomic_long_unchecked_t *val)
 {
 	char tmpbuf[TMPBUFLEN];
 	ssize_t len;
 
-	len = scnprintf(tmpbuf, TMPBUFLEN, "%li\n", atomic_long_read(val));
+	len = scnprintf(tmpbuf, TMPBUFLEN, "%li\n", atomic_long_read_unchecked(val));
 	return simple_read_from_buffer(buf, count, ppos, tmpbuf, len);
 }
 
@@ -367,20 +367,11 @@ int __init ima_fs_init(void)
 
 	return 0;
 out:
-	securityfs_remove(runtime_measurements_count);
-	securityfs_remove(ascii_runtime_measurements);
-	securityfs_remove(binary_runtime_measurements);
-	securityfs_remove(ima_dir);
-	securityfs_remove(ima_policy);
-	return -1;
-}
-
-void __exit ima_fs_cleanup(void)
-{
 	securityfs_remove(violations);
 	securityfs_remove(runtime_measurements_count);
 	securityfs_remove(ascii_runtime_measurements);
 	securityfs_remove(binary_runtime_measurements);
 	securityfs_remove(ima_dir);
 	securityfs_remove(ima_policy);
+	return -1;
 }

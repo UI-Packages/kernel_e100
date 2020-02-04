@@ -15,7 +15,7 @@
 #include <asm/octeon/octeon-hw-status.h>
 #include <asm/octeon/octeon.h>
 
-/* Module parameter to disable PCI probing */
+/* Module parameter to disable error reporting */
 static int disable;
 module_param(disable, int, S_IRUGO);
 
@@ -111,6 +111,7 @@ static int octeon_error_tree_map_irq_reg(u64 r)
 		case 0:
 			return 0;
 		case 0x108:
+		case 0x8000:
 			return 1;
 		default:
 			break;

@@ -25,7 +25,6 @@
  */
 unsigned long octeon_crypto_enable(struct octeon_cop2_state *state)
 {
-	extern void octeon_cop2_save(struct octeon_cop2_state *);
 	int status;
 	unsigned long flags;
 
@@ -55,7 +54,6 @@ EXPORT_SYMBOL(octeon_crypto_enable);
 void octeon_crypto_disable(struct octeon_cop2_state *state,
 			   unsigned long crypto_flags)
 {
-	extern void octeon_cop2_restore(struct octeon_cop2_state *);
 	unsigned long flags;
 
 	local_irq_save(flags);

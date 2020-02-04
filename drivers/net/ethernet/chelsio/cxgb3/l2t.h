@@ -87,7 +87,7 @@ typedef void (*arp_failure_handler_func)(struct t3cdev * dev,
  */
 struct l2t_skb_cb {
 	arp_failure_handler_func arp_failure_handler;
-};
+} __no_const;
 
 #define L2T_SKB_CB(skb) ((struct l2t_skb_cb *)(skb)->cb)
 
@@ -110,7 +110,7 @@ static inline void set_arp_failure_handler(struct sk_buff *skb,
 void t3_l2e_free(struct l2t_data *d, struct l2t_entry *e);
 void t3_l2t_update(struct t3cdev *dev, struct neighbour *neigh);
 struct l2t_entry *t3_l2t_get(struct t3cdev *cdev, struct dst_entry *dst,
-			     struct net_device *dev);
+			     struct net_device *dev, const void *daddr);
 int t3_l2t_send_slow(struct t3cdev *dev, struct sk_buff *skb,
 		     struct l2t_entry *e);
 void t3_l2t_send_event(struct t3cdev *dev, struct l2t_entry *e);

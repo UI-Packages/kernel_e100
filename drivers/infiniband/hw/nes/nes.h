@@ -57,7 +57,7 @@
 #define QUEUE_DISCONNECTS
 
 #define DRV_NAME    "iw_nes"
-#define DRV_VERSION "1.5.0.0"
+#define DRV_VERSION "1.5.0.1"
 #define PFX         DRV_NAME ": "
 
 /*
@@ -172,23 +172,22 @@ extern int interrupt_mod_interval;
 extern int nes_if_count;
 extern int mpa_version;
 extern int disable_mpa_crc;
-extern unsigned int send_first;
 extern unsigned int nes_drv_opt;
 extern unsigned int nes_debug_level;
 extern unsigned int wqm_quanta;
 extern struct list_head nes_adapter_list;
 
-extern atomic_t cm_connects;
-extern atomic_t cm_accepts;
-extern atomic_t cm_disconnects;
-extern atomic_t cm_closes;
-extern atomic_t cm_connecteds;
-extern atomic_t cm_connect_reqs;
-extern atomic_t cm_rejects;
-extern atomic_t mod_qp_timouts;
-extern atomic_t qps_created;
-extern atomic_t qps_destroyed;
-extern atomic_t sw_qps_destroyed;
+extern atomic_unchecked_t cm_connects;
+extern atomic_unchecked_t cm_accepts;
+extern atomic_unchecked_t cm_disconnects;
+extern atomic_unchecked_t cm_closes;
+extern atomic_unchecked_t cm_connecteds;
+extern atomic_unchecked_t cm_connect_reqs;
+extern atomic_unchecked_t cm_rejects;
+extern atomic_unchecked_t mod_qp_timouts;
+extern atomic_unchecked_t qps_created;
+extern atomic_unchecked_t qps_destroyed;
+extern atomic_unchecked_t sw_qps_destroyed;
 extern u32 mh_detected;
 extern u32 mh_pauses_sent;
 extern u32 cm_packets_sent;
@@ -197,16 +196,16 @@ extern u32 cm_packets_created;
 extern u32 cm_packets_received;
 extern u32 cm_packets_dropped;
 extern u32 cm_packets_retrans;
-extern atomic_t cm_listens_created;
-extern atomic_t cm_listens_destroyed;
+extern atomic_unchecked_t cm_listens_created;
+extern atomic_unchecked_t cm_listens_destroyed;
 extern u32 cm_backlog_drops;
-extern atomic_t cm_loopbacks;
-extern atomic_t cm_nodes_created;
-extern atomic_t cm_nodes_destroyed;
-extern atomic_t cm_accel_dropped_pkts;
-extern atomic_t cm_resets_recvd;
-extern atomic_t pau_qps_created;
-extern atomic_t pau_qps_destroyed;
+extern atomic_unchecked_t cm_loopbacks;
+extern atomic_unchecked_t cm_nodes_created;
+extern atomic_unchecked_t cm_nodes_destroyed;
+extern atomic_unchecked_t cm_accel_dropped_pkts;
+extern atomic_unchecked_t cm_resets_recvd;
+extern atomic_unchecked_t pau_qps_created;
+extern atomic_unchecked_t pau_qps_destroyed;
 
 extern u32 int_mod_timer_init;
 extern u32 int_mod_cq_depth_256;
@@ -399,11 +398,20 @@ static inline void nes_write8(void __iomem *addr, u8 val)
 	writeb(val, addr);
 }
 
-
+enum nes_resource {
+	NES_RESOURCE_MW = 1,
+	NES_RESOURCE_FAST_MR,
+	NES_RESOURCE_PHYS_MR,
+	NES_RESOURCE_USER_MR,
+	NES_RESOURCE_PD,
+	NES_RESOURCE_QP,
+	NES_RESOURCE_CQ,
+	NES_RESOURCE_ARP
+};
 
 static inline int nes_alloc_resource(struct nes_adapter *nesadapter,
 		unsigned long *resource_array, u32 max_resources,
-		u32 *req_resource_num, u32 *next)
+		u32 *req_resource_num, u32 *next, enum nes_resource resource_type)
 {
 	unsigned long flags;
 	u32 resource_num;
@@ -414,7 +422,7 @@ static inline int nes_alloc_resource(struct nes_adapter *nesadapter,
 	if (resource_num >= max_resources) {
 		resource_num = find_first_zero_bit(resource_array, max_resources);
 		if (resource_num >= max_resources) {
-			printk(KERN_ERR PFX "%s: No available resourcess.\n", __func__);
+			printk(KERN_ERR PFX "%s: No available resources [type=%u].\n", __func__, resource_type);
 			spin_unlock_irqrestore(&nesadapter->resource_lock, flags);
 			return -EMFILE;
 		}

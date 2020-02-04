@@ -8,9 +8,10 @@
  *  Scheduler profiling support, Arjan van de Ven and Ingo Molnar,
  *	Red Hat, July 2004
  *  Consolidation of architecture support code for profiling,
- *	William Irwin, Oracle, July 2004
+ *	Nadia Yvette Chambers, Oracle, July 2004
  *  Amortized hit count accounting via per-cpu open-addressed hashtables
- *	to resolve timer interrupt livelocks, William Irwin, Oracle, 2004
+ *	to resolve timer interrupt livelocks, Nadia Yvette Chambers,
+ *	Oracle, 2004
  */
 
 #include <linux/export.h>
@@ -36,10 +37,7 @@ struct profile_hit {
 #define NR_PROFILE_HIT		(PAGE_SIZE/sizeof(struct profile_hit))
 #define NR_PROFILE_GRP		(NR_PROFILE_HIT/PROFILE_GRPSZ)
 
-/* Oprofile timer tick hook */
-static int (*timer_hook)(struct pt_regs *) __read_mostly;
-
-static atomic_t *prof_buffer;
+static atomic_unchecked_t *prof_buffer;
 static unsigned long prof_len, prof_shift;
 
 int prof_on __read_mostly;
@@ -207,25 +205,6 @@ int profile_event_unregister(enum profile_type type, struct notifier_block *n)
 }
 EXPORT_SYMBOL_GPL(profile_event_unregister);
 
-int register_timer_hook(int (*hook)(struct pt_regs *))
-{
-	if (timer_hook)
-		return -EBUSY;
-	timer_hook = hook;
-	return 0;
-}
-EXPORT_SYMBOL_GPL(register_timer_hook);
-
-void unregister_timer_hook(int (*hook)(struct pt_regs *))
-{
-	WARN_ON(hook != timer_hook);
-	timer_hook = NULL;
-	/* make sure all CPUs see the NULL hook */
-	synchronize_sched();  /* Allow ongoing interrupts to complete. */
-}
-EXPORT_SYMBOL_GPL(unregister_timer_hook);
-
-
 #ifdef CONFIG_SMP
 /*
  * Each cpu has a pair of open-addressed hashtables for pending
@@ -256,7 +235,7 @@ EXPORT_SYMBOL_GPL(unregister_timer_hook);
  * pagetable hash functions, but uses a full hashtable full of finite
  * collision chains, not just pairs of them.
  *
- * -- wli
+ * -- nyc
  */
 static void __profile_flip_buffers(void *unused)
 {
@@ -281,7 +260,7 @@ static void profile_flip_buffers(void)
 					hits[i].pc = 0;
 				continue;
 			}
-			atomic_add(hits[i].hits, &prof_buffer[hits[i].pc]);
+			atomic_add_unchecked(hits[i].hits, &prof_buffer[hits[i].pc]);
 			hits[i].hits = hits[i].pc = 0;
 		}
 	}
@@ -342,9 +321,9 @@ static void do_profile_hits(int type, void *__pc, unsigned int nr_hits)
 	 * Add the current hit(s) and flush the write-queue out
 	 * to the global buffer:
 	 */
-	atomic_add(nr_hits, &prof_buffer[pc]);
+	atomic_add_unchecked(nr_hits, &prof_buffer[pc]);
 	for (i = 0; i < NR_PROFILE_HIT; ++i) {
-		atomic_add(hits[i].hits, &prof_buffer[hits[i].pc]);
+		atomic_add_unchecked(hits[i].hits, &prof_buffer[hits[i].pc]);
 		hits[i].pc = hits[i].hits = 0;
 	}
 out:
@@ -419,7 +398,7 @@ static void do_profile_hits(int type, void *__pc, unsigned int nr_hits)
 {
 	unsigned long pc;
 	pc = ((unsigned long)__pc - (unsigned long)_stext) >> prof_shift;
-	atomic_add(nr_hits, &prof_buffer[min(pc, prof_len - 1)]);
+	atomic_add_unchecked(nr_hits, &prof_buffer[min(pc, prof_len - 1)]);
 }
 #endif /* !CONFIG_SMP */
 
@@ -435,8 +414,6 @@ void profile_tick(int type)
 {
 	struct pt_regs *regs = get_irq_regs();
 
-	if (type == CPU_PROFILING && timer_hook)
-		timer_hook(regs);
 	if (!user_mode(regs) && prof_cpu_mask != NULL &&
 	    cpumask_test_cpu(smp_processor_id(), prof_cpu_mask))
 		profile_hit(type, (void *)profile_pc(regs));
@@ -485,10 +462,10 @@ static const struct file_operations prof_cpu_mask_proc_fops = {
 	.write		= prof_cpu_mask_proc_write,
 };
 
-void create_prof_cpu_mask(struct proc_dir_entry *root_irq_dir)
+void create_prof_cpu_mask(void)
 {
 	/* create /proc/irq/prof_cpu_mask */
-	proc_create("prof_cpu_mask", 0600, root_irq_dir, &prof_cpu_mask_proc_fops);
+	proc_create("irq/prof_cpu_mask", 0600, NULL, &prof_cpu_mask_proc_fops);
 }
 
 /*
@@ -517,7 +494,7 @@ read_profile(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 			return -EFAULT;
 		buf++; p++; count--; read++;
 	}
-	pnt = (char *)prof_buffer + p - sizeof(atomic_t);
+	pnt = (char *)prof_buffer + p - sizeof(atomic_unchecked_t);
 	if (copy_to_user(buf, (void *)pnt, count))
 		return -EFAULT;
 	read += count;
@@ -548,7 +525,7 @@ static ssize_t write_profile(struct file *file, const char __user *buf,
 	}
 #endif
 	profile_discard_flip_buffers();
-	memset(prof_buffer, 0, prof_len * sizeof(atomic_t));
+	memset(prof_buffer, 0, prof_len * sizeof(atomic_unchecked_t));
 	return count;
 }
 
@@ -623,7 +600,7 @@ int __ref create_proc_profile(void) /* false positive from hotcpu_notifier */
 			    NULL, &proc_profile_operations);
 	if (!entry)
 		return 0;
-	entry->size = (1+prof_len) * sizeof(atomic_t);
+	proc_set_size(entry, (1 + prof_len) * sizeof(atomic_t));
 	hotcpu_notifier(profile_cpu_callback, 0);
 	return 0;
 }

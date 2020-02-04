@@ -12,7 +12,7 @@
 # for "archclean" cleaning up for this architecture.
 #
 
-KBUILD_DEFCONFIG := cavium-octeon_defconfig
+KBUILD_DEFCONFIG := ip22_defconfig
 
 #
 # Select the object file format to substitute into the linker script.
@@ -117,6 +117,7 @@ cflags-$(CONFIG_CPU_BIG_ENDIAN)		+= $(shell $(CC) -dumpmachine |grep -q 'mips.*e
 cflags-$(CONFIG_CPU_LITTLE_ENDIAN)	+= $(shell $(CC) -dumpmachine |grep -q 'mips.*el-.*' || echo -EL $(undef-all) $(predef-le))
 
 cflags-$(CONFIG_CPU_HAS_SMARTMIPS)	+= $(call cc-option,-msmartmips)
+cflags-$(CONFIG_CPU_MICROMIPS) += $(call cc-option,-mmicromips -mno-jals)
 
 cflags-$(CONFIG_SB1XXX_CORELIS)	+= $(call cc-option,-mno-sched-prolog) \
 				   -fno-omit-frame-pointer
@@ -148,8 +149,6 @@ cflags-$(CONFIG_CPU_NEVADA)	+= $(call cc-option,-march=rm5200,-march=r5000) \
 			-Wa,--trap
 cflags-$(CONFIG_CPU_RM7000)	+= $(call cc-option,-march=rm7000,-march=r5000) \
 			-Wa,--trap
-cflags-$(CONFIG_CPU_RM9000)	+= $(call cc-option,-march=rm9000,-march=r5000) \
-			-Wa,--trap
 cflags-$(CONFIG_CPU_SB1)	+= $(call cc-option,-march=sb1,-march=r5000) \
 			-Wa,--trap
 cflags-$(CONFIG_CPU_R8000)	+= -march=r8000 -Wa,--trap
@@ -170,8 +169,9 @@ endif
 endif
 endif
 
-cflags-$(CONFIG_CAVIUM_CN63XXP1) += -Wa,-mfix-cn63xxp1
 cflags-$(CONFIG_CPU_CAVIUM_OCTEON) += -DCVMX_BUILD_FOR_LINUX_KERNEL=1 -DUSE_RUNTIME_MODEL_CHECKS=1
+
+cflags-$(CONFIG_CAVIUM_CN63XXP1) += -Wa,-mfix-cn63xxp1
 
 ifdef  CONFIG_CAVIUM_OCTEON_CHK_CVMX_PARAMETER
 cflags-y += -DCVMX_ENABLE_PARAMETER_CHECKING=1
@@ -205,9 +205,9 @@ endif
 #
 # Firmware support
 #
-libs-$(CONFIG_ARC)		+= arch/mips/fw/arc/
-libs-$(CONFIG_CFE)		+= arch/mips/fw/cfe/
-libs-$(CONFIG_SNIPROM)		+= arch/mips/fw/sni/
+libs-$(CONFIG_FW_ARC)		+= arch/mips/fw/arc/
+libs-$(CONFIG_FW_CFE)		+= arch/mips/fw/cfe/
+libs-$(CONFIG_FW_SNIPROM)	+= arch/mips/fw/sni/
 libs-y				+= arch/mips/fw/lib/
 
 #
@@ -225,7 +225,7 @@ endif
 include $(srctree)/arch/mips/Kbuild.platforms
 
 ifdef CONFIG_PHYSICAL_START
-load-y                                  = $(CONFIG_PHYSICAL_START)
+load-y					= $(CONFIG_PHYSICAL_START)
 endif
 
 cflags-y			+= -I$(srctree)/arch/mips/include/asm/mach-generic
@@ -255,8 +255,8 @@ endif
 
 KBUILD_AFLAGS	+= $(cflags-y)
 KBUILD_CFLAGS	+= $(cflags-y)
-KBUILD_CPPFLAGS += -D"VMLINUX_LOAD_ADDRESS=$(load-y)"
-KBUILD_CPPFLAGS += -D"DATAOFFSET=$(if $(dataoffset-y),$(dataoffset-y),0)"
+KBUILD_CPPFLAGS += -DVMLINUX_LOAD_ADDRESS=$(load-y)
+KBUILD_CPPFLAGS += -DDATAOFFSET=$(if $(dataoffset-y),$(dataoffset-y),0)
 
 LDFLAGS			+= -m $(ld-emul)
 
@@ -271,7 +271,7 @@ endif
 
 OBJCOPYFLAGS		+= --remove-section=.reginfo
 
-head-y := arch/mips/kernel/head.o arch/mips/kernel/init_task.o
+head-y := arch/mips/kernel/head.o
 
 libs-y			+= arch/mips/lib/
 

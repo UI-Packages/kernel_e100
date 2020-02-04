@@ -130,6 +130,14 @@ struct iucv_sock {
 					       enum iucv_tx_notify n);
 };
 
+struct iucv_skb_cb {
+	u32	class;		/* target class of message */
+	u32	tag;		/* tag associated with message */
+	u32	offset;		/* offset for skb receival */
+};
+
+#define IUCV_SKB_CB(__skb)	((struct iucv_skb_cb *)&((__skb)->cb[0]))
+
 /* iucv socket options (SOL_IUCV) */
 #define SO_IPRMDATA_MSG	0x0080		/* send/recv IPRM_DATA msgs */
 #define SO_MSGLIMIT	0x1000		/* get/set IUCV MSGLIMIT */
@@ -141,7 +149,7 @@ struct iucv_sock {
 struct iucv_sock_list {
 	struct hlist_head head;
 	rwlock_t	  lock;
-	atomic_t	  autobind_name;
+	atomic_unchecked_t autobind_name;
 };
 
 unsigned int iucv_sock_poll(struct file *file, struct socket *sock,

@@ -151,7 +151,6 @@ static struct tc_clkevt_device clkevt = {
 		.name		= "tc_clkevt",
 		.features	= CLOCK_EVT_FEAT_PERIODIC
 					| CLOCK_EVT_FEAT_ONESHOT,
-		.shift		= 32,
 #ifdef CONFIG_ATMEL_TCB_CLKSRC_USE_SLOW_CLOCK
 		/* Should be lower than at91rm9200's system timer */
 		.rating		= 125,
@@ -193,21 +192,11 @@ static void __init setup_clkevents(struct atmel_tc *tc, int divisor_idx)
 	clkevt.clk = t2_clk;
 	tc_irqaction.dev_id = &clkevt;
 
-	timer_clock = divisor_idx;
+	timer_clock = clk32k_divisor_idx;
 
-	if (!divisor)
-		clkevt.freq = 32768;
-	else
-		clkevt.freq = clk_get_rate(t2_clk)/divisor;
-
-	clkevt.clkevt.mult = div_sc(clkevt.freq, NSEC_PER_SEC,
-				    clkevt.clkevt.shift);
-	clkevt.clkevt.max_delta_ns =
-		clockevent_delta2ns(0xffff, &clkevt.clkevt);
-	clkevt.clkevt.min_delta_ns = clockevent_delta2ns(1, &clkevt.clkevt) + 1;
 	clkevt.clkevt.cpumask = cpumask_of(0);
 
-	clockevents_register_device(&clkevt.clkevt);
+	clockevents_config_and_register(&clkevt.clkevt, 32768, 1, 0xffff);
 
 	setup_irq(irq, &tc_irqaction);
 }

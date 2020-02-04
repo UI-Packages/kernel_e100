@@ -52,13 +52,7 @@
 #define LOAD_OFFSET 0
 #endif
 
-#ifndef SYMBOL_PREFIX
-#define VMLINUX_SYMBOL(sym) sym
-#else
-#define PASTE2(x,y) x##y
-#define PASTE(x,y) PASTE2(x,y)
-#define VMLINUX_SYMBOL(sym) PASTE(SYMBOL_PREFIX, sym)
-#endif
+#include <linux/export.h>
 
 /* Align . to a 8 byte boundary equals to maximum function alignment. */
 #define ALIGN_FUNCTION()  . = ALIGN(8)
@@ -149,6 +143,33 @@
 #define TRACE_SYSCALLS()
 #endif
 
+#ifdef CONFIG_CLKSRC_OF
+#define CLKSRC_OF_TABLES() . = ALIGN(8);				\
+			   VMLINUX_SYMBOL(__clksrc_of_table) = .;	\
+			   *(__clksrc_of_table)				\
+			   *(__clksrc_of_table_end)
+#else
+#define CLKSRC_OF_TABLES()
+#endif
+
+#ifdef CONFIG_IRQCHIP
+#define IRQCHIP_OF_MATCH_TABLE()					\
+	. = ALIGN(8);							\
+	VMLINUX_SYMBOL(__irqchip_begin) = .;				\
+	*(__irqchip_of_table)		  				\
+	*(__irqchip_of_end)
+#else
+#define IRQCHIP_OF_MATCH_TABLE()
+#endif
+
+#ifdef CONFIG_COMMON_CLK
+#define CLK_OF_TABLES() . = ALIGN(8);				\
+			VMLINUX_SYMBOL(__clk_of_table) = .;	\
+			*(__clk_of_table)			\
+			*(__clk_of_table_end)
+#else
+#define CLK_OF_TABLES()
+#endif
 
 #define KERNEL_DTB()							\
 	STRUCT_ALIGN();							\
@@ -218,6 +239,7 @@
 	.rodata           : AT(ADDR(.rodata) - LOAD_OFFSET) {		\
 		VMLINUX_SYMBOL(__start_rodata) = .;			\
 		*(.rodata) *(.rodata.*)					\
+		*(.data..read_only)					\
 		*(__vermagic)		/* Kernel version magic */	\
 		. = ALIGN(8);						\
 		VMLINUX_SYMBOL(__start___tracepoints_ptrs) = .;		\
@@ -486,14 +508,17 @@
 	CPU_DISCARD(init.data)						\
 	MEM_DISCARD(init.data)						\
 	KERNEL_CTORS()							\
-	*(.init.rodata)							\
 	MCOUNT_REC()							\
+	*(.init.rodata)							\
 	FTRACE_EVENTS()							\
 	TRACE_SYSCALLS()						\
 	DEV_DISCARD(init.rodata)					\
 	CPU_DISCARD(init.rodata)					\
 	MEM_DISCARD(init.rodata)					\
-	KERNEL_DTB()
+	CLK_OF_TABLES()							\
+	CLKSRC_OF_TABLES()						\
+	KERNEL_DTB()							\
+	IRQCHIP_OF_MATCH_TABLE()
 
 #define INIT_TEXT							\
 	*(.init.text)							\
@@ -725,17 +750,18 @@
  * section in the linker script will go there too.  @phdr should have
  * a leading colon.
  *
- * Note that this macros defines __per_cpu_load as an absolute symbol.
+ * Note that this macros defines per_cpu_load as an absolute symbol.
  * If there is no need to put the percpu section at a predetermined
  * address, use PERCPU_SECTION.
  */
 #define PERCPU_VADDR(cacheline, vaddr, phdr)				\
-	VMLINUX_SYMBOL(__per_cpu_load) = .;				\
-	.data..percpu vaddr : AT(VMLINUX_SYMBOL(__per_cpu_load)		\
+	per_cpu_load = .;						\
+	.data..percpu vaddr : AT(VMLINUX_SYMBOL(per_cpu_load)		\
 				- LOAD_OFFSET) {			\
+		VMLINUX_SYMBOL(__per_cpu_load) = . + per_cpu_load;	\
 		PERCPU_INPUT(cacheline)					\
 	} phdr								\
-	. = VMLINUX_SYMBOL(__per_cpu_load) + SIZEOF(.data..percpu);
+	. = VMLINUX_SYMBOL(per_cpu_load) + SIZEOF(.data..percpu);
 
 /**
  * PERCPU_SECTION - define output section for percpu area, simple version

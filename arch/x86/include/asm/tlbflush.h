@@ -17,13 +17,49 @@
 
 static inline void __native_flush_tlb(void)
 {
+	if (static_cpu_has(X86_FEATURE_INVPCID)) {
+		unsigned long descriptor[2];
+
+		descriptor[0] = PCID_KERNEL;
+		asm volatile(__ASM_INVPCID : : "d"(&descriptor), "a"(INVPCID_ALL_MONGLOBAL) : "memory");
+		return;
+	}
+
+#if defined(CONFIG_X86_64) && defined(CONFIG_PAX_MEMORY_UDEREF)
+	if (static_cpu_has(X86_FEATURE_PCID)) {
+		unsigned int cpu = raw_get_cpu();
+
+		native_write_cr3(__pa(get_cpu_pgd(cpu, user)) | PCID_USER);
+		native_write_cr3(__pa(get_cpu_pgd(cpu, kernel)) | PCID_KERNEL);
+		raw_put_cpu_no_resched();
+		return;
+	}
+#endif
+
 	native_write_cr3(native_read_cr3());
+}
+
+static inline void __native_flush_tlb_global_irq_disabled(void)
+{
+	if (static_cpu_has(X86_FEATURE_INVPCID)) {
+		unsigned long descriptor[2];
+
+		descriptor[0] = PCID_KERNEL;
+		asm volatile(__ASM_INVPCID : : "d"(&descriptor), "a"(INVPCID_ALL_GLOBAL) : "memory");
+	} else {
+		unsigned long cr4;
+
+		cr4 = native_read_cr4();
+		/* clear PGE */
+		native_write_cr4(cr4 & ~X86_CR4_PGE);
+		/* write old PGE again and flush TLBs */
+		native_write_cr4(cr4);
+	}
 }
 
 static inline void __native_flush_tlb_global(void)
 {
 	unsigned long flags;
-	unsigned long cr4;
 
 	/*
 	 * Read-modify-write to CR4 - protect it from preemption and
@@ -32,17 +68,49 @@ static inline void __native_flush_tlb_global(void)
 	 */
 	raw_local_irq_save(flags);
 
-	cr4 = native_read_cr4();
-	/* clear PGE */
-	native_write_cr4(cr4 & ~X86_CR4_PGE);
-	/* write old PGE again and flush TLBs */
-	native_write_cr4(cr4);
+	__native_flush_tlb_global_irq_disabled();
 
 	raw_local_irq_restore(flags);
 }
 
 static inline void __native_flush_tlb_single(unsigned long addr)
 {
+
+	if (static_cpu_has(X86_FEATURE_INVPCID)) {
+		unsigned long descriptor[2];
+
+		descriptor[0] = PCID_KERNEL;
+		descriptor[1] = addr;
+
+#if defined(CONFIG_X86_64) && defined(CONFIG_PAX_MEMORY_UDEREF)
+		if (!static_cpu_has(X86_FEATURE_STRONGUDEREF) || addr >= TASK_SIZE_MAX) {
+			if (addr < TASK_SIZE_MAX)
+				descriptor[1] += pax_user_shadow_base;
+			asm volatile(__ASM_INVPCID : : "d"(&descriptor), "a"(INVPCID_SINGLE_ADDRESS) : "memory");
+		}
+
+		descriptor[0] = PCID_USER;
+		descriptor[1] = addr;
+#endif
+
+		asm volatile(__ASM_INVPCID : : "d"(&descriptor), "a"(INVPCID_SINGLE_ADDRESS) : "memory");
+		return;
+	}
+
+#if defined(CONFIG_X86_64) && defined(CONFIG_PAX_MEMORY_UDEREF)
+	if (static_cpu_has(X86_FEATURE_PCID)) {
+		unsigned int cpu = raw_get_cpu();
+
+		native_write_cr3(__pa(get_cpu_pgd(cpu, user)) | PCID_USER | PCID_NOFLUSH);
+		asm volatile("invlpg (%0)" ::"r" (addr) : "memory");
+		native_write_cr3(__pa(get_cpu_pgd(cpu, kernel)) | PCID_KERNEL | PCID_NOFLUSH);
+		raw_put_cpu_no_resched();
+
+		if (!static_cpu_has(X86_FEATURE_STRONGUDEREF) && addr < TASK_SIZE_MAX)
+			addr += pax_user_shadow_base;
+	}
+#endif
+
 	asm volatile("invlpg (%0)" ::"r" (addr) : "memory");
 }
 
@@ -56,17 +124,10 @@ static inline void __flush_tlb_all(void)
 
 static inline void __flush_tlb_one(unsigned long addr)
 {
-	if (cpu_has_invlpg)
 		__flush_tlb_single(addr);
-	else
-		__flush_tlb();
 }
 
-#ifdef CONFIG_X86_32
-# define TLB_FLUSH_ALL	0xffffffff
-#else
-# define TLB_FLUSH_ALL	-1ULL
-#endif
+#define TLB_FLUSH_ALL	-1UL
 
 /*
  * TLB flushing:
@@ -109,6 +170,13 @@ static inline void flush_tlb_range(struct vm_area_struct *vma,
 		__flush_tlb();
 }
 
+static inline void flush_tlb_mm_range(struct mm_struct *mm,
+	   unsigned long start, unsigned long end, unsigned long vmflag)
+{
+	if (mm == current->active_mm)
+		__flush_tlb();
+}
+
 static inline void native_flush_tlb_others(const struct cpumask *cpumask,
 					   struct mm_struct *mm,
 					   unsigned long start,
@@ -120,18 +188,29 @@ static inline void reset_lazy_tlbstate(void)
 {
 }
 
+static inline void flush_tlb_kernel_range(unsigned long start,
+					  unsigned long end)
+{
+	flush_tlb_all();
+}
+
 #else  /* SMP */
 
 #include <asm/smp.h>
 
 #define local_flush_tlb() __flush_tlb()
 
+#define flush_tlb_mm(mm)	flush_tlb_mm_range(mm, 0UL, TLB_FLUSH_ALL, 0UL)
+
+#define flush_tlb_range(vma, start, end)	\
+		flush_tlb_mm_range(vma->vm_mm, start, end, vma->vm_flags)
+
 extern void flush_tlb_all(void);
 extern void flush_tlb_current_task(void);
-extern void flush_tlb_mm(struct mm_struct *);
 extern void flush_tlb_page(struct vm_area_struct *, unsigned long);
-extern void flush_tlb_range(struct vm_area_struct *vma,
-				   unsigned long start, unsigned long end);
+extern void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
+				unsigned long end, unsigned long vmflag);
+extern void flush_tlb_kernel_range(unsigned long start, unsigned long end);
 
 #define flush_tlb()	flush_tlb_current_task()
 
@@ -160,11 +239,5 @@ static inline void reset_lazy_tlbstate(void)
 #define flush_tlb_others(mask, mm, start, end)	\
 	native_flush_tlb_others(mask, mm, start, end)
 #endif
-
-static inline void flush_tlb_kernel_range(unsigned long start,
-					  unsigned long end)
-{
-	flush_tlb_all();
-}
 
 #endif /* _ASM_X86_TLBFLUSH_H */

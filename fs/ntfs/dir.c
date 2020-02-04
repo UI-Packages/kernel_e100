@@ -1101,7 +1101,7 @@ static int ntfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
 	s64 ia_pos, ia_start, prev_ia_pos, bmp_pos;
 	loff_t fpos, i_size;
-	struct inode *bmp_vi, *vdir = filp->f_path.dentry->d_inode;
+	struct inode *bmp_vi, *vdir = file_inode(filp);
 	struct super_block *sb = vdir->i_sb;
 	ntfs_inode *ndir = NTFS_I(vdir);
 	ntfs_volume *vol = NTFS_SB(sb);
@@ -1329,7 +1329,7 @@ find_next_index_buffer:
 	ia = (INDEX_ALLOCATION*)(kaddr + (ia_pos & ~PAGE_CACHE_MASK &
 			~(s64)(ndir->itype.index.block_size - 1)));
 	/* Bounds checks. */
-	if (unlikely((u8*)ia < kaddr || (u8*)ia > kaddr + PAGE_CACHE_SIZE)) {
+	if (unlikely(!kaddr || (u8*)ia < kaddr || (u8*)ia > kaddr + PAGE_CACHE_SIZE)) {
 		ntfs_error(sb, "Out of bounds check failed. Corrupt directory "
 				"inode 0x%lx or driver bug.", vdir->i_ino);
 		goto err_out;

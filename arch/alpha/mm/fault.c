@@ -53,6 +53,124 @@ __load_new_mm_context(struct mm_struct *next_mm)
 	__reload_thread(pcb);
 }
 
+#ifdef CONFIG_PAX_PAGEEXEC
+/*
+ * PaX: decide what to do with offenders (regs->pc = fault address)
+ *
+ * returns 1 when task should be killed
+ *         2 when patched PLT trampoline was detected
+ *         3 when unpatched PLT trampoline was detected
+ */
+static int pax_handle_fetch_fault(struct pt_regs *regs)
+{
+
+#ifdef CONFIG_PAX_EMUPLT
+	int err;
+
+	do { /* PaX: patched PLT emulation #1 */
+		unsigned int ldah, ldq, jmp;
+
+		err = get_user(ldah, (unsigned int *)regs->pc);
+		err |= get_user(ldq, (unsigned int *)(regs->pc+4));
+		err |= get_user(jmp, (unsigned int *)(regs->pc+8));
+
+		if (err)
+			break;
+
+		if ((ldah & 0xFFFF0000U) == 0x277B0000U &&
+		    (ldq & 0xFFFF0000U) == 0xA77B0000U &&
+		    jmp == 0x6BFB0000U)
+		{
+			unsigned long r27, addr;
+			unsigned long addrh = (ldah | 0xFFFFFFFFFFFF0000UL) << 16;
+			unsigned long addrl = ldq | 0xFFFFFFFFFFFF0000UL;
+
+			addr = regs->r27 + ((addrh ^ 0x80000000UL) + 0x80000000UL) + ((addrl ^ 0x8000UL) + 0x8000UL);
+			err = get_user(r27, (unsigned long *)addr);
+			if (err)
+				break;
+
+			regs->r27 = r27;
+			regs->pc = r27;
+			return 2;
+		}
+	} while (0);
+
+	do { /* PaX: patched PLT emulation #2 */
+		unsigned int ldah, lda, br;
+
+		err = get_user(ldah, (unsigned int *)regs->pc);
+		err |= get_user(lda, (unsigned int *)(regs->pc+4));
+		err |= get_user(br, (unsigned int *)(regs->pc+8));
+
+		if (err)
+			break;
+
+		if ((ldah & 0xFFFF0000U) == 0x277B0000U &&
+		    (lda & 0xFFFF0000U) == 0xA77B0000U &&
+		    (br & 0xFFE00000U) == 0xC3E00000U)
+		{
+			unsigned long addr = br | 0xFFFFFFFFFFE00000UL;
+			unsigned long addrh = (ldah | 0xFFFFFFFFFFFF0000UL) << 16;
+			unsigned long addrl = lda | 0xFFFFFFFFFFFF0000UL;
+
+			regs->r27 += ((addrh ^ 0x80000000UL) + 0x80000000UL) + ((addrl ^ 0x8000UL) + 0x8000UL);
+			regs->pc += 12 + (((addr ^ 0x00100000UL) + 0x00100000UL) << 2);
+			return 2;
+		}
+	} while (0);
+
+	do { /* PaX: unpatched PLT emulation */
+		unsigned int br;
+
+		err = get_user(br, (unsigned int *)regs->pc);
+
+		if (!err && (br & 0xFFE00000U) == 0xC3800000U) {
+			unsigned int br2, ldq, nop, jmp;
+			unsigned long addr = br | 0xFFFFFFFFFFE00000UL, resolver;
+
+			addr = regs->pc + 4 + (((addr ^ 0x00100000UL) + 0x00100000UL) << 2);
+			err = get_user(br2, (unsigned int *)addr);
+			err |= get_user(ldq, (unsigned int *)(addr+4));
+			err |= get_user(nop, (unsigned int *)(addr+8));
+			err |= get_user(jmp, (unsigned int *)(addr+12));
+			err |= get_user(resolver, (unsigned long *)(addr+16));
+
+			if (err)
+				break;
+
+			if (br2 == 0xC3600000U &&
+			    ldq == 0xA77B000CU &&
+			    nop == 0x47FF041FU &&
+			    jmp == 0x6B7B0000U)
+			{
+				regs->r28 = regs->pc+4;
+				regs->r27 = addr+16;
+				regs->pc = resolver;
+				return 3;
+			}
+		}
+	} while (0);
+#endif
+
+	return 1;
+}
+
+void pax_report_insns(struct pt_regs *regs, void *pc, void *sp)
+{
+	unsigned long i;
+
+	printk(KERN_ERR "PAX: bytes at PC: ");
+	for (i = 0; i < 5; i++) {
+		unsigned int c;
+		if (get_user(c, (unsigned int *)pc+i))
+			printk(KERN_CONT "???????? ");
+		else
+			printk(KERN_CONT "%08x ", c);
+	}
+	printk("\n");
+}
+#endif
 
 /*
  * This routine handles page faults.  It determines the address,
@@ -89,6 +207,8 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 	const struct exception_table_entry *fixup;
 	int fault, si_code = SEGV_MAPERR;
 	siginfo_t info;
+	unsigned int flags = (FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE |
+			      (cause > 0 ? FAULT_FLAG_WRITE : 0));
 
 	/* As of EV6, a load into $31/$f31 is a prefetch, and never faults
 	   (or is suppressed by the PALcode).  Support that for older CPUs
@@ -114,6 +234,7 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 		goto vmalloc_fault;
 #endif
 
+retry:
 	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
@@ -130,8 +251,29 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
  good_area:
 	si_code = SEGV_ACCERR;
 	if (cause < 0) {
-		if (!(vma->vm_flags & VM_EXEC))
+		if (!(vma->vm_flags & VM_EXEC)) {
+
+#ifdef CONFIG_PAX_PAGEEXEC
+			if (!(mm->pax_flags & MF_PAX_PAGEEXEC) || address != regs->pc)
+				goto bad_area;
+
+			up_read(&mm->mmap_sem);
+			switch (pax_handle_fetch_fault(regs)) {
+
+#ifdef CONFIG_PAX_EMUPLT
+			case 2:
+			case 3:
+				return;
+#endif
+
+			}
+			pax_report_fault(regs, (void *)regs->pc, (void *)rdusp());
+			do_group_exit(SIGKILL);
+#else
 			goto bad_area;
+#endif
+
+		}
 	} else if (!cause) {
 		/* Allow reads even for write-only mappings */
 		if (!(vma->vm_flags & (VM_READ | VM_WRITE)))
@@ -144,8 +286,11 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 	/* If for any reason at all we couldn't handle the fault,
 	   make sure we exit gracefully rather than endlessly redo
 	   the fault.  */
-	fault = handle_mm_fault(mm, vma, address, cause > 0 ? FAULT_FLAG_WRITE : 0);
-	up_read(&mm->mmap_sem);
+	fault = handle_mm_fault(mm, vma, address, flags);
+
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+		return;
+
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		if (fault & VM_FAULT_OOM)
 			goto out_of_memory;
@@ -153,10 +298,26 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 			goto do_sigbus;
 		BUG();
 	}
-	if (fault & VM_FAULT_MAJOR)
-		current->maj_flt++;
-	else
-		current->min_flt++;
+
+	if (flags & FAULT_FLAG_ALLOW_RETRY) {
+		if (fault & VM_FAULT_MAJOR)
+			current->maj_flt++;
+		else
+			current->min_flt++;
+		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+
+			 /* No need to up_read(&mm->mmap_sem) as we would
+			 * have already released it in __lock_page_or_retry
+			 * in mm/filemap.c.
+			 */
+
+			goto retry;
+		}
+	}
+
+	up_read(&mm->mmap_sem);
+
 	return;
 
 	/* Something tried to access memory that isn't in our memory map.
@@ -186,12 +347,14 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 	/* We ran out of memory, or some other thing happened to us that
 	   made us unable to handle the page fault gracefully.  */
  out_of_memory:
+	up_read(&mm->mmap_sem);
 	if (!user_mode(regs))
 		goto no_context;
 	pagefault_out_of_memory();
 	return;
 
  do_sigbus:
+	up_read(&mm->mmap_sem);
 	/* Send a sigbus, regardless of whether we were in kernel
 	   or user mode.  */
 	info.si_signo = SIGBUS;

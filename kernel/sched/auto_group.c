@@ -11,7 +11,7 @@
 
 unsigned int __read_mostly sysctl_sched_autogroup_enabled = 1;
 static struct autogroup autogroup_default;
-static atomic_t autogroup_seq_nr;
+static atomic_unchecked_t autogroup_seq_nr;
 
 void __init autogroup_init(struct task_struct *init_task)
 {
@@ -35,6 +35,7 @@ static inline void autogroup_destroy(struct kref *kref)
 	ag->tg->rt_se = NULL;
 	ag->tg->rt_rq = NULL;
 #endif
+	sched_offline_group(ag->tg);
 	sched_destroy_group(ag->tg);
 }
 
@@ -76,9 +77,11 @@ static inline struct autogroup *autogroup_create(void)
 	if (IS_ERR(tg))
 		goto out_free;
 
+	sched_online_group(tg, &root_task_group);
+
 	kref_init(&ag->kref);
 	init_rwsem(&ag->lock);
-	ag->id = atomic_inc_return(&autogroup_seq_nr);
+	ag->id = atomic_inc_return_unchecked(&autogroup_seq_nr);
 	ag->tg = tg;
 #ifdef CONFIG_RT_GROUP_SCHED
 	/*
@@ -143,11 +146,15 @@ autogroup_move_group(struct task_struct *p, struct autogroup *ag)
 
 	p->signal->autogroup = autogroup_kref_get(ag);
 
+	if (!ACCESS_ONCE(sysctl_sched_autogroup_enabled))
+		goto out;
+
 	t = p;
 	do {
 		sched_move_task(t);
 	} while_each_thread(p, t);
 
+out:
 	unlock_task_sighand(p, &flags);
 	autogroup_kref_put(prev);
 }

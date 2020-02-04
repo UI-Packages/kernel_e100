@@ -127,11 +127,11 @@ char *dbg_get_reg(int regno, void *mem, struct pt_regs *regs)
 #ifdef CONFIG_X86_32
 	switch (regno) {
 	case GDB_SS:
-		if (!user_mode_vm(regs))
+		if (!user_mode(regs))
 			*(unsigned long *)mem = __KERNEL_DS;
 		break;
 	case GDB_SP:
-		if (!user_mode_vm(regs))
+		if (!user_mode(regs))
 			*(unsigned long *)mem = kernel_stack_pointer(regs);
 		break;
 	case GDB_GS:
@@ -229,7 +229,10 @@ static void kgdb_correct_hw_break(void)
 		bp->attr.bp_addr = breakinfo[breakno].addr;
 		bp->attr.bp_len = breakinfo[breakno].len;
 		bp->attr.bp_type = breakinfo[breakno].type;
-		info->address = breakinfo[breakno].addr;
+		if (breakinfo[breakno].type == X86_BREAKPOINT_EXECUTE)
+			info->address = ktla_ktva(breakinfo[breakno].addr);
+		else
+			info->address = breakinfo[breakno].addr;
 		info->len = breakinfo[breakno].len;
 		info->type = breakinfo[breakno].type;
 		val = arch_install_hw_breakpoint(bp);
@@ -444,12 +447,12 @@ void kgdb_roundup_cpus(unsigned long flags)
 
 /**
  *	kgdb_arch_handle_exception - Handle architecture specific GDB packets.
- *	@vector: The error vector of the exception that happened.
+ *	@e_vector: The error vector of the exception that happened.
  *	@signo: The signal number of the exception that happened.
  *	@err_code: The error code of the exception that happened.
- *	@remcom_in_buffer: The buffer of the packet we have read.
- *	@remcom_out_buffer: The buffer of %BUFMAX bytes to write a packet into.
- *	@regs: The &struct pt_regs of the current process.
+ *	@remcomInBuffer: The buffer of the packet we have read.
+ *	@remcomOutBuffer: The buffer of %BUFMAX bytes to write a packet into.
+ *	@linux_regs: The &struct pt_regs of the current process.
  *
  *	This function MUST handle the 'c' and 's' command packets,
  *	as well packets to set / remove a hardware breakpoint, if used.
@@ -476,12 +479,12 @@ int kgdb_arch_handle_exception(int e_vector, int signo, int err_code,
 	case 'k':
 		/* clear the trace bit */
 		linux_regs->flags &= ~X86_EFLAGS_TF;
-		atomic_set(&kgdb_cpu_doing_single_step, -1);
+		atomic_set_unchecked(&kgdb_cpu_doing_single_step, -1);
 
 		/* set the trace bit if we're stepping */
 		if (remcomInBuffer[0] == 's') {
 			linux_regs->flags |= X86_EFLAGS_TF;
-			atomic_set(&kgdb_cpu_doing_single_step,
+			atomic_set_unchecked(&kgdb_cpu_doing_single_step,
 				   raw_smp_processor_id());
 		}
 
@@ -546,7 +549,7 @@ static int __kgdb_notify(struct die_args *args, unsigned long cmd)
 
 	switch (cmd) {
 	case DIE_DEBUG:
-		if (atomic_read(&kgdb_cpu_doing_single_step) != -1) {
+		if (atomic_read_unchecked(&kgdb_cpu_doing_single_step) != -1) {
 			if (user_mode(regs))
 				return single_step_cont(regs, args);
 			break;
@@ -746,14 +749,16 @@ void kgdb_arch_set_pc(struct pt_regs *regs, unsigned long ip)
 int kgdb_arch_set_breakpoint(struct kgdb_bkpt *bpt)
 {
 	int err;
+#ifdef CONFIG_DEBUG_RODATA
 	char opc[BREAK_INSTR_SIZE];
+#endif /* CONFIG_DEBUG_RODATA */
 
 	bpt->type = BP_BREAKPOINT;
-	err = probe_kernel_read(bpt->saved_instr, (char *)bpt->bpt_addr,
+	err = probe_kernel_read(bpt->saved_instr, ktla_ktva((char *)bpt->bpt_addr),
 				BREAK_INSTR_SIZE);
 	if (err)
 		return err;
-	err = probe_kernel_write((char *)bpt->bpt_addr,
+	err = probe_kernel_write(ktla_ktva((char *)bpt->bpt_addr),
 				 arch_kgdb_ops.gdb_bpt_instr, BREAK_INSTR_SIZE);
 #ifdef CONFIG_DEBUG_RODATA
 	if (!err)
@@ -766,7 +771,7 @@ int kgdb_arch_set_breakpoint(struct kgdb_bkpt *bpt)
 		return -EBUSY;
 	text_poke((void *)bpt->bpt_addr, arch_kgdb_ops.gdb_bpt_instr,
 		  BREAK_INSTR_SIZE);
-	err = probe_kernel_read(opc, (char *)bpt->bpt_addr, BREAK_INSTR_SIZE);
+	err = probe_kernel_read(opc, ktla_ktva((char *)bpt->bpt_addr), BREAK_INSTR_SIZE);
 	if (err)
 		return err;
 	if (memcmp(opc, arch_kgdb_ops.gdb_bpt_instr, BREAK_INSTR_SIZE))
@@ -791,13 +796,13 @@ int kgdb_arch_remove_breakpoint(struct kgdb_bkpt *bpt)
 	if (mutex_is_locked(&text_mutex))
 		goto knl_write;
 	text_poke((void *)bpt->bpt_addr, bpt->saved_instr, BREAK_INSTR_SIZE);
-	err = probe_kernel_read(opc, (char *)bpt->bpt_addr, BREAK_INSTR_SIZE);
+	err = probe_kernel_read(opc, ktla_ktva((char *)bpt->bpt_addr), BREAK_INSTR_SIZE);
 	if (err || memcmp(opc, bpt->saved_instr, BREAK_INSTR_SIZE))
 		goto knl_write;
 	return err;
 knl_write:
 #endif /* CONFIG_DEBUG_RODATA */
-	return probe_kernel_write((char *)bpt->bpt_addr,
+	return probe_kernel_write(ktla_ktva((char *)bpt->bpt_addr),
 				  (char *)bpt->saved_instr, BREAK_INSTR_SIZE);
 }
 

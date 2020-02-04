@@ -12,6 +12,9 @@
  * client side of the protocol when the OCTEON SOC is in PCI target
  * mode.
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/console.h>
 #include <linux/mutex.h>
 #include <linux/tty.h>
@@ -19,6 +22,7 @@
 #include <linux/tty_flip.h>
 
 #include <asm/byteorder.h>
+#include <asm/io.h>
 
 #include <asm/octeon/octeon.h>
 
@@ -87,6 +91,7 @@ struct octeon_pci_console {
 	struct timer_list poll_timer;
 	int open_count;
 	int index;
+	struct tty_port tty_port;
 };
 
 static struct octeon_pci_console octeon_pci_console;
@@ -198,17 +203,19 @@ static int octeon_pci_console_setup(struct console *con, char *arg)
 
 void octeon_pci_console_init(const char *arg)
 {
-	memset(&octeon_pci_console, 0, sizeof(octeon_pci_console));
-	strcpy(octeon_pci_console.con.name, "pci");
-	octeon_pci_console.con.write = octeon_pci_console_write;
-	octeon_pci_console.con.device = octeon_pci_console_device;
-	octeon_pci_console.con.setup = octeon_pci_console_setup;
-	octeon_pci_console.con.data = &octeon_pci_console;
+	struct octeon_pci_console *c = &octeon_pci_console;
+
+	memset(c, 0, sizeof(*c));
+	strcpy(c->con.name, "pci");
+	c->con.write = octeon_pci_console_write;
+	c->con.device = octeon_pci_console_device;
+	c->con.setup = octeon_pci_console_setup;
+	c->con.data = &octeon_pci_console;
 	if (arg && (arg[3] >= '0') && (arg[3] <= '9'))
-		sscanf(arg + 3, "%d", &octeon_pci_console.index);
+		sscanf(arg + 3, "%d", &c->index);
 	else
-		octeon_pci_console.index = 0;
-	register_console(&octeon_pci_console.con);
+		c->index = 0;
+	register_console(&c->con);
 }
 
 /*
@@ -244,12 +251,12 @@ static void octeon_pci_console_read_poll(unsigned long arg)
 #else /*  __BIG_ENDIAN */
 		buf = opc->input_ring + r;
 #endif
-		nr = tty_insert_flip_string(tty, buf, n);
+		nr = tty_insert_flip_string(tty->port, buf, n);
 		if (!nr)
 			break;
 		r = (r + nr) % s;
 		a -= nr;
-		tty_flip_buffer_push(tty);
+		tty_flip_buffer_push(tty->port);
 	}
 	opc->rings->input_read_index = r;
 	wmb();
@@ -321,28 +328,43 @@ static const struct tty_operations octeon_pci_tty_ops = {
 
 static __init int octeon_pci_console_module_init(void)
 {
-	octeon_pci_console.ttydrv = alloc_tty_driver(1);
-	if (!octeon_pci_console.ttydrv)
-		return 0;
+	int r;
+	struct tty_driver *d = tty_alloc_driver(1, 0);
+
+	if (IS_ERR(d))
+		return PTR_ERR(d);
+
+	octeon_pci_console.ttydrv = d;
+
 	if (octeon_pci_console_setup0(&octeon_pci_console)) {
-		pr_err("ERROR: octeon_pci_console_setup0 failed.\n");
-		return -ENODEV;
+		pr_notice("Console not created.\n");
+		r = -ENODEV;
+		goto err;
+	} else {
+		pr_info("Initialized.\n");
 	}
 
-	octeon_pci_console.ttydrv->owner = THIS_MODULE;
-	octeon_pci_console.ttydrv->driver_name = "octeon_pci_console";
-	octeon_pci_console.ttydrv->name = "ttyPCI";
-	octeon_pci_console.ttydrv->type = TTY_DRIVER_TYPE_SERIAL;
-	octeon_pci_console.ttydrv->subtype = SERIAL_TYPE_NORMAL;
-	octeon_pci_console.ttydrv->flags = TTY_DRIVER_REAL_RAW;
-	octeon_pci_console.ttydrv->major = 4;
-	octeon_pci_console.ttydrv->minor_start = 96;
-	octeon_pci_console.ttydrv->init_termios = tty_std_termios;
-	octeon_pci_console.ttydrv->init_termios.c_cflag =
-		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-	octeon_pci_console.ttydrv->driver_state = &octeon_pci_console;
-	tty_set_operations(octeon_pci_console.ttydrv, &octeon_pci_tty_ops);
-	tty_register_driver(octeon_pci_console.ttydrv);
+	d->owner = THIS_MODULE;
+	d->driver_name = "octeon_pci_console";
+	d->name = "ttyPCI";
+	d->type = TTY_DRIVER_TYPE_SERIAL;
+	d->subtype = SERIAL_TYPE_NORMAL;
+	d->flags = TTY_DRIVER_REAL_RAW;
+	d->major = 4;
+	d->minor_start = 96;
+	d->init_termios = tty_std_termios;
+	d->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+	d->driver_state = &octeon_pci_console;
+	tty_set_operations(d, &octeon_pci_tty_ops);
+	tty_port_init(&octeon_pci_console.tty_port);
+	tty_port_link_device(&octeon_pci_console.tty_port, d, 0);
+	r = tty_register_driver(d);
+	if (r)
+		goto err;
+
 	return 0;
+err:
+	put_tty_driver(d);
+	return r;
 }
 module_init(octeon_pci_console_module_init);

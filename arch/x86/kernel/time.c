@@ -14,7 +14,6 @@
 #include <linux/i8253.h>
 #include <linux/time.h>
 #include <linux/export.h>
-#include <linux/mca.h>
 
 #include <asm/vsyscall.h>
 #include <asm/x86_init.h>
@@ -31,9 +30,9 @@ unsigned long profile_pc(struct pt_regs *regs)
 {
 	unsigned long pc = instruction_pointer(regs);
 
-	if (!user_mode_vm(regs) && in_lock_functions(pc)) {
+	if (!user_mode(regs) && in_lock_functions(pc)) {
 #ifdef CONFIG_FRAME_POINTER
-		return *(unsigned long *)(regs->bp + sizeof(long));
+		return ktla_ktva(*(unsigned long *)(regs->bp + sizeof(long)));
 #else
 		unsigned long *sp =
 			(unsigned long *)kernel_stack_pointer(regs);
@@ -42,10 +41,16 @@ unsigned long profile_pc(struct pt_regs *regs)
 		 * or above a saved flags. Eflags has bits 22-31 zero,
 		 * kernel addresses don't.
 		 */
+
+#ifdef CONFIG_PAX_KERNEXEC
+		return ktla_ktva(sp[0]);
+#else
 		if (sp[0] >> 22)
 			return sp[0];
 		if (sp[1] >> 22)
 			return sp[1];
+#endif
+
 #endif
 	}
 	return pc;
@@ -58,11 +63,6 @@ EXPORT_SYMBOL(profile_pc);
 static irqreturn_t timer_interrupt(int irq, void *dev_id)
 {
 	global_clock_event->event_handler(global_clock_event);
-
-	/* MCA bus quirk: Acknowledge irq0 by setting bit 7 in port 0x61 */
-	if (MCA_bus)
-		outb_p(inb_p(0x61)| 0x80, 0x61);
-
 	return IRQ_HANDLED;
 }
 

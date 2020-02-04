@@ -17,6 +17,7 @@
 #include <asm/asmmacro.h>
 #include <asm/mipsregs.h>
 #include <asm/asm-offsets.h>
+#include <asm/thread_info.h>
 
 /*
  * For SMTC kernel, global IE should be left set, and interrupts
@@ -70,6 +71,14 @@
 #ifndef CONFIG_CPU_HAS_SMARTMIPS
 		LONG_S	v1, PT_LO(sp)
 #endif
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
+		/*
+		 * The Octeon multiplier state is affected by general
+		 * multiply instructions. It must be saved before and
+		 * kernel code might corrupt it
+		 */
+		jal     octeon_mult_save
+#endif
 		.endm
 
 		.macro	SAVE_STATIC
@@ -98,7 +107,9 @@
 #define CPU_ID_REG CP0_CONTEXT
 #define CPU_ID_MFC0 MFC0
 #endif
-		.macro	get_saved_sp	/* SMP variation */
+#define CPU_ID_MASK ((1 << 13) - 1)
+
+		.macro	get_saved_sp_for_save_some	/* SMP variation */
 		CPU_ID_MFC0	k0, CPU_ID_REG
 #if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
 		lui	k1, %hi(kernelsp)
@@ -110,14 +121,48 @@
 		dsll	k1, 16
 #endif
 		LONG_SRL	k0, PTEBASE_SHIFT
+#ifdef CONFIG_KVM_MIPS_VZ
+		andi	k0, CPU_ID_MASK /* high bits indicate guest mode. */
+#endif
 		LONG_ADDU	k1, k0
 		LONG_L	k1, %lo(kernelsp)(k1)
+		.endm
+
+		.macro get_saved_sp
+		CPU_ID_MFC0	k0, CPU_ID_REG
+		get_saved_sp_for_save_some
+		.endm
+
+		.macro	get_mips_kvm_rootsp	/* SMP variation */
+#if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
+		lui	k1, %hi(mips_kvm_rootsp)
+#else
+		lui	k1, %highest(mips_kvm_rootsp)
+		daddiu	k1, %higher(mips_kvm_rootsp)
+		dsll	k1, 16
+		daddiu	k1, %hi(mips_kvm_rootsp)
+		dsll	k1, 16
+#endif
+		LONG_SRL	k0, PTEBASE_SHIFT
+		andi	k0, CPU_ID_MASK /* high bits indicate guest mode. */
+		LONG_ADDU	k1, k0
+		LONG_L	k1, %lo(mips_kvm_rootsp)(k1)
 		.endm
 
 		.macro	set_saved_sp stackp temp temp2
 		CPU_ID_MFC0	\temp, CPU_ID_REG
 		LONG_SRL	\temp, PTEBASE_SHIFT
+#ifdef CONFIG_KVM_MIPS_VZ
+		andi	k0, CPU_ID_MASK /* high bits indicate guest mode. */
+#endif
 		LONG_S	\stackp, kernelsp(\temp)
+		.endm
+
+		.macro	set_mips_kvm_rootsp stackp temp
+		CPU_ID_MFC0	\temp, CPU_ID_REG
+		LONG_SRL	\temp, PTEBASE_SHIFT
+		andi	k0, CPU_ID_MASK /* high bits indicate guest mode. */
+		LONG_S	\stackp, mips_kvm_rootsp(\temp)
 		.endm
 #else
 		.macro	get_saved_sp	/* Uniprocessor variation */
@@ -139,7 +184,7 @@
 1:		move	ra, k0
 		li	k0, 3
 		mtc0	k0, $22
-#endif /* CONFIG_CPU_LOONGSON2F */
+#endif /* CONFIG_CPU_JUMP_WORKAROUNDS */
 #if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
 		lui	k1, %hi(kernelsp)
 #else
@@ -151,9 +196,43 @@
 #endif
 		LONG_L	k1, %lo(kernelsp)(k1)
 		.endm
+#if defined(CONFIG_MIPS_PGD_C0_CONTEXT)
+#define PTEBASE_SHIFT	48	/* XCONTEXT */
+#define CPU_ID_REG CP0_XCONTEXT
+#define CPU_ID_MFC0 MFC0
+#endif
+		.macro	get_mips_kvm_rootsp	/* Uniprocessor variation */
+#if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
+		lui	k1, %hi(mips_kvm_rootsp)
+#else
+		lui	k1, %highest(mips_kvm_rootsp)
+		daddiu	k1, %higher(mips_kvm_rootsp)
+		dsll	k1, k1, 16
+		daddiu	k1, %hi(mips_kvm_rootsp)
+		dsll	k1, k1, 16
+#endif
+		LONG_L	k1, %lo(mips_kvm_rootsp)(k1)
+		.endm
+
+		.macro	get_saved_sp_for_save_some	/* SMP variation */
+#if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
+		lui	k1, %hi(kernelsp)
+#else
+		lui	k1, %highest(kernelsp)
+		daddiu	k1, %higher(kernelsp)
+		dsll	k1, 16
+		daddiu	k1, %hi(kernelsp)
+		dsll	k1, 16
+#endif
+		LONG_L	k1, %lo(kernelsp)(k1)
+		.endm
 
 		.macro	set_saved_sp stackp temp temp2
 		LONG_S	\stackp, kernelsp
+		.endm
+
+		.macro	set_mips_kvm_rootsp stackp temp
+		LONG_S	\stackp, mips_kvm_rootsp
 		.endm
 #endif
 
@@ -164,11 +243,21 @@
 		mfc0	k0, CP0_STATUS
 		sll	k0, 3		/* extract cu0 bit */
 		.set	noreorder
+#ifdef CONFIG_KVM_MIPS_VZ
+		bgez	k0, 7f
+		 CPU_ID_MFC0	k0, CPU_ID_REG
+		bgez	k0, 8f
+		 move	k1, sp
+		get_mips_kvm_rootsp
+		b	8f
+		 nop
+#else
 		bltz	k0, 8f
 		 move	k1, sp
+#endif
 		.set	reorder
 		/* Called from user mode, new stack. */
-		get_saved_sp
+7:		get_saved_sp_for_save_some
 #ifndef CONFIG_CPU_DADDI_WORKAROUNDS
 8:		move	k0, sp
 		PTR_SUBU sp, k1, PT_SIZE
@@ -181,6 +270,16 @@
 #endif
 		LONG_S	k0, PT_R29(sp)
 		LONG_S	$3, PT_R3(sp)
+#ifdef CONFIG_KVM_MIPS_VZ
+		/*
+		 * With KVM_MIPS_VZ, we must not clobber k0/k1
+		 * they were saved before they were used
+		 */
+		MFC0	k0, CP0_KSCRATCH1
+		MFC0	$3, CP0_KSCRATCH2
+		LONG_S	k0, PT_R26(sp)
+		LONG_S	$3, PT_R27(sp)
+#endif
 		/*
 		 * You might think that you don't need to save $0,
 		 * but the FPU emulator and gdb remote debug stub
@@ -189,6 +288,7 @@
 		LONG_S	$0, PT_R0(sp)
 		mfc0	v1, CP0_STATUS
 		LONG_S	$2, PT_R2(sp)
+		LONG_S	v1, PT_STATUS(sp)
 #ifdef CONFIG_MIPS_MT_SMTC
 		/*
 		 * Ideally, these instructions would be shuffled in
@@ -200,33 +300,55 @@
 		LONG_S	k0, PT_TCSTATUS(sp)
 #endif /* CONFIG_MIPS_MT_SMTC */
 		LONG_S	$4, PT_R4(sp)
-		LONG_S	$5, PT_R5(sp)
-		LONG_S	v1, PT_STATUS(sp)
 		mfc0	v1, CP0_CAUSE
-		LONG_S	$6, PT_R6(sp)
-		LONG_S	$7, PT_R7(sp)
+		LONG_S	$5, PT_R5(sp)
 		LONG_S	v1, PT_CAUSE(sp)
+		LONG_S	$6, PT_R6(sp)
 		MFC0	v1, CP0_EPC
+		LONG_S	$7, PT_R7(sp)
 #ifdef CONFIG_64BIT
 		LONG_S	$8, PT_R8(sp)
 		LONG_S	$9, PT_R9(sp)
 #endif
+		LONG_S	v1, PT_EPC(sp)
 		LONG_S	$25, PT_R25(sp)
 		LONG_S	$28, PT_R28(sp)
 		LONG_S	$31, PT_R31(sp)
-		LONG_S	v1, PT_EPC(sp)
 		ori	$28, sp, _THREAD_MASK
 		xori	$28, _THREAD_MASK
+#ifdef CONFIG_KVM_MIPS_VZ
+		CPU_ID_MFC0	k0, CPU_ID_REG
+		.set	noreorder
+		bgez	k0, 8f
+		/* Must clear GuestCtl0[GM] */
+		 dins	k0, zero, 63, 1
+		.set	reorder
+		dmtc0	k0, CPU_ID_REG
+		mfc0	k0, CP0_GUESTCTL0
+		ins	k0, zero, MIPS_GUESTCTL0B_GM, 1
+		mtc0	k0, CP0_GUESTCTL0
+		LONG_L	v0, TI_TASK($28)
+		lw	v1, THREAD_MM_ASID(v0)
+		dmtc0	v1, CP0_ENTRYHI
+		LONG_L	v1, TASK_MM(v0)
+		.set	noreorder
+		jal	tlbmiss_handler_setup_pgd_array
+		 LONG_L	a0, MM_PGD(v1)
+		.set	reorder
+		/*
+		 * With KVM_MIPS_VZ, we must not clobber k0/k1
+		 * they were saved before they were used
+		 */
+8:
+		MFC0	k0, CP0_KSCRATCH1
+		MFC0	v1, CP0_KSCRATCH2
+		LONG_S	k0, PT_R26(sp)
+		LONG_S	v1, PT_R27(sp)
+#endif
 #ifdef CONFIG_CPU_CAVIUM_OCTEON
-		.set    mips64
-		pref    0, 0($28)       /* Prefetch the current pointer */
-		pref    0, PT_R31(sp)   /* Prefetch the $31(ra) */
-		/* The Octeon multiplier state is affected by general multiply
-		    instructions. It must be saved before and kernel code might
-		    corrupt it */
-		jal     octeon_mult_save
-		LONG_L  v1, 0($28)  /* Load the current pointer */
-		pref    0, 0(v1)    /* Prefetch the current thread */
+		.set	mips64
+		pref	0, 0($28)	/* Prefetch the current pointer */
+		pref	0, PT_R31(sp)	/* Prefetch the $31(ra) */
 #endif
 		.set	pop
 		.endm
@@ -246,6 +368,10 @@
 		.endm
 
 		.macro	RESTORE_TEMP
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
+		/* Restore the Octeon multiplier state */
+		jal	octeon_mult_restore
+#endif
 #ifdef CONFIG_CPU_HAS_SMARTMIPS
 		LONG_L	$24, PT_ACX(sp)
 		mtlhx	$24
@@ -358,10 +484,6 @@
 		DVPE	5				# dvpe a1
 		jal	mips_ihb
 #endif /* CONFIG_MIPS_MT_SMTC */
-#ifdef CONFIG_CPU_CAVIUM_OCTEON
-		/* Restore the Octeon multiplier state */
-		jal	octeon_mult_restore
-#endif
 		mfc0	a0, CP0_STATUS
 		ori	a0, STATMASK
 		xori	a0, STATMASK
@@ -427,10 +549,54 @@
 		.set	mips0
 #endif /* CONFIG_MIPS_MT_SMTC */
 		LONG_L	v1, PT_EPC(sp)
+		LONG_L	$25, PT_R25(sp)
 		MTC0	v1, CP0_EPC
+#ifdef CONFIG_KVM_MIPS_VZ
+	/*
+	 * Only if TIF_GUESTMODE && sp is the saved KVM sp, return to
+	 * guest mode.
+	 */
+		LONG_L	v0, TI_FLAGS($28)
+		li	k1, _TIF_GUESTMODE
+		and	v0, v0, k1
+		beqz	v0, 8f
+		CPU_ID_MFC0	k0, CPU_ID_REG
+		get_mips_kvm_rootsp
+		PTR_SUBU k1, k1, PT_SIZE
+		bne	k1, sp, 8f
+	/* Set the high order bit of CPU_ID_REG to indicate guest mode. */
+		dli	v0, 1
+		dmfc0	v1, CPU_ID_REG
+		dins	v1, v0, 63, 1
+		dmtc0	v1, CPU_ID_REG
+		/* Must set GuestCtl0[GM] */
+		mfc0	v1, CP0_GUESTCTL0
+		ins	v1, v0, MIPS_GUESTCTL0B_GM, 1
+		mtc0	v1, CP0_GUESTCTL0
+
+		LONG_L	v0, TI_TASK($28)
+		lw	v1, THREAD_GUEST_ASID(v0)
+		dmtc0	v1, CP0_ENTRYHI
+		LONG_L	v1, THREAD_VCPU(v0)
+		LONG_L	v0, KVM_VCPU_ARCH_IMPL(v1)
+		LONG_L	v1, KVM_VCPU_KVM(v1)
+
+		LONG_L	v1, KVM_ARCH_IMPL(v1)
+
+		/* Inject any interrupts that may have been requested. */
+		lbu	v0, KVM_MIPS_VCPU_VZ_INJECTED_IPX(v0)
+		mfc0	k1, CP0_GUESTCTL2
+		ins	k1, v0, 8, 8
+		mtc0	k1, CP0_GUESTCTL2
+
+		.set	noreorder
+		jal	tlbmiss_handler_setup_pgd_array
+		 LONG_L	a0, KVM_MIPS_VZ_PGD(v1)
+		.set	reorder
+8:
+#endif
 		LONG_L	$31, PT_R31(sp)
 		LONG_L	$28, PT_R28(sp)
-		LONG_L	$25, PT_R25(sp)
 #ifdef CONFIG_64BIT
 		LONG_L	$8, PT_R8(sp)
 		LONG_L	$9, PT_R9(sp)
@@ -445,11 +611,14 @@
 		.endm
 
 		.macro	RESTORE_SP_AND_RET
-		LONG_L	sp, PT_R29(sp)
-		.set	mips3
-#ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
+#ifdef CONFIG_KVM_MIPS_VZ
+		LONG_L	k0, PT_R26(sp)
+		LONG_L	k1, PT_R27(sp)
+#elif defined(CONFIG_FAST_ACCESS_TO_THREAD_POINTER)
 		LONG_L	k0, FAST_ACCESS_THREAD_OFFSET($0) /* K0 = thread pointer */
 #endif
+		LONG_L	sp, PT_R29(sp)
+		.set	mips3
 		eret
 		.set	mips0
 		.endm

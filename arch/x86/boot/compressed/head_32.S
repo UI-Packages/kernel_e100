@@ -35,13 +35,25 @@ ENTRY(startup_32)
 #ifdef CONFIG_EFI_STUB
 	jmp	preferred_addr
 
-	.balign	0x10
 	/*
 	 * We don't need the return address, so set up the stack so
-	 * efi_main() can find its arugments.
+	 * efi_main() can find its arguments.
 	 */
+ENTRY(efi_pe_entry)
 	add	$0x4, %esp
 
+	call	make_boot_params
+	cmpl	$0, %eax
+	je	1f
+	movl	0x4(%esp), %esi
+	movl	(%esp), %ecx
+	pushl	%eax
+	pushl	%esi
+	pushl	%ecx
+	sub	$0x4, %esp
+
+ENTRY(efi_stub_entry)
+	add	$0x4, %esp
 	call	efi_main
 	cmpl	$0, %eax
 	movl	%eax, %esi
@@ -106,7 +118,7 @@ preferred_addr:
 	notl	%eax
 	andl    %eax, %ebx
 #else
-	movl	$LOAD_PHYSICAL_ADDR, %ebx
+	movl	$____LOAD_PHYSICAL_ADDR, %ebx
 #endif
 
 	/* Target address to relocate to for decompression */
@@ -192,7 +204,7 @@ relocated:
  * and where it was actually loaded.
  */
 	movl	%ebp, %ebx
-	subl	$LOAD_PHYSICAL_ADDR, %ebx
+	subl	$____LOAD_PHYSICAL_ADDR, %ebx
 	jz	2f	/* Nothing to be done if loaded at compiled addr. */
 /*
  * Process relocations.
@@ -200,8 +212,7 @@ relocated:
 
 1:	subl	$4, %edi
 	movl	(%edi), %ecx
-	testl	%ecx, %ecx
-	jz	2f
+	jecxz	2f
 	addl	%ebx, -__PAGE_OFFSET(%ebx, %ecx)
 	jmp	1b
 2:

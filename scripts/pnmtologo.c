@@ -74,6 +74,7 @@ static unsigned int logo_height;
 static struct color **logo_data;
 static struct color logo_clut[MAX_LINUX_LOGO_COLORS];
 static unsigned int logo_clutsize;
+static int is_plain_pbm = 0;
 
 static void die(const char *fmt, ...)
     __attribute__ ((noreturn)) __attribute ((format (printf, 1, 2)));
@@ -103,6 +104,11 @@ static unsigned int get_number(FILE *fp)
     val = 0;
     while (isdigit(c)) {
 	val = 10*val+c-'0';
+	/* some PBM are 'broken'; GiMP for example exports a PBM without space
+	 * between the digits. This is Ok cause we know a PBM can only have a '1'
+	 * or a '0' for the digit. */
+	if (is_plain_pbm)
+		break;
 	c = fgetc(fp);
 	if (c == EOF)
 	    die("%s: end of file\n", filename);
@@ -167,6 +173,7 @@ static void read_image(void)
     switch (magic) {
 	case '1':
 	    /* Plain PBM */
+	    is_plain_pbm = 1;
 	    for (i = 0; i < logo_height; i++)
 		for (j = 0; j < logo_width; j++)
 		    logo_data[i][j].red = logo_data[i][j].green =
@@ -237,14 +244,14 @@ static void write_header(void)
     fprintf(out, " *  Linux logo %s\n", logoname);
     fputs(" */\n\n", out);
     fputs("#include <linux/linux_logo.h>\n\n", out);
-    fprintf(out, "static unsigned char %s_data[] __initdata = {\n",
+    fprintf(out, "static unsigned char %s_data[] = {\n",
 	    logoname);
 }
 
 static void write_footer(void)
 {
     fputs("\n};\n\n", out);
-    fprintf(out, "const struct linux_logo %s __initconst = {\n", logoname);
+    fprintf(out, "const struct linux_logo %s = {\n", logoname);
     fprintf(out, "\t.type\t\t= %s,\n", logo_types[logo_type]);
     fprintf(out, "\t.width\t\t= %d,\n", logo_width);
     fprintf(out, "\t.height\t\t= %d,\n", logo_height);
@@ -374,7 +381,7 @@ static void write_logo_clut224(void)
     fputs("\n};\n\n", out);
 
     /* write logo clut */
-    fprintf(out, "static unsigned char %s_clut[] __initdata = {\n",
+    fprintf(out, "static unsigned char %s_clut[] = {\n",
 	    logoname);
     write_hex_cnt = 0;
     for (i = 0; i < logo_clutsize; i++) {

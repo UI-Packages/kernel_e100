@@ -27,6 +27,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
+#include <linux/skbuff.h>
 #include <linux/init.h>
 #include <linux/etherdevice.h>
 #include <linux/ip.h>
@@ -49,7 +50,9 @@
 
 #include <asm/octeon/cvmx-gmxx-defs.h>
 
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
 #include "ipfwd_config.h"
+#endif
 
 /*
  * You can define GET_SKBUFF_QOS() to override how the skbuff output
@@ -59,14 +62,13 @@
  * GET_SKBUFF_QOS as: #define GET_SKBUFF_QOS(skb) ((skb)->priority)
  */
 #ifndef GET_SKBUFF_QOS
-#ifdef IPFWD_OUTPUT_QOS
+#if CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD && IPFWD_OUTPUT_QOS
 #define GET_SKBUFF_QOS(skb) ((skb)->cvm_info.qos_level)
 #else
 #define GET_SKBUFF_QOS(skb) 0
 #endif
 #endif
 
-#if REUSE_SKBUFFS_WITHOUT_FREE
 static bool cvm_oct_skb_ok_for_reuse(struct sk_buff *skb)
 {
 	unsigned char *fpa_head = cvm_oct_get_fpa_head(skb);
@@ -88,17 +90,30 @@ static bool cvm_oct_skb_ok_for_reuse(struct sk_buff *skb)
 	return true;
 }
 
+static void skb_recycle(struct sk_buff *skb)
+{
+	struct skb_shared_info *shinfo;
+
+	skb_release_head_state(skb);
+
+	shinfo = skb_shinfo(skb);
+	memset(shinfo, 0, offsetof(struct skb_shared_info, dataref));
+	atomic_set(&shinfo->dataref, 1);
+
+	memset(skb, 0, offsetof(struct sk_buff, tail));
+	skb->data = skb->head + NET_SKB_PAD;
+	skb_reset_tail_pointer(skb);
+}
+
 static void cvm_oct_skb_prepare_for_reuse(struct sk_buff *skb)
 {
-	int r;
 	unsigned char *fpa_head = cvm_oct_get_fpa_head(skb);
 
 	skb->data_len = 0;
 	skb_frag_list_init(skb);
 
 	/* The check also resets all the fields. */
-	r = skb_recycle_check(skb, FPA_PACKET_POOL_SIZE);
-	WARN(!r, "SKB recycle logic fail\n");
+	skb_recycle(skb);
 
 	*(struct sk_buff **)(fpa_head - sizeof(void *)) = skb;
 	skb->truesize = sizeof(*skb) + skb_end_pointer(skb) - skb->head;
@@ -111,23 +126,6 @@ static inline void cvm_oct_set_back(struct sk_buff *skb,
 
 	hw_buffer->s.back = ((unsigned long)skb->data >> 7) - ((unsigned long)fpa_head >> 7);
 }
-#else
-static bool cvm_oct_skb_ok_for_reuse(struct sk_buff *skb)
-{
-	return false;
-}
-static void cvm_oct_skb_prepare_for_reuse(struct sk_buff *skb)
-{
-	/* Do nothing */
-}
-
-static inline void cvm_oct_set_back(struct sk_buff *skb,
-				    union cvmx_buf_ptr *hw_buffer)
-{
-	/* Do nothing. */
-}
-
-#endif
 
 #define CVM_OCT_LOCKLESS 1
 #include "ethernet-xmit.c"
@@ -208,7 +206,11 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 
 	/* Build the PKO command */
 	pko_command.u64 = 0;
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
 	pko_command.s.n2 = 0; /* pollute L2 with the outgoing packet */
+#else 
+	pko_command.s.n2 = 1; /* Don't pollute L2 with the outgoing packet */
+#endif
 	pko_command.s.dontfree = !do_free;
 	pko_command.s.segs = work->word2.s.bufs;
 	pko_command.s.total_bytes = work->word1.len;
@@ -217,7 +219,11 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 	if (unlikely(work->word2.s.not_IP || work->word2.s.IP_exc))
 		pko_command.s.ipoffp1 = 0;
 	else
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
 		pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1 + cvmx_wqe_get_unused8(work);
+#else
+		pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1;
+#endif
 
 	/* Send the packet to the output queue */
 	if (unlikely(cvmx_pko_send_packet_finish_pkoid(priv->pko_port, priv->tx_queue[qos].queue, pko_command, hw_buffer, lock_type))) {
@@ -237,7 +243,7 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 	return dropped;
 }
 EXPORT_SYMBOL(cvm_oct_transmit_qos);
-
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
 /**
  * cvm_oct_transmit_qos_not_free - transmit a work queue entry out of the ethernet port.
  *
@@ -318,7 +324,11 @@ int cvm_oct_transmit_qos_not_free(struct net_device *dev,
 	pko_command.s.size0 = CVMX_FAU_OP_SIZE_32;
 	pko_command.s.subone0 = 1;
 
-	pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1 + cvmx_wqe_get_unused8(work);
+	/* Check if we can use the hardware checksumming */
+	if (unlikely(work->word2.s.not_IP || work->word2.s.IP_exc))
+		pko_command.s.ipoffp1 = 0;
+	else
+		pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1 + cvmx_wqe_get_unused8(work);
 		
 	rcv_work = cvmx_fpa_alloc(wqe_pool);
 	if (unlikely(!work)) {
@@ -370,3 +380,4 @@ skip_xmit:
 	return dropped;
 }
 EXPORT_SYMBOL(cvm_oct_transmit_qos_not_free);
+#endif

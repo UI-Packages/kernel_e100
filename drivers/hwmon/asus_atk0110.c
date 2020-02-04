@@ -14,6 +14,8 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/dmi.h>
+#include <linux/jiffies.h>
+#include <linux/err.h>
 
 #include <acpi/acpi.h>
 #include <acpi/acpixf.h>
@@ -150,10 +152,10 @@ MODULE_DEVICE_TABLE(acpi, atk_ids);
 struct atk_sensor_data {
 	struct list_head list;
 	struct atk_data *data;
-	struct device_attribute label_attr;
-	struct device_attribute input_attr;
-	struct device_attribute limit1_attr;
-	struct device_attribute limit2_attr;
+	device_attribute_no_const label_attr;
+	device_attribute_no_const input_attr;
+	device_attribute_no_const limit1_attr;
+	device_attribute_no_const limit2_attr;
 	char label_attr_name[ATTR_NAME_SIZE];
 	char input_attr_name[ATTR_NAME_SIZE];
 	char limit1_attr_name[ATTR_NAME_SIZE];
@@ -188,7 +190,7 @@ struct atk_acpi_input_buf {
 };
 
 static int atk_add(struct acpi_device *device);
-static int atk_remove(struct acpi_device *device, int type);
+static int atk_remove(struct acpi_device *device);
 static void atk_print_sensor(struct atk_data *data, union acpi_object *obj);
 static int atk_read_value(struct atk_sensor_data *sensor, u64 *value);
 static void atk_free_sensors(struct atk_data *data);
@@ -273,7 +275,7 @@ static ssize_t atk_name_show(struct device *dev,
 static struct device_attribute atk_name_attr =
 		__ATTR(name, 0444, atk_name_show, NULL);
 
-static void atk_init_attribute(struct device_attribute *attr, char *name,
+static void atk_init_attribute(device_attribute_no_const *attr, char *name,
 		sysfs_show_func show)
 {
 	sysfs_attr_init(&attr->attr);
@@ -962,7 +964,6 @@ static int atk_add_sensor(struct atk_data *data, union acpi_object *obj)
 
 	return 1;
 out:
-	kfree(sensor->acpi_name);
 	kfree(sensor);
 	return err;
 }
@@ -1415,7 +1416,7 @@ out:
 	return err;
 }
 
-static int atk_remove(struct acpi_device *device, int type)
+static int atk_remove(struct acpi_device *device)
 {
 	struct atk_data *data = device->driver_data;
 	dev_dbg(&device->dev, "removing...\n");

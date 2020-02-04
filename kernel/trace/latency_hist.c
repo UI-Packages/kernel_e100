@@ -20,6 +20,7 @@
 #include <linux/kallsyms.h>
 #include <linux/uaccess.h>
 #include <linux/sched.h>
+#include <linux/sched/rt.h>
 #include <linux/slab.h>
 #include <asm/atomic.h>
 #include <asm/div64.h>

@@ -77,7 +77,8 @@ typedef struct {
 	int action;
 } sctp_sm_command_t;
 
-typedef sctp_disposition_t (sctp_state_fn_t) (const struct sctp_endpoint *,
+typedef sctp_disposition_t (sctp_state_fn_t) (struct net *,
+					      const struct sctp_endpoint *,
 					      const struct sctp_association *,
 					      const sctp_subtype_t type,
 					      void *arg,
@@ -86,7 +87,7 @@ typedef void (sctp_timer_event_t) (unsigned long);
 typedef struct {
 	sctp_state_fn_t *fn;
 	const char *name;
-} sctp_sm_table_entry_t;
+} __do_const sctp_sm_table_entry_t;
 
 /* A naming convention of "sctp_sf_xxx" applies to all the state functions
  * currently in use.
@@ -178,7 +179,8 @@ sctp_state_fn_t sctp_sf_autoclose_timer_expire;
 
 /* Prototypes for utility support functions.  */
 __u8 sctp_get_chunk_type(struct sctp_chunk *chunk);
-const sctp_sm_table_entry_t *sctp_sm_lookup_event(sctp_event_t,
+const sctp_sm_table_entry_t *sctp_sm_lookup_event(struct net *,
+					    sctp_event_t,
 					    sctp_state_t,
 					    sctp_subtype_t);
 int sctp_chunk_iif(const struct sctp_chunk *);
@@ -232,6 +234,8 @@ struct sctp_chunk *sctp_make_abort_violation(const struct sctp_association *,
 struct sctp_chunk *sctp_make_violation_paramlen(const struct sctp_association *,
 				   const struct sctp_chunk *,
 				   struct sctp_paramhdr *);
+struct sctp_chunk *sctp_make_violation_max_retrans(const struct sctp_association *,
+						   const struct sctp_chunk *);
 struct sctp_chunk *sctp_make_heartbeat(const struct sctp_association *,
 				  const struct sctp_transport *);
 struct sctp_chunk *sctp_make_heartbeat_ack(const struct sctp_association *,
@@ -268,7 +272,7 @@ void sctp_chunk_assign_ssn(struct sctp_chunk *);
 
 /* Prototypes for statetable processing. */
 
-int sctp_do_sm(sctp_event_t event_type, sctp_subtype_t subtype,
+int sctp_do_sm(struct net *net, sctp_event_t event_type, sctp_subtype_t subtype,
 	       sctp_state_t state,
                struct sctp_endpoint *,
                struct sctp_association *asoc,
@@ -295,7 +299,7 @@ __u32 sctp_generate_tag(const struct sctp_endpoint *);
 __u32 sctp_generate_tsn(const struct sctp_endpoint *);
 
 /* Extern declarations for major data structures.  */
-extern sctp_timer_event_t *sctp_timer_events[SCTP_NUM_TIMEOUT_TYPES];
+extern sctp_timer_event_t * const sctp_timer_events[SCTP_NUM_TIMEOUT_TYPES];
 
 
 /* Get the size of a DATA chunk payload. */

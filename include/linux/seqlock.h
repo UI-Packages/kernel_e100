@@ -224,7 +224,7 @@ static inline unsigned read_seqbegin(seqlock_t *sl)
 	unsigned ret;
 
 repeat:
-	ret = sl->seqcount.sequence;
+	ret = ACCESS_ONCE(sl->seqcount.sequence);
 	if (unlikely(ret & 1)) {
 		/*
 		 * Take the lock and let the writer proceed (i.e. evtl

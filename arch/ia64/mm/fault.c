@@ -72,6 +72,27 @@ mapped_kernel_page_is_present (unsigned long address)
 	return pte_present(pte);
 }
 
+#ifdef CONFIG_PAX_PAGEEXEC
+void pax_report_insns(struct pt_regs *regs, void *pc, void *sp)
+{
+	unsigned long i;
+
+	printk(KERN_ERR "PAX: bytes at PC: ");
+	for (i = 0; i < 8; i++) {
+		unsigned int c;
+		if (get_user(c, (unsigned int *)pc+i))
+			printk(KERN_CONT "???????? ");
+		else
+			printk(KERN_CONT "%08x ", c);
+	}
+	printk("\n");
+}
+#endif
+
+#	define VM_READ_BIT	0
+#	define VM_WRITE_BIT	1
+#	define VM_EXEC_BIT	2
+
 void __kprobes
 ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *regs)
 {
@@ -81,6 +102,12 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	struct siginfo si;
 	unsigned long mask;
 	int fault;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+
+	mask = ((((isr >> IA64_ISR_X_BIT) & 1UL) << VM_EXEC_BIT)
+		| (((isr >> IA64_ISR_W_BIT) & 1UL) << VM_WRITE_BIT));
+
+	flags |= ((mask & VM_WRITE) ? FAULT_FLAG_WRITE : 0);
 
 	/* mmap_sem is performance critical.... */
 	prefetchw(&mm->mmap_sem);
@@ -109,6 +136,7 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	if (notify_page_fault(regs, TRAP_BRKPT))
 		return;
 
+retry:
 	down_read(&mm->mmap_sem);
 
 	vma = find_vma_prev(mm, address, &prev_vma);
@@ -130,10 +158,6 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 
 	/* OK, we've got a good vm_area for this memory area.  Check the access permissions: */
 
-#	define VM_READ_BIT	0
-#	define VM_WRITE_BIT	1
-#	define VM_EXEC_BIT	2
-
 #	if (((1 << VM_READ_BIT) != VM_READ || (1 << VM_WRITE_BIT) != VM_WRITE) \
 	    || (1 << VM_EXEC_BIT) != VM_EXEC)
 #		error File is out of sync with <linux/mm.h>.  Please update.
@@ -142,18 +166,32 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	if (((isr >> IA64_ISR_R_BIT) & 1UL) && (!(vma->vm_flags & (VM_READ | VM_WRITE))))
 		goto bad_area;
 
-	mask = (  (((isr >> IA64_ISR_X_BIT) & 1UL) << VM_EXEC_BIT)
-		| (((isr >> IA64_ISR_W_BIT) & 1UL) << VM_WRITE_BIT));
+	if ((vma->vm_flags & mask) != mask) {
 
-	if ((vma->vm_flags & mask) != mask)
+#ifdef CONFIG_PAX_PAGEEXEC
+		if (!(vma->vm_flags & VM_EXEC) && (mask & VM_EXEC)) {
+			if (!(mm->pax_flags & MF_PAX_PAGEEXEC) || address != regs->cr_iip)
+				goto bad_area;
+
+			up_read(&mm->mmap_sem);
+			pax_report_fault(regs, (void *)regs->cr_iip, (void *)regs->r12);
+			do_group_exit(SIGKILL);
+		}
+#endif
+
 		goto bad_area;
+	}
 
 	/*
 	 * If for any reason at all we couldn't handle the fault, make
 	 * sure we exit gracefully rather than endlessly redo the
 	 * fault.
 	 */
-	fault = handle_mm_fault(mm, vma, address, (mask & VM_WRITE) ? FAULT_FLAG_WRITE : 0);
+	fault = handle_mm_fault(mm, vma, address, flags);
+
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+		return;
+
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		/*
 		 * We ran out of memory, or some other thing happened
@@ -168,10 +206,25 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		}
 		BUG();
 	}
-	if (fault & VM_FAULT_MAJOR)
-		current->maj_flt++;
-	else
-		current->min_flt++;
+
+	if (flags & FAULT_FLAG_ALLOW_RETRY) {
+		if (fault & VM_FAULT_MAJOR)
+			current->maj_flt++;
+		else
+			current->min_flt++;
+		if (fault & VM_FAULT_RETRY) {
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			flags |= FAULT_FLAG_TRIED;
+
+			 /* No need to up_read(&mm->mmap_sem) as we would
+			 * have already released it in __lock_page_or_retry
+			 * in mm/filemap.c.
+			 */
+
+			goto retry;
+		}
+	}
+
 	up_read(&mm->mmap_sem);
 	return;
 

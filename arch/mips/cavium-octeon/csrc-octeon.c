@@ -16,7 +16,9 @@
 
 #include <asm/octeon/octeon.h>
 #include <asm/octeon/cvmx-ipd-defs.h>
+#include <asm/octeon/cvmx-fpa-defs.h>
 #include <asm/octeon/cvmx-mio-defs.h>
+#include <asm/octeon/cvmx-rst-defs.h>
 
 
 static u64 f;
@@ -42,6 +44,12 @@ void __init octeon_setup_delays(void)
 		rdiv = rst_boot.s.c_mul;	/* CPU clock */
 		sdiv = rst_boot.s.pnr_mul;	/* I/O clock */
 		f = (0x8000000000000000ull / sdiv) * 2;
+	} else if (current_cpu_type() == CPU_CAVIUM_OCTEON3) {
+		union cvmx_rst_boot rst_boot;
+		rst_boot.u64 = cvmx_read_csr(CVMX_RST_BOOT);
+		rdiv = rst_boot.s.c_mul;	/* CPU clock */
+		sdiv = rst_boot.s.pnr_mul;	/* I/O clock */
+		f = (0x8000000000000000ull / sdiv) * 2;
 	}
 }
 
@@ -55,8 +63,12 @@ void __init octeon_setup_delays(void)
  */
 void octeon_init_cvmcount(void)
 {
+	u64 clk_reg;
 	unsigned long flags;
 	unsigned loops = 2;
+	bool has_fpa_clk_cnt = current_cpu_type() == CPU_CAVIUM_OCTEON3 && !OCTEON_IS_MODEL(OCTEON_CN70XX);
+
+	clk_reg = has_fpa_clk_cnt ? CVMX_FPA_CLK_COUNT : CVMX_IPD_CLK_COUNT;
 
 	/* Clobber loops so GCC will not unroll the following while loop. */
 	asm("" : "+r" (loops));
@@ -67,18 +79,24 @@ void octeon_init_cvmcount(void)
 	 * which should give more deterministic timing.
 	 */
 	while (loops--) {
-		u64 ipd_clk_count = cvmx_read_csr(CVMX_IPD_CLK_COUNT);
+		u64 clk_count = cvmx_read_csr(clk_reg);
 		if (rdiv != 0) {
-			ipd_clk_count *= rdiv;
+			clk_count *= rdiv;
 			if (f != 0) {
 				asm("dmultu\t%[cnt],%[f]\n\t"
 				    "mfhi\t%[cnt]"
-				    : [cnt] "+r" (ipd_clk_count)
+				    : [cnt] "+r" (clk_count)
 				    : [f] "r" (f)
 				    : "hi", "lo");
 			}
 		}
-		write_c0_cvmcount(ipd_clk_count);
+		write_c0_cvmcount(clk_count);
+		/*
+		 * cn70XX-P1 core-19049 requires synchronized Count for
+		 * KVM guest timers to report with required GTOffset
+		 * of 0.
+		 */
+		write_c0_count((u32)clk_count);
 	}
 	local_irq_restore(flags);
 }
@@ -125,7 +143,7 @@ void __init plat_time_init(void)
 	clocksource_register_hz(&clocksource_mips, octeon_get_clock_rate());
 }
 
-void __udelay(unsigned int us)
+void __udelay(unsigned long us)
 {
 	u64 cur, end, inc;
 
@@ -139,7 +157,7 @@ void __udelay(unsigned int us)
 }
 EXPORT_SYMBOL(__udelay);
 
-void __ndelay(unsigned int ns)
+void __ndelay(unsigned long ns)
 {
 	u64 cur, end, inc;
 
@@ -153,7 +171,7 @@ void __ndelay(unsigned int ns)
 }
 EXPORT_SYMBOL(__ndelay);
 
-void __delay(unsigned int loops)
+void __delay(unsigned long loops)
 {
 	u64 cur, end;
 

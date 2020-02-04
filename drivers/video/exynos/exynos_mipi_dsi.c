@@ -32,10 +32,10 @@
 #include <linux/notifier.h>
 #include <linux/regulator/consumer.h>
 #include <linux/pm_runtime.h>
+#include <linux/err.h>
+#include <linux/lcd.h>
 
 #include <video/exynos_mipi_dsim.h>
-
-#include <plat/fb.h>
 
 #include "exynos_mipi_dsi_common.h"
 #include "exynos_mipi_dsi_lowlevel.h"
@@ -43,6 +43,8 @@
 struct mipi_dsim_ddi {
 	int				bus_id;
 	struct list_head		list;
+	struct device_node		*ofnode_dsim_lcd_dev;
+	struct device_node		*ofnode_dsim_dphy;
 	struct mipi_dsim_lcd_device	*dsim_lcd_dev;
 	struct mipi_dsim_lcd_driver	*dsim_lcd_drv;
 };
@@ -58,7 +60,7 @@ static struct mipi_dsim_platform_data *to_dsim_plat(struct platform_device
 }
 
 static struct regulator_bulk_data supplies[] = {
-	{ .supply = "vdd10", },
+	{ .supply = "vdd11", },
 	{ .supply = "vdd18", },
 };
 
@@ -102,9 +104,11 @@ static void exynos_mipi_update_cfg(struct mipi_dsim_device *dsim)
 	/* set display timing. */
 	exynos_mipi_dsi_set_display_mode(dsim, dsim->dsim_config);
 
+	exynos_mipi_dsi_init_interrupt(dsim);
+
 	/*
 	 * data from Display controller(FIMD) is transferred in video mode
-	 * but in case of command mode, all settigs is updated to registers.
+	 * but in case of command mode, all settings are updated to registers.
 	 */
 	exynos_mipi_dsi_stand_by(dsim, 1);
 }
@@ -152,7 +156,7 @@ static int exynos_mipi_dsi_blank_mode(struct mipi_dsim_device *dsim, int power)
 		if (client_drv && client_drv->power_on)
 			client_drv->power_on(client_dev, 1);
 
-		exynos_mipi_regulator_disable(dsim);
+		exynos_mipi_regulator_enable(dsim);
 
 		/* enable MIPI-DSI PHY. */
 		if (dsim->pd->phy_enable)
@@ -179,6 +183,37 @@ static int exynos_mipi_dsi_blank_mode(struct mipi_dsim_device *dsim, int power)
 	return 0;
 }
 
+struct mipi_dsim_ddi *exynos_mipi_dsi_find_lcd_driver(
+			struct mipi_dsim_lcd_device *lcd_dev)
+{
+	struct mipi_dsim_ddi *dsim_ddi, *next;
+	struct mipi_dsim_lcd_driver *lcd_drv;
+
+	mutex_lock(&mipi_dsim_lock);
+
+	list_for_each_entry_safe(dsim_ddi, next, &dsim_ddi_list, list) {
+		if (!dsim_ddi)
+			goto out;
+
+		lcd_drv = dsim_ddi->dsim_lcd_drv;
+		if (!lcd_drv)
+			continue;
+
+		if ((strcmp(lcd_dev->name, lcd_drv->name)) == 0) {
+
+			mutex_unlock(&mipi_dsim_lock);
+			return dsim_ddi;
+		}
+
+		list_del(&dsim_ddi->list);
+		kfree(dsim_ddi);
+	}
+
+out:
+	mutex_unlock(&mipi_dsim_lock);
+	return NULL;
+}
+
 int exynos_mipi_dsi_register_lcd_device(struct mipi_dsim_lcd_device *lcd_dev)
 {
 	struct mipi_dsim_ddi *dsim_ddi;
@@ -188,22 +223,26 @@ int exynos_mipi_dsi_register_lcd_device(struct mipi_dsim_lcd_device *lcd_dev)
 		return -EFAULT;
 	}
 
-	dsim_ddi = kzalloc(sizeof(struct mipi_dsim_ddi), GFP_KERNEL);
+	dsim_ddi = exynos_mipi_dsi_find_lcd_driver(lcd_dev);
 	if (!dsim_ddi) {
-		pr_err("failed to allocate dsim_ddi object.\n");
-		return -ENOMEM;
+		dsim_ddi = kzalloc(sizeof(struct mipi_dsim_ddi), GFP_KERNEL);
+		if (!dsim_ddi) {
+			pr_err("failed to allocate dsim_ddi object.\n");
+			return -ENOMEM;
+		}
+		mutex_lock(&mipi_dsim_lock);
+		list_add_tail(&dsim_ddi->list, &dsim_ddi_list);
+		mutex_unlock(&mipi_dsim_lock);
 	}
 
 	dsim_ddi->dsim_lcd_dev = lcd_dev;
-
-	mutex_lock(&mipi_dsim_lock);
-	list_add_tail(&dsim_ddi->list, &dsim_ddi_list);
-	mutex_unlock(&mipi_dsim_lock);
+	dsim_ddi->bus_id = lcd_dev->bus_id;
 
 	return 0;
 }
 
-struct mipi_dsim_ddi *exynos_mipi_dsi_find_lcd_device(struct mipi_dsim_lcd_driver *lcd_drv)
+static struct mipi_dsim_ddi *exynos_mipi_dsi_find_lcd_device(
+					struct mipi_dsim_lcd_driver *lcd_drv)
 {
 	struct mipi_dsim_ddi *dsim_ddi, *next;
 	struct mipi_dsim_lcd_device *lcd_dev;
@@ -250,11 +289,26 @@ int exynos_mipi_dsi_register_lcd_driver(struct mipi_dsim_lcd_driver *lcd_drv)
 
 	dsim_ddi = exynos_mipi_dsi_find_lcd_device(lcd_drv);
 	if (!dsim_ddi) {
-		pr_err("mipi_dsim_ddi object not found.\n");
-		return -EFAULT;
-	}
+		/*
+		 * If driver specific device is not registered then create a
+		 * dsim_ddi object, fill the driver information and add to the
+		 * end of the dsim_ddi_list list
+		 */
+		dsim_ddi = kzalloc(sizeof(struct mipi_dsim_ddi), GFP_KERNEL);
+		if (!dsim_ddi) {
+			pr_err("failed to allocate dsim_ddi object.\n");
+			return -ENOMEM;
+		}
 
-	dsim_ddi->dsim_lcd_drv = lcd_drv;
+		dsim_ddi->dsim_lcd_drv = lcd_drv;
+
+		mutex_lock(&mipi_dsim_lock);
+		list_add_tail(&dsim_ddi->list, &dsim_ddi_list);
+		mutex_unlock(&mipi_dsim_lock);
+
+	} else {
+		dsim_ddi->dsim_lcd_drv = lcd_drv;
+	}
 
 	pr_info("registered panel driver(%s) to mipi-dsi driver.\n",
 		lcd_drv->name);
@@ -263,7 +317,8 @@ int exynos_mipi_dsi_register_lcd_driver(struct mipi_dsim_lcd_driver *lcd_drv)
 
 }
 
-struct mipi_dsim_ddi *exynos_mipi_dsi_bind_lcd_ddi(struct mipi_dsim_device *dsim,
+static struct mipi_dsim_ddi *exynos_mipi_dsi_bind_lcd_ddi(
+						struct mipi_dsim_device *dsim,
 						const char *name)
 {
 	struct mipi_dsim_ddi *dsim_ddi, *next;
@@ -325,6 +380,414 @@ static struct mipi_dsim_master_ops master_ops = {
 	.set_blank_mode			= exynos_mipi_dsi_blank_mode,
 };
 
+struct device_node *exynos_mipi_find_ofnode_dsim_phy(
+				struct platform_device *pdev)
+{
+	struct device_node *dn, *dn_dphy;
+	const __be32 *prop;
+
+	dn = pdev->dev.of_node;
+	prop = of_get_property(dn, "mipi-phy", NULL);
+	if (NULL == prop) {
+		dev_err(&pdev->dev, "Could not find property mipi-phy\n");
+		return NULL;
+	}
+
+	dn_dphy = of_find_node_by_phandle(be32_to_cpup(prop));
+	if (NULL == dn_dphy) {
+		dev_err(&pdev->dev, "Could not find node\n");
+		return NULL;
+	}
+
+	return dn_dphy;
+}
+
+struct device_node *exynos_mipi_find_ofnode_lcd_device(
+			struct platform_device *pdev)
+{
+	struct device_node *dn, *dn_lcd_panel;
+	const __be32 *prop;
+
+	dn = pdev->dev.of_node;
+	prop = of_get_property(dn, "mipi-lcd", NULL);
+	if (NULL == prop) {
+		dev_err(&pdev->dev, "could not find property mipi-lcd\n");
+		return NULL;
+	}
+
+	dn_lcd_panel = of_find_node_by_phandle(be32_to_cpup(prop));
+	if (NULL == dn_lcd_panel) {
+		dev_err(&pdev->dev, "could not find node\n");
+		return NULL;
+	}
+
+	return dn_lcd_panel;
+}
+
+static void exynos_mipi_dsim_enable_d_phy_type1(
+			struct platform_device *pdev,
+			bool enable)
+{
+	struct mipi_dsim_device *dsim = (struct mipi_dsim_device *)
+					platform_get_drvdata(pdev);
+	struct mipi_dsim_phy_config_type1 *dphy_cfg_type1 =
+					&dsim->dsim_phy_config->phy_cfg_type1;
+	u32 reg_enable;
+
+	reg_enable = __raw_readl(dphy_cfg_type1->reg_enable_dphy);
+	reg_enable &= ~(dphy_cfg_type1->ctrlbit_enable_dphy);
+
+	if (enable)
+		reg_enable |= dphy_cfg_type1->ctrlbit_enable_dphy;
+
+	__raw_writel(reg_enable, dphy_cfg_type1->reg_enable_dphy);
+}
+
+static void exynos_mipi_dsim_reset_type1(
+			struct platform_device *pdev,
+			bool enable)
+{
+	struct mipi_dsim_device *dsim = (struct mipi_dsim_device *)
+					platform_get_drvdata(pdev);
+	struct mipi_dsim_phy_config_type1 *dphy_cfg_type1 =
+					&dsim->dsim_phy_config->phy_cfg_type1;
+	u32 reg_reset;
+
+	reg_reset = __raw_readl(dphy_cfg_type1->reg_reset_dsim);
+	reg_reset &= ~(dphy_cfg_type1->ctrlbit_reset_dsim);
+
+	if (enable)
+		reg_reset |= dphy_cfg_type1->ctrlbit_reset_dsim;
+
+	__raw_writel(reg_reset, dphy_cfg_type1->reg_reset_dsim);
+}
+
+static int exynos_mipi_dsim_phy_init_type1(
+			struct platform_device *pdev,
+			bool on_off)
+{
+	exynos_mipi_dsim_enable_d_phy_type1(pdev, on_off);
+	exynos_mipi_dsim_reset_type1(pdev, on_off);
+	return 0;
+}
+
+static int exynos_mipi_parse_ofnode_dsim_phy_type1(
+		struct platform_device *pdev,
+		struct mipi_dsim_phy_config_type1 *dphy_cfg_type1,
+		struct device_node *np)
+{
+	struct mipi_dsim_device *dsim = (struct mipi_dsim_device *)
+					platform_get_drvdata(pdev);
+	u32 paddr_phy_enable, paddr_dsim_reset;
+
+	if (of_property_read_u32(np, "reg_enable_dphy", &paddr_phy_enable))
+		return -EINVAL;
+
+	dphy_cfg_type1->reg_enable_dphy = ioremap(paddr_phy_enable, SZ_4);
+	if (!dphy_cfg_type1->reg_enable_dphy)
+		return -EINVAL;
+
+	if (of_property_read_u32(np, "reg_reset_dsim", &paddr_dsim_reset))
+		return -EINVAL;
+
+	dphy_cfg_type1->reg_reset_dsim = ioremap(paddr_dsim_reset, SZ_4);
+	if (!dphy_cfg_type1->reg_reset_dsim)
+		goto err_ioremap_01;
+
+	if (of_property_read_u32(np, "mask_enable_dphy",
+					&dphy_cfg_type1->ctrlbit_enable_dphy))
+		goto err_ioremap_02;
+
+	if (of_property_read_u32(np, "mask_reset_dsim",
+					&dphy_cfg_type1->ctrlbit_reset_dsim))
+		goto err_ioremap_02;
+
+	dsim->pd->phy_enable = exynos_mipi_dsim_phy_init_type1;
+
+	return 0;
+
+err_ioremap_02:
+	iounmap(dphy_cfg_type1->reg_reset_dsim);
+
+err_ioremap_01:
+	iounmap(dphy_cfg_type1->reg_enable_dphy);
+	return -EINVAL;
+}
+
+static struct mipi_dsim_phy_config *exynos_mipi_parse_ofnode_dsim_phy(
+		struct platform_device *pdev,
+		struct device_node *np)
+{
+	struct mipi_dsim_phy_config *mipi_dphy_config;
+	const char *compatible;
+
+	mipi_dphy_config = devm_kzalloc(&pdev->dev,
+			sizeof(struct mipi_dsim_phy_config), GFP_KERNEL);
+	if (!mipi_dphy_config) {
+		dev_err(&pdev->dev,
+			"failed to allocate mipi_dsim_phy_config object.\n");
+		return NULL;
+	}
+
+	if (of_property_read_string(np, "compatible", &compatible)) {
+		dev_err(&pdev->dev, "compatible property not found");
+		return NULL;
+	}
+
+	if (!strcmp(compatible, "samsung-exynos,mipi-phy-type1"))
+		mipi_dphy_config->type = MIPI_DSIM_PHY_CONFIG_TYPE1;
+	else
+		mipi_dphy_config->type = -1;
+
+	switch (mipi_dphy_config->type) {
+	case MIPI_DSIM_PHY_CONFIG_TYPE1:
+		if (exynos_mipi_parse_ofnode_dsim_phy_type1(
+			pdev, &mipi_dphy_config->phy_cfg_type1, np))
+			return NULL;
+		break;
+	default:
+		dev_err(&pdev->dev, "mipi phy - unknown type");
+		return NULL;
+	}
+
+	return mipi_dphy_config;
+}
+
+static struct mipi_dsim_lcd_device *exynos_mipi_parse_ofnode_lcd(
+		struct platform_device *pdev, struct device_node *np)
+{
+	struct mipi_dsim_lcd_device *active_mipi_dsim_lcd_device;
+	struct lcd_platform_data *active_lcd_platform_data;
+	const char *lcd_name;
+
+	active_mipi_dsim_lcd_device = devm_kzalloc(&pdev->dev,
+			sizeof(struct mipi_dsim_lcd_device), GFP_KERNEL);
+	if (!active_mipi_dsim_lcd_device) {
+		dev_err(&pdev->dev,
+		"failed to allocate active_mipi_dsim_lcd_device object.\n");
+		return NULL;
+	}
+
+	if (of_property_read_string(np, "lcd-name", &lcd_name)) {
+		dev_err(&pdev->dev, "lcd name property not found");
+		return NULL;
+	}
+
+	active_mipi_dsim_lcd_device->name = (char *)lcd_name;
+
+	if (of_property_read_u32(np, "id", &active_mipi_dsim_lcd_device->id))
+		active_mipi_dsim_lcd_device->id = -1;
+
+	if (of_property_read_u32(np, "bus-id",
+					&active_mipi_dsim_lcd_device->bus_id))
+		active_mipi_dsim_lcd_device->bus_id = -1;
+
+	active_lcd_platform_data = devm_kzalloc(&pdev->dev,
+				sizeof(struct lcd_platform_data), GFP_KERNEL);
+	if (!active_lcd_platform_data) {
+		dev_err(&pdev->dev,
+		"failed to allocate active_lcd_platform_data object.\n");
+		return NULL;
+	}
+
+	/* store the lcd node pointer for futher use in lcd driver */
+	active_lcd_platform_data->pdata = (void *) np;
+	active_mipi_dsim_lcd_device->platform_data =
+				(void *)active_lcd_platform_data;
+
+	return active_mipi_dsim_lcd_device;
+}
+
+static int exynos_mipi_parse_ofnode_config(struct platform_device *pdev,
+		struct device_node *np, struct mipi_dsim_config *dsim_config)
+{
+	unsigned int u32Val;
+
+	if (of_property_read_u32(np, "e_interface", &u32Val)) {
+		dev_err(&pdev->dev, "e_interface property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->e_interface = (enum mipi_dsim_interface_type)u32Val;
+
+	if (of_property_read_u32(np, "e_pixel_format", &u32Val)) {
+		dev_err(&pdev->dev, "e_pixel_format property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->e_pixel_format = (enum mipi_dsim_pixel_format)u32Val;
+
+	if (of_property_read_u32(np, "auto_flush", &u32Val)) {
+		dev_err(&pdev->dev, "auto_flush property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->auto_flush = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "eot_disable", &u32Val)) {
+		dev_err(&pdev->dev, "eot_disable property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->eot_disable = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "auto_vertical_cnt", &u32Val)) {
+		dev_err(&pdev->dev, "auto_vertical_cnt property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->auto_vertical_cnt = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "hse", &u32Val)) {
+		dev_err(&pdev->dev, "hse property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->hse = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "hfp", &u32Val)) {
+		dev_err(&pdev->dev, "hfp property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->hfp = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "hbp", &u32Val)) {
+		dev_err(&pdev->dev, "hbp property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->hbp = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "hsa", &u32Val)) {
+		dev_err(&pdev->dev, "hsa property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->hsa = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "e_no_data_lane", &u32Val)) {
+		dev_err(&pdev->dev, "e_no_data_lane property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->e_no_data_lane = (enum mipi_dsim_no_of_data_lane)u32Val;
+
+	if (of_property_read_u32(np, "e_byte_clk", &u32Val)) {
+		dev_err(&pdev->dev, "e_byte_clk property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->e_byte_clk = (enum mipi_dsim_byte_clk_src)u32Val;
+
+	if (of_property_read_u32(np, "e_burst_mode", &u32Val)) {
+		dev_err(&pdev->dev, "e_burst_mode property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->e_burst_mode = (enum mipi_dsim_burst_mode_type)u32Val;
+
+	if (of_property_read_u32(np, "p", &u32Val)) {
+		dev_err(&pdev->dev, "p property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->p = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "m", &u32Val)) {
+		dev_err(&pdev->dev, "m property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->m = (unsigned short)u32Val;
+
+	if (of_property_read_u32(np, "s", &u32Val)) {
+		dev_err(&pdev->dev, "s property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->s = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "pll_stable_time", &u32Val)) {
+		dev_err(&pdev->dev, "pll_stable_time property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->pll_stable_time = (unsigned int)u32Val;
+
+	if (of_property_read_u32(np, "esc_clk", &u32Val)) {
+		dev_err(&pdev->dev, "esc_clk property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->esc_clk = (unsigned long)u32Val;
+
+	if (of_property_read_u32(np, "stop_holding_cnt", &u32Val)) {
+		dev_err(&pdev->dev, "stop_holding_cnt property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->stop_holding_cnt = (unsigned short)u32Val;
+
+	if (of_property_read_u32(np, "bta_timeout", &u32Val)) {
+		dev_err(&pdev->dev, "bta_timeout property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->bta_timeout = (unsigned char)u32Val;
+
+	if (of_property_read_u32(np, "rx_timeout", &u32Val)) {
+		dev_err(&pdev->dev, "rx_timeout property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->rx_timeout = (unsigned short)u32Val;
+
+	if (of_property_read_u32(np, "e_virtual_ch", &u32Val)) {
+		dev_err(&pdev->dev, "e_virtual_ch property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->e_virtual_ch = (enum mipi_dsim_virtual_ch_no)u32Val;
+
+	if (of_property_read_u32(np, "cmd_allow", &u32Val)) {
+		dev_err(&pdev->dev, "cmd_allow property not found\n");
+		return -EINVAL;
+	}
+	dsim_config->cmd_allow = (unsigned char)u32Val;
+
+	return 0;
+}
+
+static int exynos_mipi_parse_ofnode_panel_info(struct platform_device *pdev,
+		struct device_node *np, struct fb_videomode *panel_info)
+{
+	unsigned int data[4];
+
+	if (of_property_read_u32_array(np, "lcd-htiming", data, 4)) {
+		dev_err(&pdev->dev, "invalid horizontal timing\n");
+		return -EINVAL;
+	}
+	panel_info->left_margin = data[0];
+	panel_info->right_margin = data[1];
+	panel_info->hsync_len = data[2];
+	panel_info->xres = data[3];
+
+	if (of_property_read_u32_array(np, "lcd-vtiming", data, 4)) {
+		dev_err(&pdev->dev, "invalid vertical timing\n");
+		return -EINVAL;
+	}
+	panel_info->upper_margin = data[0];
+	panel_info->lower_margin = data[1];
+	panel_info->vsync_len = data[2];
+	panel_info->yres = data[3];
+
+	return 0;
+}
+
+static int exynos_mipi_parse_ofnode(struct platform_device *pdev,
+	struct mipi_dsim_config *dsim_config, struct fb_videomode *panel_info)
+{
+	struct device_node *np_dsim_config, *np_panel_info;
+	struct device_node *np = pdev->dev.of_node;
+
+	np_dsim_config = of_find_node_by_name(np, "mipi-config");
+	if (!np_dsim_config)
+		return -EINVAL;
+
+	if (exynos_mipi_parse_ofnode_config(pdev, np_dsim_config, dsim_config))
+		return -EINVAL;
+
+	np_panel_info = of_parse_phandle(np, "panel-info", 0);
+	if (!np_panel_info)
+		return -EINVAL;
+
+	if (exynos_mipi_parse_ofnode_panel_info(pdev,
+					np_panel_info, panel_info))
+		return -EINVAL;
+
+	return 0;
+}
+
 static int exynos_mipi_dsi_probe(struct platform_device *pdev)
 {
 	struct resource *res;
@@ -332,29 +795,101 @@ static int exynos_mipi_dsi_probe(struct platform_device *pdev)
 	struct mipi_dsim_config *dsim_config;
 	struct mipi_dsim_platform_data *dsim_pd;
 	struct mipi_dsim_ddi *dsim_ddi;
+	struct device_node *ofnode_lcd = NULL;
+	struct device_node *ofnode_dphy = NULL;
+	struct mipi_dsim_lcd_device *active_mipi_dsim_lcd_device = NULL;
+	struct mipi_dsim_phy_config *mipi_dphy_config;
+	struct fb_videomode *panel_info;
+	unsigned int u32Val;
 	int ret = -EINVAL;
 
-	dsim = kzalloc(sizeof(struct mipi_dsim_device), GFP_KERNEL);
+	dsim = devm_kzalloc(&pdev->dev, sizeof(struct mipi_dsim_device),
+				GFP_KERNEL);
 	if (!dsim) {
 		dev_err(&pdev->dev, "failed to allocate dsim object.\n");
 		return -ENOMEM;
+	}
+
+	if (pdev->dev.of_node) {
+		ofnode_lcd = exynos_mipi_find_ofnode_lcd_device(pdev);
+		if (!ofnode_lcd)
+			return -EINVAL;
+
+		active_mipi_dsim_lcd_device =
+				exynos_mipi_parse_ofnode_lcd(pdev, ofnode_lcd);
+
+		if (NULL == active_mipi_dsim_lcd_device)
+			return -EINVAL;
+
+		if (NULL == exynos_mipi_dsi_find_lcd_driver(
+						active_mipi_dsim_lcd_device))
+			return -EPROBE_DEFER;
+
+		exynos_mipi_dsi_register_lcd_device(
+						active_mipi_dsim_lcd_device);
 	}
 
 	dsim->pd = to_dsim_plat(pdev);
 	dsim->dev = &pdev->dev;
 	dsim->id = pdev->id;
 
-	/* get mipi_dsim_platform_data. */
-	dsim_pd = (struct mipi_dsim_platform_data *)dsim->pd;
-	if (dsim_pd == NULL) {
-		dev_err(&pdev->dev, "failed to get platform data for dsim.\n");
-		goto err_clock_get;
-	}
-	/* get mipi_dsim_config. */
-	dsim_config = dsim_pd->dsim_config;
-	if (dsim_config == NULL) {
-		dev_err(&pdev->dev, "failed to get dsim config data.\n");
-		goto err_clock_get;
+	if (pdev->dev.of_node) {
+		dsim_config = devm_kzalloc(&pdev->dev,
+			sizeof(struct mipi_dsim_config), GFP_KERNEL);
+		if (!dsim_config) {
+			dev_err(&pdev->dev,
+				"failed to allocate dsim_config object.\n");
+			return -ENOMEM;
+		}
+
+		panel_info = devm_kzalloc(&pdev->dev,
+				sizeof(struct fb_videomode), GFP_KERNEL);
+		if (!panel_info) {
+			dev_err(&pdev->dev,
+				"failed to allocate fb_videomode object.\n");
+			return -ENOMEM;
+		}
+
+		/* parse the mipi of_node for dism_config and panel info. */
+		if (exynos_mipi_parse_ofnode(pdev, dsim_config, panel_info)) {
+			dev_err(&pdev->dev,
+				"failed to read mipi-config, panel-info\n");
+			return -EINVAL;
+		}
+
+		dsim_pd = devm_kzalloc(&pdev->dev,
+			sizeof(struct mipi_dsim_platform_data), GFP_KERNEL);
+		if (!dsim_pd) {
+			dev_err(&pdev->dev,
+				"failed to allocate mipi_dsim_platform_data\n");
+			return -ENOMEM;
+		}
+
+		if (of_property_read_u32(pdev->dev.of_node, "enabled", &u32Val))
+			dev_err(&pdev->dev, "enabled property not found\n");
+		else
+			dsim_pd->enabled = !(!u32Val);
+
+		dsim_pd->lcd_panel_info = (void *)panel_info;
+		dsim_pd->dsim_config = dsim_config;
+		dsim->pd = dsim_pd;
+
+	} else {
+		/* get mipi_dsim_platform_data. */
+		dsim_pd = (struct mipi_dsim_platform_data *)dsim->pd;
+		if (dsim_pd == NULL) {
+			dev_err(&pdev->dev,
+				"failed to get platform data for dsim.\n");
+			return -EFAULT;
+		}
+
+		/* get mipi_dsim_config. */
+		dsim_config = dsim_pd->dsim_config;
+		if (dsim_config == NULL) {
+			dev_err(&pdev->dev,
+				"failed to get dsim config data.\n");
+			return -EFAULT;
+		}
 	}
 
 	dsim->dsim_config = dsim_config;
@@ -362,78 +897,95 @@ static int exynos_mipi_dsi_probe(struct platform_device *pdev)
 
 	mutex_init(&dsim->lock);
 
-	ret = regulator_bulk_get(&pdev->dev, ARRAY_SIZE(supplies), supplies);
+	ret = devm_regulator_bulk_get(&pdev->dev, ARRAY_SIZE(supplies),
+					supplies);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to get regulators: %d\n", ret);
-		goto err_clock_get;
+		return ret;
 	}
 
-	dsim->clock = clk_get(&pdev->dev, "dsim0");
+	dsim->clock = devm_clk_get(&pdev->dev, "dsim0");
 	if (IS_ERR(dsim->clock)) {
 		dev_err(&pdev->dev, "failed to get dsim clock source\n");
-		goto err_clock_get;
+		return -ENODEV;
 	}
 
-	clk_enable(dsim->clock);
+	clk_prepare_enable(dsim->clock);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(&pdev->dev, "failed to get io memory region\n");
-		goto err_platform_get;
-	}
 
-	dsim->res = request_mem_region(res->start, resource_size(res),
-					dev_name(&pdev->dev));
-	if (!dsim->res) {
-		dev_err(&pdev->dev, "failed to request io memory region\n");
-		ret = -ENOMEM;
-		goto err_mem_region;
-	}
-
-	dsim->reg_base = ioremap(res->start, resource_size(res));
-	if (!dsim->reg_base) {
-		dev_err(&pdev->dev, "failed to remap io region\n");
-		ret = -ENOMEM;
-		goto err_ioremap;
+	dsim->reg_base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(dsim->reg_base)) {
+		ret = PTR_ERR(dsim->reg_base);
+		goto error;
 	}
 
 	mutex_init(&dsim->lock);
 
 	/* bind lcd ddi matched with panel name. */
-	dsim_ddi = exynos_mipi_dsi_bind_lcd_ddi(dsim, dsim_pd->lcd_panel_name);
+	if (pdev->dev.of_node) {
+		dsim_ddi = exynos_mipi_dsi_bind_lcd_ddi(dsim,
+					active_mipi_dsim_lcd_device->name);
+	} else {
+		dsim_ddi = exynos_mipi_dsi_bind_lcd_ddi(dsim,
+					dsim_pd->lcd_panel_name);
+	}
+
 	if (!dsim_ddi) {
 		dev_err(&pdev->dev, "mipi_dsim_ddi object not found.\n");
-		goto err_bind;
-	}
+		ret = -ENXIO;
+		goto error;
+	} else if (pdev->dev.of_node) {
+		dsim_ddi->ofnode_dsim_lcd_dev = ofnode_lcd;
+		dsim_ddi->ofnode_dsim_dphy = ofnode_dphy;
+ 	}
 
 	dsim->irq = platform_get_irq(pdev, 0);
-	if (dsim->irq < 0) {
+	if (IS_ERR_VALUE(dsim->irq)) {
 		dev_err(&pdev->dev, "failed to request dsim irq resource\n");
 		ret = -EINVAL;
-		goto err_platform_get_irq;
-	}
-
-	ret = request_irq(dsim->irq, exynos_mipi_dsi_interrupt_handler,
-			IRQF_SHARED, pdev->name, dsim);
-	if (ret != 0) {
-		dev_err(&pdev->dev, "failed to request dsim irq\n");
-		ret = -EINVAL;
-		goto err_bind;
+		goto error;
 	}
 
 	init_completion(&dsim_wr_comp);
 	init_completion(&dsim_rd_comp);
+	platform_set_drvdata(pdev, dsim);
 
-	/* enable interrupt */
+	/* update dsim phy config node */
+	if (pdev->dev.of_node) {
+		ofnode_dphy = exynos_mipi_find_ofnode_dsim_phy(pdev);
+		if (!ofnode_dphy)
+			return -EINVAL;
+
+		mipi_dphy_config = exynos_mipi_parse_ofnode_dsim_phy(pdev,
+								ofnode_dphy);
+		if (NULL == mipi_dphy_config)
+			return -EINVAL;
+
+		dsim->dsim_phy_config = mipi_dphy_config;
+	}
+
+	ret = devm_request_irq(&pdev->dev, dsim->irq,
+			exynos_mipi_dsi_interrupt_handler,
+			IRQF_SHARED, dev_name(&pdev->dev), dsim);
+	if (ret != 0) {
+		dev_err(&pdev->dev, "failed to request dsim irq\n");
+		ret = -EINVAL;
+		goto error;
+	}
+
+	/* enable interrupts */
 	exynos_mipi_dsi_init_interrupt(dsim);
 
 	/* initialize mipi-dsi client(lcd panel). */
 	if (dsim_ddi->dsim_lcd_drv && dsim_ddi->dsim_lcd_drv->probe)
 		dsim_ddi->dsim_lcd_drv->probe(dsim_ddi->dsim_lcd_dev);
 
-	/* in case that mipi got enabled at bootloader. */
-	if (dsim_pd->enabled)
-		goto out;
+	/* in case mipi-dsi has been enabled by bootloader */
+	if (dsim_pd->enabled) {
+		exynos_mipi_regulator_enable(dsim);
+		goto done;
+	}
 
 	/* lcd panel power on. */
 	if (dsim_ddi->dsim_lcd_drv && dsim_ddi->dsim_lcd_drv->power_on)
@@ -447,53 +999,44 @@ static int exynos_mipi_dsi_probe(struct platform_device *pdev)
 
 	exynos_mipi_update_cfg(dsim);
 
+	/* enable the LPDT mode */
+	exynos_mipi_dsi_stand_by(dsim, 0);
+	exynos_mipi_dsi_set_lcdc_transfer_mode(dsim, 1);
+	exynos_mipi_dsi_set_cpu_transfer_mode(dsim, 1);
+	exynos_mipi_dsi_enable_hs_clock(dsim, 0);
+
 	/* set lcd panel sequence commands. */
 	if (dsim_ddi->dsim_lcd_drv && dsim_ddi->dsim_lcd_drv->set_sequence)
 		dsim_ddi->dsim_lcd_drv->set_sequence(dsim_ddi->dsim_lcd_dev);
 
+	/* enable the HS mode */
+	exynos_mipi_dsi_set_lcdc_transfer_mode(dsim, 0);
+	exynos_mipi_dsi_set_cpu_transfer_mode(dsim, 0);
+	exynos_mipi_dsi_enable_hs_clock(dsim, 1);
+	exynos_mipi_dsi_stand_by(dsim, 1);
+
 	dsim->suspended = false;
 
-out:
+done:
 	platform_set_drvdata(pdev, dsim);
 
-	dev_dbg(&pdev->dev, "mipi-dsi driver(%s mode) has been probed.\n",
-		(dsim_config->e_interface == DSIM_COMMAND) ?
-			"CPU" : "RGB");
+	dev_dbg(&pdev->dev, "%s() completed successfully (%s mode)\n", __func__,
+		dsim_config->e_interface == DSIM_COMMAND ? "CPU" : "RGB");
 
 	return 0;
 
-err_bind:
-	iounmap(dsim->reg_base);
-
-err_ioremap:
-	release_mem_region(dsim->res->start, resource_size(dsim->res));
-
-err_mem_region:
-	release_resource(dsim->res);
-
-err_platform_get:
+error:
 	clk_disable(dsim->clock);
-	clk_put(dsim->clock);
-err_clock_get:
-	kfree(dsim);
-
-err_platform_get_irq:
 	return ret;
 }
 
-static int __devexit exynos_mipi_dsi_remove(struct platform_device *pdev)
+static int exynos_mipi_dsi_remove(struct platform_device *pdev)
 {
 	struct mipi_dsim_device *dsim = platform_get_drvdata(pdev);
 	struct mipi_dsim_ddi *dsim_ddi, *next;
 	struct mipi_dsim_lcd_driver *dsim_lcd_drv;
 
-	iounmap(dsim->reg_base);
-
 	clk_disable(dsim->clock);
-	clk_put(dsim->clock);
-
-	release_resource(dsim->res);
-	release_mem_region(dsim->res->start, resource_size(dsim->res));
 
 	list_for_each_entry_safe(dsim_ddi, next, &dsim_ddi_list, list) {
 		if (dsim_ddi) {
@@ -509,16 +1052,13 @@ static int __devexit exynos_mipi_dsi_remove(struct platform_device *pdev)
 		}
 	}
 
-	regulator_bulk_free(ARRAY_SIZE(supplies), supplies);
-	kfree(dsim);
-
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static int exynos_mipi_dsi_suspend(struct platform_device *pdev,
-		pm_message_t state)
+#ifdef CONFIG_PM_SLEEP
+static int exynos_mipi_dsi_suspend(struct device *dev)
 {
+	struct platform_device *pdev = to_platform_device(dev);
 	struct mipi_dsim_device *dsim = platform_get_drvdata(pdev);
 	struct mipi_dsim_lcd_driver *client_drv = dsim->dsim_lcd_drv;
 	struct mipi_dsim_lcd_device *client_dev = dsim->dsim_lcd_dev;
@@ -544,8 +1084,9 @@ static int exynos_mipi_dsi_suspend(struct platform_device *pdev,
 	return 0;
 }
 
-static int exynos_mipi_dsi_resume(struct platform_device *pdev)
+static int exynos_mipi_dsi_resume(struct device *dev)
 {
+	struct platform_device *pdev = to_platform_device(dev);
 	struct mipi_dsim_device *dsim = platform_get_drvdata(pdev);
 	struct mipi_dsim_lcd_driver *client_drv = dsim->dsim_lcd_drv;
 	struct mipi_dsim_lcd_device *client_dev = dsim->dsim_lcd_dev;
@@ -577,19 +1118,39 @@ static int exynos_mipi_dsi_resume(struct platform_device *pdev)
 
 	return 0;
 }
-#else
-#define exynos_mipi_dsi_suspend NULL
-#define exynos_mipi_dsi_resume NULL
 #endif
+
+static const struct dev_pm_ops exynos_mipi_dsi_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(exynos_mipi_dsi_suspend, exynos_mipi_dsi_resume)
+};
+
+static struct platform_device_id exynos_mipi_driver_ids[] = {
+	{
+		.name		= "exynos-mipidsim",
+		.driver_data	= (unsigned long)0,
+	},
+	{},
+};
+MODULE_DEVICE_TABLE(platform, exynos_mipi_driver_ids);
+
+static const struct of_device_id exynos_mipi_match[] = {
+	{
+		.compatible = "samsung,exynos-mipidsim",
+		.data = NULL,
+	},
+	{},
+};
+MODULE_DEVICE_TABLE(of, exynos_mipi_match);
 
 static struct platform_driver exynos_mipi_dsi_driver = {
 	.probe = exynos_mipi_dsi_probe,
-	.remove = __devexit_p(exynos_mipi_dsi_remove),
-	.suspend = exynos_mipi_dsi_suspend,
-	.resume = exynos_mipi_dsi_resume,
+	.remove = exynos_mipi_dsi_remove,
+	.id_table = exynos_mipi_driver_ids,
 	.driver = {
 		   .name = "exynos-mipi-dsim",
 		   .owner = THIS_MODULE,
+		   .pm = &exynos_mipi_dsi_pm_ops,
+		   .of_match_table = exynos_mipi_match,
 	},
 };
 

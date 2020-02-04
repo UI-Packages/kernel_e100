@@ -336,10 +336,6 @@ int rio_create_sysfs_dev_files(struct rio_dev *rdev)
 		pr_warning("RIO: Failed to create attribute file(s) for %s\n",
 			   rio_name(rdev));
 
-	err = sysfs_create_bin_file(&rdev->dev.kobj, &rio_config_attr);
-	if (err)
-		return err;
-
 	rdev->memory.attr.name = "memory";
 	rdev->memory.attr.mode = S_IRUGO | S_IWUSR;
 	rdev->memory.read = rio_read_memory;
@@ -390,3 +386,48 @@ void rio_remove_sysfs_dev_files(struct rio_dev *rdev)
 		rdev->memory.size = 0;
 	}
 }
+
+static ssize_t bus_scan_store(struct bus_type *bus, const char *buf,
+				size_t count)
+{
+	long val;
+	struct rio_mport *port = NULL;
+	int rc;
+
+	if (kstrtol(buf, 0, &val) < 0)
+		return -EINVAL;
+
+	if (val == RIO_MPORT_ANY) {
+		rc = rio_init_mports();
+		goto exit;
+	}
+
+	if (val < 0 || val >= RIO_MAX_MPORTS)
+		return -EINVAL;
+
+	port = rio_find_mport((int)val);
+
+	if (!port) {
+		pr_debug("RIO: %s: mport_%d not available\n",
+			 __func__, (int)val);
+		return -EINVAL;
+	}
+
+	if (!port->nscan)
+		return -EINVAL;
+
+	if (port->host_deviceid >= 0)
+		rc = port->nscan->enumerate(port, 0);
+	else
+		rc = port->nscan->discover(port, RIO_SCAN_ENUM_NO_WAIT);
+exit:
+	if (!rc)
+		rc = count;
+
+	return rc;
+}
+
+struct bus_attribute rio_bus_attrs[] = {
+	__ATTR(scan, (S_IWUSR|S_IWGRP), NULL, bus_scan_store),
+	__ATTR_NULL
+};

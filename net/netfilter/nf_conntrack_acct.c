@@ -60,7 +60,7 @@ static struct nf_ct_ext_type acct_extend __read_mostly = {
 #ifdef CONFIG_SYSCTL
 static int nf_conntrack_acct_init_sysctl(struct net *net)
 {
-	struct ctl_table *table;
+	ctl_table_no_const *table;
 
 	table = kmemdup(acct_sysctl_table, sizeof(acct_sysctl_table),
 			GFP_KERNEL);
@@ -69,8 +69,12 @@ static int nf_conntrack_acct_init_sysctl(struct net *net)
 
 	table[0].data = &net->ct.sysctl_acct;
 
-	net->ct.acct_sysctl_header = register_net_sysctl_table(net,
-			nf_net_netfilter_sysctl_path, table);
+	/* Don't export sysctls to unprivileged users */
+	if (net->user_ns != &init_user_ns)
+		table[0].procname = NULL;
+
+	net->ct.acct_sysctl_header = register_net_sysctl(net, "net/netfilter",
+							 table);
 	if (!net->ct.acct_sysctl_header) {
 		printk(KERN_ERR "nf_conntrack_acct: can't register to sysctl.\n");
 		goto out_register;
@@ -102,36 +106,26 @@ static void nf_conntrack_acct_fini_sysctl(struct net *net)
 }
 #endif
 
-int nf_conntrack_acct_init(struct net *net)
+int nf_conntrack_acct_pernet_init(struct net *net)
 {
-	int ret;
-
 	net->ct.sysctl_acct = nf_ct_acct;
+	return nf_conntrack_acct_init_sysctl(net);
+}
 
-	if (net_eq(net, &init_net)) {
-		ret = nf_ct_extend_register(&acct_extend);
-		if (ret < 0) {
-			printk(KERN_ERR "nf_conntrack_acct: Unable to register extension\n");
-			goto out_extend_register;
-		}
-	}
+void nf_conntrack_acct_pernet_fini(struct net *net)
+{
+	nf_conntrack_acct_fini_sysctl(net);
+}
 
-	ret = nf_conntrack_acct_init_sysctl(net);
+int nf_conntrack_acct_init(void)
+{
+	int ret = nf_ct_extend_register(&acct_extend);
 	if (ret < 0)
-		goto out_sysctl;
-
-	return 0;
-
-out_sysctl:
-	if (net_eq(net, &init_net))
-		nf_ct_extend_unregister(&acct_extend);
-out_extend_register:
+		pr_err("nf_conntrack_acct: Unable to register extension\n");
 	return ret;
 }
 
-void nf_conntrack_acct_fini(struct net *net)
+void nf_conntrack_acct_fini(void)
 {
-	nf_conntrack_acct_fini_sysctl(net);
-	if (net_eq(net, &init_net))
-		nf_ct_extend_unregister(&acct_extend);
+	nf_ct_extend_unregister(&acct_extend);
 }

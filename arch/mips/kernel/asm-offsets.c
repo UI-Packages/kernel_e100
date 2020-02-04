@@ -12,11 +12,14 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/interrupt.h>
 #include <linux/kbuild.h>
 #include <linux/suspend.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
+
+#include <linux/kvm_host.h>
+#include <asm/kvm_mips_te.h>
+#include <asm/kvm_mips_vz.h>
 
 void output_ptreg_defines(void)
 {
@@ -69,6 +72,10 @@ void output_ptreg_defines(void)
 	OFFSET(PT_MPL, pt_regs, mpl);
 	OFFSET(PT_MTP, pt_regs, mtp);
 #endif /* CONFIG_CPU_CAVIUM_OCTEON */
+#ifdef CONFIG_KVM_MIPS_VZ
+	OFFSET(PT_BADINSTR, pt_regs, cp0_badinstr);
+	OFFSET(PT_BADINSTRP, pt_regs, cp0_badinstrp);
+#endif
 	DEFINE(PT_SIZE, sizeof(struct pt_regs));
 	BLANK();
 }
@@ -126,10 +133,11 @@ void output_thread_defines(void)
 	       thread.cp0_baduaddr);
 	OFFSET(THREAD_ECODE, task_struct, \
 	       thread.error_code);
-	OFFSET(THREAD_TRAMP, task_struct, \
-	       thread.irix_trampoline);
-	OFFSET(THREAD_OLDCTX, task_struct, \
-	       thread.irix_oldctx);
+#ifdef CONFIG_KVM_MIPS_VZ
+	OFFSET(THREAD_VCPU, task_struct, thread.vcpu);
+	OFFSET(THREAD_MM_ASID, task_struct, thread.mm_asid);
+	OFFSET(THREAD_GUEST_ASID, task_struct, thread.guest_asid);
+#endif
 	BLANK();
 }
 
@@ -204,6 +212,9 @@ void output_mm_defines(void)
 	DEFINE(_PTRS_PER_PGD, PTRS_PER_PGD);
 	DEFINE(_PTRS_PER_PMD, PTRS_PER_PMD);
 	DEFINE(_PTRS_PER_PTE, PTRS_PER_PTE);
+	BLANK();
+	DEFINE(_PAGE_SHIFT, PAGE_SHIFT);
+	DEFINE(_PAGE_SIZE, PAGE_SIZE);
 	BLANK();
 }
 
@@ -292,15 +303,6 @@ void output_signal_defined(void)
 	BLANK();
 }
 
-void output_irq_cpustat_t_defines(void)
-{
-	COMMENT("Linux irq_cpustat_t offsets.");
-	DEFINE(IC_SOFTIRQ_PENDING,
-			offsetof(irq_cpustat_t, __softirq_pending));
-	DEFINE(IC_IRQ_CPUSTAT_T, sizeof(irq_cpustat_t));
-	BLANK();
-}
-
 #ifdef CONFIG_CPU_CAVIUM_OCTEON
 void output_octeon_cop2_state_defines(void)
 {
@@ -322,6 +324,7 @@ void output_octeon_cop2_state_defines(void)
 	OFFSET(OCTEON_CP2_GFM_RESULT,	octeon_cop2_state, cop2_gfm_result);
 	OFFSET(OCTEON_CP2_HSH_DATW,	octeon_cop2_state, cop2_hsh_datw);
 	OFFSET(OCTEON_CP2_HSH_IVW,	octeon_cop2_state, cop2_hsh_ivw);
+	OFFSET(OCTEON_CP2_SHA3,		octeon_cop2_state, cop2_sha3);
 	OFFSET(THREAD_CP2,	task_struct, thread.cp2);
 	OFFSET(THREAD_CVMSEG,	task_struct, thread.cvmseg.cvmseg);
 	BLANK();
@@ -336,6 +339,87 @@ void output_pbe_defines(void)
 	OFFSET(PBE_ORIG_ADDRESS, pbe, orig_address);
 	OFFSET(PBE_NEXT, pbe, next);
 	DEFINE(PBE_SIZE, sizeof(struct pbe));
+	BLANK();
+}
+#endif
+
+#if IS_ENABLED(CONFIG_KVM)
+void output_kvm_defines(void)
+{
+	COMMENT(" KVM/MIPS Specfic offsets. ");
+	OFFSET(KVM_ARCH_IMPL, kvm, arch.impl);
+	OFFSET(KVM_VCPU_KVM, kvm_vcpu, kvm);
+	DEFINE(VCPU_ARCH_SIZE, sizeof(struct kvm_vcpu_arch));
+	OFFSET(VCPU_RUN, kvm_vcpu, run);
+	OFFSET(VCPU_HOST_ARCH, kvm_vcpu, arch);
+
+
+	OFFSET(KVM_VCPU_ARCH_R0, kvm_vcpu, arch.gprs[0]);
+	OFFSET(KVM_VCPU_ARCH_R1, kvm_vcpu, arch.gprs[1]);
+	OFFSET(KVM_VCPU_ARCH_R2, kvm_vcpu, arch.gprs[2]);
+	OFFSET(KVM_VCPU_ARCH_R3, kvm_vcpu, arch.gprs[3]);
+	OFFSET(KVM_VCPU_ARCH_R4, kvm_vcpu, arch.gprs[4]);
+	OFFSET(KVM_VCPU_ARCH_R5, kvm_vcpu, arch.gprs[5]);
+	OFFSET(KVM_VCPU_ARCH_R6, kvm_vcpu, arch.gprs[6]);
+	OFFSET(KVM_VCPU_ARCH_R7, kvm_vcpu, arch.gprs[7]);
+	OFFSET(KVM_VCPU_ARCH_R8, kvm_vcpu, arch.gprs[8]);
+	OFFSET(KVM_VCPU_ARCH_R9, kvm_vcpu, arch.gprs[9]);
+	OFFSET(KVM_VCPU_ARCH_R10, kvm_vcpu, arch.gprs[10]);
+	OFFSET(KVM_VCPU_ARCH_R11, kvm_vcpu, arch.gprs[11]);
+	OFFSET(KVM_VCPU_ARCH_R12, kvm_vcpu, arch.gprs[12]);
+	OFFSET(KVM_VCPU_ARCH_R13, kvm_vcpu, arch.gprs[13]);
+	OFFSET(KVM_VCPU_ARCH_R14, kvm_vcpu, arch.gprs[14]);
+	OFFSET(KVM_VCPU_ARCH_R15, kvm_vcpu, arch.gprs[15]);
+	OFFSET(KVM_VCPU_ARCH_R16, kvm_vcpu, arch.gprs[16]);
+	OFFSET(KVM_VCPU_ARCH_R17, kvm_vcpu, arch.gprs[17]);
+	OFFSET(KVM_VCPU_ARCH_R18, kvm_vcpu, arch.gprs[18]);
+	OFFSET(KVM_VCPU_ARCH_R19, kvm_vcpu, arch.gprs[19]);
+	OFFSET(KVM_VCPU_ARCH_R20, kvm_vcpu, arch.gprs[20]);
+	OFFSET(KVM_VCPU_ARCH_R21, kvm_vcpu, arch.gprs[21]);
+	OFFSET(KVM_VCPU_ARCH_R22, kvm_vcpu, arch.gprs[22]);
+	OFFSET(KVM_VCPU_ARCH_R23, kvm_vcpu, arch.gprs[23]);
+	OFFSET(KVM_VCPU_ARCH_R24, kvm_vcpu, arch.gprs[24]);
+	OFFSET(KVM_VCPU_ARCH_R25, kvm_vcpu, arch.gprs[25]);
+	OFFSET(KVM_VCPU_ARCH_R26, kvm_vcpu, arch.gprs[26]);
+	OFFSET(KVM_VCPU_ARCH_R27, kvm_vcpu, arch.gprs[27]);
+	OFFSET(KVM_VCPU_ARCH_R28, kvm_vcpu, arch.gprs[28]);
+	OFFSET(KVM_VCPU_ARCH_R29, kvm_vcpu, arch.gprs[29]);
+	OFFSET(KVM_VCPU_ARCH_R30, kvm_vcpu, arch.gprs[30]);
+	OFFSET(KVM_VCPU_ARCH_R31, kvm_vcpu, arch.gprs[31]);
+	OFFSET(KVM_VCPU_ARCH_LO, kvm_vcpu, arch.lo);
+	OFFSET(KVM_VCPU_ARCH_HI, kvm_vcpu, arch.hi);
+	OFFSET(KVM_VCPU_ARCH_EPC, kvm_vcpu, arch.epc);
+	OFFSET(KVM_VCPU_ARCH_IMPL, kvm_vcpu, arch.impl);
+	BLANK();
+	OFFSET(KVM_VCPU_ARCH_FPR,	kvm_vcpu, arch.fpr);
+	OFFSET(KVM_VCPU_ARCH_FIR,	kvm_vcpu, arch.fir);
+	OFFSET(KVM_VCPU_ARCH_FCCR,	kvm_vcpu, arch.fccr);
+	OFFSET(KVM_VCPU_ARCH_FEXR,	kvm_vcpu, arch.fexr);
+	OFFSET(KVM_VCPU_ARCH_FENR,	kvm_vcpu, arch.fenr);
+	OFFSET(KVM_VCPU_ARCH_FCSR,	kvm_vcpu, arch.fcsr);
+	BLANK();
+
+	OFFSET(KVM_MIPS_VCPU_TE_HOST_EBASE, kvm_mips_vcpu_te, host_ebase);
+	OFFSET(KVM_MIPS_VCPU_TE_GUEST_EBASE, kvm_mips_vcpu_te, guest_ebase);
+	OFFSET(KVM_MIPS_VCPU_TE_HOST_STACK, kvm_mips_vcpu_te, host_stack);
+	OFFSET(KVM_MIPS_VCPU_TE_HOST_GP, kvm_mips_vcpu_te, host_gp);
+	OFFSET(KVM_MIPS_VCPU_TE_HOST_CP0_BADVADDR, kvm_mips_vcpu_te, host_cp0_badvaddr);
+	OFFSET(KVM_MIPS_VCPU_TE_HOST_CP0_CAUSE, kvm_mips_vcpu_te, host_cp0_cause);
+	OFFSET(KVM_MIPS_VCPU_TE_HOST_EPC, kvm_mips_vcpu_te, host_cp0_epc);
+	OFFSET(KVM_MIPS_VCPU_TE_HOST_ENTRYHI, kvm_mips_vcpu_te, host_cp0_entryhi);
+	OFFSET(KVM_MIPS_VCPU_TE_GUEST_INST, kvm_mips_vcpu_te, guest_inst);
+	OFFSET(KVM_MIPS_VCPU_TE_COP0, kvm_mips_vcpu_te, cop0);
+	OFFSET(KVM_MIPS_VCPU_TE_GUEST_KERNEL_ASID, kvm_mips_vcpu_te, guest_kernel_asid);
+	OFFSET(KVM_MIPS_VCPU_TE_GUEST_USER_ASID, kvm_mips_vcpu_te, guest_user_asid);
+
+	OFFSET(KVM_MIPS_VCPU_VZ_INJECTED_IPX, kvm_mips_vcpu_vz, injected_ipx);
+
+	OFFSET(COP0_TLB_HI, mips_coproc, reg[MIPS_CP0_TLB_HI][0]);
+	OFFSET(COP0_STATUS, mips_coproc, reg[MIPS_CP0_STATUS][0]);
+	BLANK();
+
+	COMMENT(" Linux struct kvm mipsvz offsets. ");
+	OFFSET(KVM_MIPS_VZ_PGD,	kvm_mips_vz, pgd);
 	BLANK();
 }
 #endif

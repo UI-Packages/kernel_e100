@@ -8,6 +8,7 @@
 #ifndef _ASM_PGTABLE_H
 #define _ASM_PGTABLE_H
 
+#include <linux/mm_types.h>
 #include <linux/mmzone.h>
 #ifdef CONFIG_32BIT
 #include <asm/pgtable-32.h>
@@ -23,15 +24,15 @@ struct mm_struct;
 struct vm_area_struct;
 
 #define PAGE_NONE	__pgprot(_PAGE_PRESENT | _CACHE_CACHABLE_NONCOHERENT)
-#define PAGE_SHARED	__pgprot(_PAGE_PRESENT | _PAGE_WRITE | (kernel_uses_smartmips_rixi ? 0 : _PAGE_READ) | \
+#define PAGE_SHARED	__pgprot(_PAGE_PRESENT | _PAGE_WRITE | (cpu_has_rixi ? 0 : _PAGE_READ) | \
 				 _page_cachable_default)
-#define PAGE_COPY	__pgprot(_PAGE_PRESENT | (kernel_uses_smartmips_rixi ? 0 : _PAGE_READ) | \
-				 (kernel_uses_smartmips_rixi ?  _PAGE_NO_EXEC : 0) | _page_cachable_default)
-#define PAGE_READONLY	__pgprot(_PAGE_PRESENT | (kernel_uses_smartmips_rixi ? 0 : _PAGE_READ) | \
+#define PAGE_COPY	__pgprot(_PAGE_PRESENT | (cpu_has_rixi ? 0 : _PAGE_READ) | \
+				 (cpu_has_rixi ?  _PAGE_NO_EXEC : 0) | _page_cachable_default)
+#define PAGE_READONLY	__pgprot(_PAGE_PRESENT | (cpu_has_rixi ? 0 : _PAGE_READ) | \
 				 _page_cachable_default)
 #define PAGE_KERNEL	__pgprot(_PAGE_PRESENT | __READABLE | __WRITEABLE | \
 				 _PAGE_GLOBAL | _page_cachable_default)
-#define PAGE_USERIO	__pgprot(_PAGE_PRESENT | (kernel_uses_smartmips_rixi ? 0 : _PAGE_READ) | _PAGE_WRITE | \
+#define PAGE_USERIO	__pgprot(_PAGE_PRESENT | (cpu_has_rixi ? 0 : _PAGE_READ) | _PAGE_WRITE | \
 				 _page_cachable_default)
 #define PAGE_KERNEL_UNCACHED __pgprot(_PAGE_PRESENT | __READABLE | \
 			__WRITEABLE | _PAGE_GLOBAL | _CACHE_UNCACHED)
@@ -77,16 +78,7 @@ extern unsigned long zero_page_mask;
 
 #define ZERO_PAGE(vaddr) \
 	(virt_to_page((void *)(empty_zero_page + (((unsigned long)(vaddr)) & zero_page_mask))))
-
-#define is_zero_pfn is_zero_pfn
-static inline int is_zero_pfn(unsigned long pfn)
-{
-	extern unsigned long zero_pfn;
-	unsigned long offset_from_zero_pfn = pfn - zero_pfn;
-	return offset_from_zero_pfn <= (zero_page_mask >> PAGE_SHIFT);
-}
-
-#define my_zero_pfn(addr)	page_to_pfn(ZERO_PAGE(addr))
+#define __HAVE_COLOR_ZERO_PAGE
 
 extern void paging_init(void);
 
@@ -121,7 +113,7 @@ static inline void set_pte(pte_t *ptep, pte_t pte)
 		 * it better already be global)
 		 */
 		if (pte_none(*buddy)) {
-			buddy->pte_low  |= _PAGE_GLOBAL;
+			buddy->pte_low	|= _PAGE_GLOBAL;
 			buddy->pte_high |= _PAGE_GLOBAL;
 		}
 	}
@@ -304,7 +296,7 @@ static inline pte_t pte_mkdirty(pte_t pte)
 static inline pte_t pte_mkyoung(pte_t pte)
 {
 	pte_val(pte) |= _PAGE_ACCESSED;
-	if (kernel_uses_smartmips_rixi) {
+	if (cpu_has_rixi) {
 		if (!(pte_val(pte) & _PAGE_NO_READ))
 			pte_val(pte) |= _PAGE_SILENT_READ;
 	} else {
@@ -328,7 +320,7 @@ static inline int pte_special(pte_t pte)	{ return 0; }
 static inline pte_t pte_mkspecial(pte_t pte)	{ return pte; }
 
 /*
- * Macro to make mark a page protection value as "uncacheable".  Note
+ * Macro to make mark a page protection value as "uncacheable".	 Note
  * that "protection" is really a misnomer here as the protection value
  * contains the memory attribute bits, dirty bits, and various other
  * bits as well.
@@ -381,9 +373,11 @@ static inline void update_mmu_cache(struct vm_area_struct *vma,
 }
 
 static inline void update_mmu_cache_pmd(struct vm_area_struct *vma,
-	unsigned long address, pmd_t pmd)
+	unsigned long address, pmd_t *pmdp)
 {
-	__update_tlb(vma, address, *(pte_t *) &pmd);
+	pte_t pte = *(pte_t *)pmdp;
+
+	__update_tlb(vma, address, pte);
 }
 
 #define kern_addr_valid(addr)	(1)
@@ -499,7 +493,7 @@ static inline pmd_t pmd_mkyoung(pmd_t pmd)
 {
 	pmd_val(pmd) |= _PAGE_ACCESSED;
 
-	if (kernel_uses_smartmips_rixi) {
+	if (cpu_has_rixi) {
 		if (!(pmd_val(pmd) & _PAGE_NO_READ))
 			pmd_val(pmd) |= _PAGE_SILENT_READ;
 	} else {

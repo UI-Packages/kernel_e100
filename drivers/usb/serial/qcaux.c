@@ -69,16 +69,10 @@ static struct usb_device_id id_table[] = {
 	{ USB_VENDOR_AND_INTERFACE_INFO(UTSTARCOM_VENDOR_ID, 0xff, 0xfd, 0xff) },  /* NMEA */
 	{ USB_VENDOR_AND_INTERFACE_INFO(UTSTARCOM_VENDOR_ID, 0xff, 0xfe, 0xff) },  /* WMC */
 	{ USB_VENDOR_AND_INTERFACE_INFO(UTSTARCOM_VENDOR_ID, 0xff, 0xff, 0xff) },  /* DIAG */
+	{ USB_DEVICE_AND_INTERFACE_INFO(0x1fac, 0x0151, 0xff, 0xff, 0xff) },
 	{ },
 };
 MODULE_DEVICE_TABLE(usb, id_table);
-
-static struct usb_driver qcaux_driver = {
-	.name =		"qcaux",
-	.probe =	usb_serial_probe,
-	.disconnect =	usb_serial_disconnect,
-	.id_table =	id_table,
-};
 
 static struct usb_serial_driver qcaux_device = {
 	.driver = {
@@ -93,5 +87,5 @@ static struct usb_serial_driver * const serial_drivers[] = {
 	&qcaux_device, NULL
 };
 
-module_usb_serial_driver(qcaux_driver, serial_drivers);
+module_usb_serial_driver(serial_drivers, id_table);
 MODULE_LICENSE("GPL");

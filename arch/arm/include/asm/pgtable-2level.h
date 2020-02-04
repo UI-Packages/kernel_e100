@@ -115,6 +115,7 @@
  * The PTE table pointer refers to the hardware entries; the "Linux"
  * entries are stored 1024 bytes below.
  */
+#define L_PTE_VALID		(_AT(pteval_t, 1) << 0)		/* Valid */
 #define L_PTE_PRESENT		(_AT(pteval_t, 1) << 0)
 #define L_PTE_YOUNG		(_AT(pteval_t, 1) << 1)
 #define L_PTE_FILE		(_AT(pteval_t, 1) << 2)	/* only when !PRESENT */
@@ -123,6 +124,10 @@
 #define L_PTE_USER		(_AT(pteval_t, 1) << 8)
 #define L_PTE_XN		(_AT(pteval_t, 1) << 9)
 #define L_PTE_SHARED		(_AT(pteval_t, 1) << 10)	/* shared(v6), coherent(xsc3) */
+#define L_PTE_NONE		(_AT(pteval_t, 1) << 11)
+
+/* Two-level page tables only have PXN in the PGD, not in the PTE. */
+#define L_PTE_PXN		(_AT(pteval_t, 0))
 
 /*
  * These are the memory types, defined to be compatible with

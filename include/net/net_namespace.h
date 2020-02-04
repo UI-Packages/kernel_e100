@@ -15,13 +15,16 @@
 #include <net/netns/packet.h>
 #include <net/netns/ipv4.h>
 #include <net/netns/ipv6.h>
+#include <net/netns/sctp.h>
 #include <net/netns/dccp.h>
+#include <net/netns/netfilter.h>
 #include <net/netns/x_tables.h>
 #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
 #include <net/netns/conntrack.h>
 #endif
 #include <net/netns/xfrm.h>
 
+struct user_namespace;
 struct proc_dir_entry;
 struct net_device;
 struct sock;
@@ -52,6 +55,8 @@ struct net {
 	struct list_head	cleanup_list;	/* namespaces on death row */
 	struct list_head	exit_list;	/* Use only net_mutex */
 
+	struct user_namespace   *user_ns;	/* Owning user namespace */
+
 	unsigned int		proc_inum;
 
 	struct proc_dir_entry 	*proc_net;
@@ -68,6 +73,7 @@ struct net {
 	struct hlist_head 	*dev_name_head;
 	struct hlist_head	*dev_index_head;
 	unsigned int		dev_base_seq;	/* protected by rtnl_mutex */
+	int			ifindex;
 
 	/* core fib_rules */
 	struct list_head	rules_ops;
@@ -82,13 +88,20 @@ struct net {
 #if IS_ENABLED(CONFIG_IPV6)
 	struct netns_ipv6	ipv6;
 #endif
+#if defined(CONFIG_IP_SCTP) || defined(CONFIG_IP_SCTP_MODULE)
+	struct netns_sctp	sctp;
+#endif
 #if defined(CONFIG_IP_DCCP) || defined(CONFIG_IP_DCCP_MODULE)
 	struct netns_dccp	dccp;
 #endif
 #ifdef CONFIG_NETFILTER
+	struct netns_nf		nf;
 	struct netns_xt		xt;
 #if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
 	struct netns_ct		ct;
+#endif
+#if IS_ENABLED(CONFIG_NF_DEFRAG_IPV6)
+	struct netns_nf_frag	nf_frag;
 #endif
 	struct sock		*nfnl;
 	struct sock		*nfnl_stash;
@@ -103,24 +116,38 @@ struct net {
 	struct netns_xfrm	xfrm;
 #endif
 	struct netns_ipvs	*ipvs;
+	struct sock		*diag_nlsk;
+	atomic_unchecked_t	rt_genid;
 };
 
+/*
+ * ifindex generation is per-net namespace, and loopback is
+ * always the 1st device in ns (see net_dev_init), thus any
+ * loopback device should get ifindex 1
+ */
+
+#define LOOPBACK_IFINDEX	1
 
 #include <linux/seq_file_net.h>
 
 /* Init's network namespace */
 extern struct net init_net;
 
-#ifdef CONFIG_NET
-extern struct net *copy_net_ns(unsigned long flags, struct net *net_ns);
+#ifdef CONFIG_NET_NS
+extern struct net *copy_net_ns(unsigned long flags,
+	struct user_namespace *user_ns, struct net *old_net);
 
-#else /* CONFIG_NET */
-static inline struct net *copy_net_ns(unsigned long flags, struct net *net_ns)
+#else /* CONFIG_NET_NS */
+#include <linux/sched.h>
+#include <linux/nsproxy.h>
+static inline struct net *copy_net_ns(unsigned long flags,
+	struct user_namespace *user_ns, struct net *old_net)
 {
-	/* There is nothing to copy so this is a noop */
-	return net_ns;
+	if (flags & CLONE_NEWNET)
+		return ERR_PTR(-EINVAL);
+	return old_net;
 }
-#endif /* CONFIG_NET */
+#endif /* CONFIG_NET_NS */
 
 
 extern struct list_head net_namespace_list;
@@ -242,10 +269,16 @@ static inline struct net *read_pnet(struct net * const *pnet)
 #define __net_init
 #define __net_exit
 #define __net_initdata
+#define __net_initconst
 #else
 #define __net_init	__init
 #define __net_exit	__exit_refok
 #define __net_initdata	__initdata
+#ifdef CONSTIFY_PLUGIN
+#define __net_initconst	__initconst
+#else
+#define __net_initconst	__initdata
+#endif
 #endif
 
 struct pernet_operations {
@@ -255,7 +288,7 @@ struct pernet_operations {
 	void (*exit_batch)(struct list_head *net_exit_list);
 	int *id;
 	size_t size;
-};
+} __do_const;
 
 /*
  * Use these carefully.  If you implement a network device and it
@@ -281,14 +314,34 @@ extern void unregister_pernet_subsys(struct pernet_operations *);
 extern int register_pernet_device(struct pernet_operations *);
 extern void unregister_pernet_device(struct pernet_operations *);
 
-struct ctl_path;
 struct ctl_table;
 struct ctl_table_header;
 
-extern struct ctl_table_header *register_net_sysctl_table(struct net *net,
-	const struct ctl_path *path, struct ctl_table *table);
-extern struct ctl_table_header *register_net_sysctl_rotable(
-	const struct ctl_path *path, struct ctl_table *table);
+#ifdef CONFIG_SYSCTL
+extern int net_sysctl_init(void);
+extern struct ctl_table_header *register_net_sysctl(struct net *net,
+	const char *path, struct ctl_table *table);
 extern void unregister_net_sysctl_table(struct ctl_table_header *header);
+#else
+static inline int net_sysctl_init(void) { return 0; }
+static inline struct ctl_table_header *register_net_sysctl(struct net *net,
+	const char *path, struct ctl_table *table)
+{
+	return NULL;
+}
+static inline void unregister_net_sysctl_table(struct ctl_table_header *header)
+{
+}
+#endif
+
+static inline int rt_genid(struct net *net)
+{
+	return atomic_read_unchecked(&net->rt_genid);
+}
+
+static inline void rt_genid_bump(struct net *net)
+{
+	atomic_inc_unchecked(&net->rt_genid);
+}
 
 #endif /* __NET_NET_NAMESPACE_H */

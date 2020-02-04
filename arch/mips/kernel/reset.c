@@ -29,16 +29,19 @@ void machine_restart(char *command)
 {
 	if (_machine_restart)
 		_machine_restart(command);
+	for (;;);
 }
 
 void machine_halt(void)
 {
 	if (_machine_halt)
 		_machine_halt();
+	for (;;);
 }
 
 void machine_power_off(void)
 {
 	if (pm_power_off)
 		pm_power_off();
+	for (;;);
 }

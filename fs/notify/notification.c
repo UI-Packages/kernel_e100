@@ -18,7 +18,7 @@
 
 /*
  * Basic idea behind the notification queue: An fsnotify group (like inotify)
- * sends the userspace notification about events asyncronously some time after
+ * sends the userspace notification about events asynchronously some time after
  * the event happened.  When inotify gets an event it will need to add that
  * event to the group notify queue.  Since a single event might need to be on
  * multiple group's notification queues we can't add the event directly to each
@@ -57,7 +57,7 @@ static struct kmem_cache *fsnotify_event_holder_cachep;
  * get set to 0 so it will never get 'freed'
  */
 static struct fsnotify_event *q_overflow_event;
-static atomic_t fsnotify_sync_cookie = ATOMIC_INIT(0);
+static atomic_unchecked_t fsnotify_sync_cookie = ATOMIC_INIT(0);
 
 /**
  * fsnotify_get_cookie - return a unique cookie for use in synchronizing events.
@@ -65,7 +65,7 @@ static atomic_t fsnotify_sync_cookie = ATOMIC_INIT(0);
  */
 u32 fsnotify_get_cookie(void)
 {
-	return atomic_inc_return(&fsnotify_sync_cookie);
+	return atomic_inc_return_unchecked(&fsnotify_sync_cookie);
 }
 EXPORT_SYMBOL_GPL(fsnotify_get_cookie);
 
@@ -225,6 +225,7 @@ alloc_holder:
 	mutex_unlock(&group->notification_mutex);
 
 	wake_up(&group->notification_waitq);
+	kill_fasync(&group->fsn_fa, SIGIO, POLL_IN);
 	return return_event;
 }
 

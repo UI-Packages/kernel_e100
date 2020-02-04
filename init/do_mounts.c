@@ -1,3 +1,13 @@
+/*
+ * Many of the syscalls used in this file expect some of the arguments
+ * to be __user pointers not __kernel pointers.  To limit the sparse
+ * noise, turn off sparse checking for this file.
+ */
+#ifdef __CHECKER__
+#undef __CHECKER__
+#warning "Sparse checking disabled for this file"
+#endif
+
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/ctype.h>
@@ -60,23 +70,28 @@ __setup("ro", readonly);
 __setup("rw", readwrite);
 
 #ifdef CONFIG_BLOCK
+struct uuidcmp {
+	const char *uuid;
+	int len;
+};
+
 /**
  * match_dev_by_uuid - callback for finding a partition using its uuid
  * @dev:	device passed in by the caller
- * @data:	opaque pointer to a 36 byte char array with a UUID
+ * @data:	opaque pointer to the desired struct uuidcmp to match
  *
  * Returns 1 if the device matches, and 0 otherwise.
  */
-static int match_dev_by_uuid(struct device *dev, void *data)
+static int match_dev_by_uuid(struct device *dev, const void *data)
 {
-	u8 *uuid = data;
+	const struct uuidcmp *cmp = data;
 	struct hd_struct *part = dev_to_part(dev);
 
 	if (!part->info)
 		goto no_match;
 
-	if (memcmp(uuid, part->info->uuid, sizeof(part->info->uuid)))
-			goto no_match;
+	if (strncasecmp(cmp->uuid, part->info->uuid, cmp->len))
+		goto no_match;
 
 	return 1;
 no_match:
@@ -86,7 +101,7 @@ no_match:
 
 /**
  * devt_from_partuuid - looks up the dev_t of a partition by its UUID
- * @uuid:	min 36 byte char array containing a hex ascii UUID
+ * @uuid:	char array containing ascii UUID
  *
  * The function will return the first partition which contains a matching
  * UUID value in its partition_meta_info struct.  This does not search
@@ -97,38 +112,41 @@ no_match:
  *
  * Returns the matching dev_t on success or 0 on failure.
  */
-static dev_t devt_from_partuuid(char *uuid_str)
+static dev_t devt_from_partuuid(const char *uuid_str)
 {
 	dev_t res = 0;
+	struct uuidcmp cmp;
 	struct device *dev = NULL;
-	u8 uuid[16];
 	struct gendisk *disk;
 	struct hd_struct *part;
 	int offset = 0;
+	bool clear_root_wait = false;
+	char *slash;
 
-	if (strlen(uuid_str) < 36)
-		goto done;
+	cmp.uuid = uuid_str;
 
+	slash = strchr(uuid_str, '/');
 	/* Check for optional partition number offset attributes. */
-	if (uuid_str[36]) {
+	if (slash) {
 		char c = 0;
 		/* Explicitly fail on poor PARTUUID syntax. */
-		if (sscanf(&uuid_str[36],
-			   "/PARTNROFF=%d%c", &offset, &c) != 1) {
-			printk(KERN_ERR "VFS: PARTUUID= is invalid.\n"
-			 "Expected PARTUUID=<valid-uuid-id>[/PARTNROFF=%%d]\n");
-			if (root_wait)
-				printk(KERN_ERR
-				     "Disabling rootwait; root= is invalid.\n");
-			root_wait = 0;
+		if (sscanf(slash + 1,
+			   "PARTNROFF=%d%c", &offset, &c) != 1) {
+			clear_root_wait = true;
 			goto done;
 		}
+		cmp.len = slash - uuid_str;
+	} else {
+		cmp.len = strlen(uuid_str);
 	}
 
-	/* Pack the requested UUID in the expected format. */
-	part_pack_uuid(uuid_str, uuid);
+	if (!cmp.len) {
+		clear_root_wait = true;
+		goto done;
+	}
 
-	dev = class_find_device(&block_class, NULL, uuid, &match_dev_by_uuid);
+	dev = class_find_device(&block_class, NULL, &cmp,
+				&match_dev_by_uuid);
 	if (!dev)
 		goto done;
 
@@ -149,6 +167,13 @@ static dev_t devt_from_partuuid(char *uuid_str)
 no_offset:
 	put_device(dev);
 done:
+	if (clear_root_wait) {
+		pr_err("VFS: PARTUUID= is invalid.\n"
+		       "Expected PARTUUID=<valid-uuid-id>[/PARTNROFF=%%d]\n");
+		if (root_wait)
+			pr_err("Disabling rootwait; root= is invalid.\n");
+		root_wait = 0;
+	}
 	return res;
 }
 #endif
@@ -165,6 +190,10 @@ done:
  *	   used when disk name of partitioned disk ends on a digit.
  *	6) PARTUUID=00112233-4455-6677-8899-AABBCCDDEEFF representing the
  *	   unique id of a partition if the partition table provides it.
+ *	   The UUID may be either an EFI/GPT UUID, or refer to an MSDOS
+ *	   partition using the format SSSSSSSS-PP, where SSSSSSSS is a zero-
+ *	   filled hex representation of the 32-bit "NT disk signature", and PP
+ *	   is a zero-filled hex representation of the 1-based partition number.
  *	7) PARTUUID=<UUID>/PARTNROFF=<int> to select a partition in relation to
  *	   a partition with a known unique id.
  *
@@ -377,7 +406,7 @@ static int __init do_mount_squash_image(char *name, char *rdir, char *fs,
 	    || snprintf(w_dir, sizeof(w_dir), "%s/%s", rrdir,
 			root_squash_wdir) >= sizeof(w_dir)
 	    || snprintf(wb_dir, sizeof(wb_dir), "%s.%08x", w_dir,
-			random32()) >= sizeof(wb_dir)
+			prandom_u32()) >= sizeof(wb_dir)
 	    || snprintf(opt_buf, sizeof(opt_buf), "dirs=%s=rw:%s=ro", w_dir,
 			loop_dir) >= sizeof(opt_buf)) {
 		printk("%s: image/dir name too long\n", __func__);
@@ -471,12 +500,15 @@ static int __init do_mount_root(char *name, char *fs, int flags, void *data)
 	if (root_squash_image && root_squash_wdir)
 		err = do_mount_squash_image(name, "/root", fs, flags, data);
 	else
-		err = sys_mount(name, "/root", fs, flags, data);
+		err = sys_mount((char __force_user *) name,
+				(char __force_user *) "/root",
+				(char __force_user *) fs, flags,
+				(void __force_user *) data);
 
 	if (err)
 		return err;
 
-	sys_chdir((const char __user __force *)"/root");
+	sys_chdir((const char __force_user *)"/root");
 	s = current->fs->pwd.dentry->d_sb;
 	ROOT_DEV = s->s_dev;
 	printk(KERN_INFO
@@ -489,8 +521,9 @@ static int __init do_mount_root(char *name, char *fs, int flags, void *data)
 
 void __init mount_block_root(char *name, int flags)
 {
-	char *fs_names = __getname_gfp(GFP_KERNEL
-		| __GFP_NOTRACK_FALSE_POSITIVE);
+	struct page *page = alloc_page(GFP_KERNEL |
+					__GFP_NOTRACK_FALSE_POSITIVE);
+	char *fs_names = page_address(page);
 	char *p;
 #ifdef CONFIG_BLOCK
 	char b[BDEVNAME_SIZE];
@@ -542,7 +575,7 @@ retry:
 #endif
 	panic("VFS: Unable to mount root fs on %s", b);
 out:
-	putname(fs_names);
+	put_page(page);
 }
  
 #ifdef CONFIG_ROOT_NFS
@@ -596,18 +629,18 @@ void __init change_floppy(char *fmt, ...)
 	va_start(args, fmt);
 	vsprintf(buf, fmt, args);
 	va_end(args);
-	fd = sys_open("/dev/root", O_RDWR | O_NDELAY, 0);
+	fd = sys_open((char __user *)"/dev/root", O_RDWR | O_NDELAY, 0);
 	if (fd >= 0) {
 		sys_ioctl(fd, FDEJECT, 0);
 		sys_close(fd);
 	}
 	printk(KERN_NOTICE "VFS: Insert %s and press ENTER\n", buf);
-	fd = sys_open("/dev/console", O_RDWR, 0);
+	fd = sys_open((__force const char __user *)"/dev/console", O_RDWR, 0);
 	if (fd >= 0) {
 		sys_ioctl(fd, TCGETS, (long)&termios);
 		termios.c_lflag &= ~ICANON;
 		sys_ioctl(fd, TCSETSF, (long)&termios);
-		sys_read(fd, &c, 1);
+		sys_read(fd, (char __user *)&c, 1);
 		termios.c_lflag |= ICANON;
 		sys_ioctl(fd, TCSETSF, (long)&termios);
 		sys_close(fd);
@@ -701,6 +734,6 @@ void __init prepare_namespace(void)
 	mount_root();
 out:
 	devtmpfs_mount("dev");
-	sys_mount(".", "/", NULL, MS_MOVE, NULL);
-	sys_chroot((const char __user __force *)".");
+	sys_mount((char __force_user *)".", (char __force_user *)"/", NULL, MS_MOVE, NULL);
+	sys_chroot((const char __force_user *)".");
 }

@@ -47,7 +47,14 @@ long compat_arch_ptrace(struct task_struct *child, compat_long_t request,
 	int ret;
 
 	switch (request) {
-
+	case PTRACE_LIVEDUMP:
+#ifdef CONFIG_LIVEDUMP
+		ret = compat_ptrace_livedump(child,
+		      (struct compat_livedump_param __user *)(long)cdata);
+#else
+		ret = -ENOSYS;
+#endif /* CONFIG_LIVEDUMP */
+		break;
 	/*
 	 * Read 4 bytes of the other process' storage
 	 *  data is a pointer specifying where the user wants the
@@ -124,7 +131,7 @@ long compat_arch_ptrace(struct task_struct *child, compat_long_t request,
 		case FPC_CSR:
 			tmp = child->thread.fpu.fcr31;
 			break;
-		case FPC_EIR: {	/* implementation / version register */
+		case FPC_EIR: { /* implementation / version register */
 			unsigned int flags;
 #ifdef CONFIG_MIPS_MT_SMTC
 			unsigned int irqflags;
@@ -148,13 +155,21 @@ long compat_arch_ptrace(struct task_struct *child, compat_long_t request,
 				unsigned int vpflags = dvpe();
 				flags = read_c0_status();
 				__enable_fpu();
-				__asm__ __volatile__("cfc1\t%0,$0": "=r" (tmp));
+				__asm__ __volatile__(
+					".set push\n"
+					"\t.set mips1\n"
+					"\tcfc1\t%0,$0\n"
+					"\t.set pop" : "=r" (tmp));
 				write_c0_status(flags);
 				evpe(vpflags);
 			} else {
 				flags = read_c0_status();
 				__enable_fpu();
-				__asm__ __volatile__("cfc1\t%0,$0": "=r" (tmp));
+				__asm__ __volatile__(
+					".set push\n"
+					"\t.set mips1\n"
+					"\tcfc1\t%0,$0\n"
+					"\t.set pop" : "=r" (tmp));
 				write_c0_status(flags);
 			}
 #ifdef CONFIG_MIPS_MT_SMTC

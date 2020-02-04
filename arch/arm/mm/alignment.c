@@ -25,6 +25,7 @@
 #include <asm/cp15.h>
 #include <asm/system_info.h>
 #include <asm/unaligned.h>
+#include <asm/opcodes.h>
 
 #include "fault.h"
 
@@ -211,10 +212,12 @@ union offset_union {
 #define __get16_unaligned_check(ins,val,addr)			\
 	do {							\
 		unsigned int err = 0, v, a = addr;		\
+		pax_open_userland();				\
 		__get8_unaligned_check(ins,v,a,err);		\
 		val =  v << ((BE) ? 8 : 0);			\
 		__get8_unaligned_check(ins,v,a,err);		\
 		val |= v << ((BE) ? 0 : 8);			\
+		pax_close_userland();				\
 		if (err)					\
 			goto fault;				\
 	} while (0)
@@ -228,6 +231,7 @@ union offset_union {
 #define __get32_unaligned_check(ins,val,addr)			\
 	do {							\
 		unsigned int err = 0, v, a = addr;		\
+		pax_open_userland();				\
 		__get8_unaligned_check(ins,v,a,err);		\
 		val =  v << ((BE) ? 24 :  0);			\
 		__get8_unaligned_check(ins,v,a,err);		\
@@ -236,6 +240,7 @@ union offset_union {
 		val |= v << ((BE) ?  8 : 16);			\
 		__get8_unaligned_check(ins,v,a,err);		\
 		val |= v << ((BE) ?  0 : 24);			\
+		pax_close_userland();				\
 		if (err)					\
 			goto fault;				\
 	} while (0)
@@ -249,6 +254,7 @@ union offset_union {
 #define __put16_unaligned_check(ins,val,addr)			\
 	do {							\
 		unsigned int err = 0, v = val, a = addr;	\
+		pax_open_userland();				\
 		__asm__( FIRST_BYTE_16				\
 	 ARM(	"1:	"ins"	%1, [%2], #1\n"	)		\
 	 THUMB(	"1:	"ins"	%1, [%2]\n"	)		\
@@ -268,6 +274,7 @@ union offset_union {
 		"	.popsection\n"				\
 		: "=r" (err), "=&r" (v), "=&r" (a)		\
 		: "0" (err), "1" (v), "2" (a));			\
+		pax_close_userland();				\
 		if (err)					\
 			goto fault;				\
 	} while (0)
@@ -281,6 +288,7 @@ union offset_union {
 #define __put32_unaligned_check(ins,val,addr)			\
 	do {							\
 		unsigned int err = 0, v = val, a = addr;	\
+		pax_open_userland();				\
 		__asm__( FIRST_BYTE_32				\
 	 ARM(	"1:	"ins"	%1, [%2], #1\n"	)		\
 	 THUMB(	"1:	"ins"	%1, [%2]\n"	)		\
@@ -310,6 +318,7 @@ union offset_union {
 		"	.popsection\n"				\
 		: "=r" (err), "=&r" (v), "=&r" (a)		\
 		: "0" (err), "1" (v), "2" (a));			\
+		pax_close_userland();				\
 		if (err)					\
 			goto fault;				\
 	} while (0)
@@ -699,7 +708,6 @@ do_alignment_t32_to_handler(unsigned long *pinstr, struct pt_regs *regs,
 	unsigned long instr = *pinstr;
 	u16 tinst1 = (instr >> 16) & 0xffff;
 	u16 tinst2 = instr & 0xffff;
-	poffset->un = 0;
 
 	switch (tinst1 & 0xffe0) {
 	/* A6.3.5 Load/Store multiple */
@@ -746,11 +754,10 @@ do_alignment_t32_to_handler(unsigned long *pinstr, struct pt_regs *regs,
 static int
 do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
-	union offset_union offset;
+	union offset_union uninitialized_var(offset);
 	unsigned long instr = 0, instrptr;
 	int (*handler)(unsigned long addr, unsigned long instr, struct pt_regs *regs);
 	unsigned int type;
-	mm_segment_t fs;
 	unsigned int fault;
 	u16 tinstr = 0;
 	int isize = 4;
@@ -761,26 +768,27 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 
 	instrptr = instruction_pointer(regs);
 
-	fs = get_fs();
-	set_fs(KERNEL_DS);
 	if (thumb_mode(regs)) {
-		fault = __get_user(tinstr, (u16 *)(instrptr & ~1));
+		u16 *ptr = (u16 *)(instrptr & ~1);
+		fault = probe_kernel_address(ptr, tinstr);
+		tinstr = __mem_to_opcode_thumb16(tinstr);
 		if (!fault) {
 			if (cpu_architecture() >= CPU_ARCH_ARMv7 &&
 			    IS_T32(tinstr)) {
 				/* Thumb-2 32-bit */
 				u16 tinst2 = 0;
-				fault = __get_user(tinst2, (u16 *)(instrptr+2));
+				fault = probe_kernel_address(ptr + 1, tinst2);
+				tinst2 = __mem_to_opcode_thumb16(tinst2);
 				instr = (tinstr << 16) | tinst2;
 				thumb2_32b = 1;
 			} else {
 				isize = 2;
-				instr = thumb2arm(tinstr);
 			}
 		}
-	} else
-		fault = __get_user(instr, (u32 *)instrptr);
-	set_fs(fs);
+	} else {
+		fault = probe_kernel_address(instrptr, instr);
+		instr = __mem_to_opcode_arm(instr);
+	}
 
 	if (fault) {
 		type = TYPE_FAULT;
@@ -795,7 +803,9 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
  fixup:
 
 	regs->ARM_pc += isize;
-
+#ifdef CONFIG_CPU_ENDIAN_BE8
+	instr = __swab32(instr);
+#endif
 	switch (CODING_BITS(instr)) {
 	case 0x00000000:	/* 3.13.4 load/store instruction extensions */
 		if (LDSTHD_I_BIT(instr))
@@ -854,10 +864,13 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 		break;
 
 	case 0x08000000:	/* ldm or stm, or thumb-2 32bit instruction */
-		if (thumb2_32b)
+		if (thumb2_32b) {
+			offset.un = 0;
 			handler = do_alignment_t32_to_handler(&instr, regs, &offset);
-		else
+		} else {
+			offset.un = 0;
 			handler = do_alignment_ldmstm;
+		}
 		break;
 
 	default:
@@ -962,12 +975,14 @@ static int __init alignment_init(void)
 		return -ENOMEM;
 #endif
 
+#ifdef CONFIG_CPU_CP15
 	if (cpu_is_v6_unaligned()) {
 		cr_alignment &= ~CR_A;
 		cr_no_alignment &= ~CR_A;
 		set_cr(cr_alignment);
 		ai_usermode = safe_usermode(ai_usermode, false);
 	}
+#endif
 
 	hook_fault_code(FAULT_CODE_ALIGNMENT, do_alignment, SIGBUS, BUS_ADRALN,
 			"alignment exception");

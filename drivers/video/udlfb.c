@@ -324,7 +324,11 @@ static int dlfb_ops_mmap(struct fb_info *info, struct vm_area_struct *vma)
 	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long page, pos;
 
-	if (offset + size > info->fix.smem_len)
+	if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT))
+		return -EINVAL;
+	if (size > info->fix.smem_len)
+		return -EINVAL;
+	if (offset > info->fix.smem_len - size)
 		return -EINVAL;
 
 	pos = (unsigned long)info->fix.smem_start + offset;
@@ -345,7 +349,6 @@ static int dlfb_ops_mmap(struct fb_info *info, struct vm_area_struct *vma)
 			size = 0;
 	}
 
-	vma->vm_flags |= VM_RESERVED;	/* avoid to swap out this VMA */
 	return 0;
 }
 
@@ -620,11 +623,11 @@ int dlfb_handle_damage(struct dlfb_data *dev, int x, int y,
 		dlfb_urb_completion(urb);
 
 error:
-	atomic_add(bytes_sent, &dev->bytes_sent);
-	atomic_add(bytes_identical, &dev->bytes_identical);
-	atomic_add(width*height*2, &dev->bytes_rendered);
+	atomic_add_unchecked(bytes_sent, &dev->bytes_sent);
+	atomic_add_unchecked(bytes_identical, &dev->bytes_identical);
+	atomic_add_unchecked(width*height*2, &dev->bytes_rendered);
 	end_cycles = get_cycles();
-	atomic_add(((unsigned int) ((end_cycles - start_cycles)
+	atomic_add_unchecked(((unsigned int) ((end_cycles - start_cycles)
 		    >> 10)), /* Kcycles */
 		   &dev->cpu_kcycles_used);
 
@@ -745,11 +748,11 @@ static void dlfb_dpy_deferred_io(struct fb_info *info,
 		dlfb_urb_completion(urb);
 
 error:
-	atomic_add(bytes_sent, &dev->bytes_sent);
-	atomic_add(bytes_identical, &dev->bytes_identical);
-	atomic_add(bytes_rendered, &dev->bytes_rendered);
+	atomic_add_unchecked(bytes_sent, &dev->bytes_sent);
+	atomic_add_unchecked(bytes_identical, &dev->bytes_identical);
+	atomic_add_unchecked(bytes_rendered, &dev->bytes_rendered);
 	end_cycles = get_cycles();
-	atomic_add(((unsigned int) ((end_cycles - start_cycles)
+	atomic_add_unchecked(((unsigned int) ((end_cycles - start_cycles)
 		    >> 10)), /* Kcycles */
 		   &dev->cpu_kcycles_used);
 }
@@ -893,7 +896,7 @@ static int dlfb_ops_open(struct fb_info *info, int user)
 
 		struct fb_deferred_io *fbdefio;
 
-		fbdefio = kmalloc(sizeof(struct fb_deferred_io), GFP_KERNEL);
+		fbdefio = kzalloc(sizeof(struct fb_deferred_io), GFP_KERNEL);
 
 		if (fbdefio) {
 			fbdefio->delay = DL_DEFIO_WRITE_DELAY;
@@ -990,7 +993,9 @@ static int dlfb_ops_release(struct fb_info *info, int user)
 		fb_deferred_io_cleanup(info);
 		kfree(info->fbdefio);
 		info->fbdefio = NULL;
-		info->fbops->fb_mmap = dlfb_ops_mmap;
+		pax_open_kernel();
+		*(void **)&info->fbops->fb_mmap = dlfb_ops_mmap;
+		pax_close_kernel();
 	}
 
 	pr_warn("released /dev/fb%d user=%d count=%d\n",
@@ -1373,7 +1378,7 @@ static ssize_t metrics_bytes_rendered_show(struct device *fbdev,
 	struct fb_info *fb_info = dev_get_drvdata(fbdev);
 	struct dlfb_data *dev = fb_info->par;
 	return snprintf(buf, PAGE_SIZE, "%u\n",
-			atomic_read(&dev->bytes_rendered));
+			atomic_read_unchecked(&dev->bytes_rendered));
 }
 
 static ssize_t metrics_bytes_identical_show(struct device *fbdev,
@@ -1381,7 +1386,7 @@ static ssize_t metrics_bytes_identical_show(struct device *fbdev,
 	struct fb_info *fb_info = dev_get_drvdata(fbdev);
 	struct dlfb_data *dev = fb_info->par;
 	return snprintf(buf, PAGE_SIZE, "%u\n",
-			atomic_read(&dev->bytes_identical));
+			atomic_read_unchecked(&dev->bytes_identical));
 }
 
 static ssize_t metrics_bytes_sent_show(struct device *fbdev,
@@ -1389,7 +1394,7 @@ static ssize_t metrics_bytes_sent_show(struct device *fbdev,
 	struct fb_info *fb_info = dev_get_drvdata(fbdev);
 	struct dlfb_data *dev = fb_info->par;
 	return snprintf(buf, PAGE_SIZE, "%u\n",
-			atomic_read(&dev->bytes_sent));
+			atomic_read_unchecked(&dev->bytes_sent));
 }
 
 static ssize_t metrics_cpu_kcycles_used_show(struct device *fbdev,
@@ -1397,7 +1402,7 @@ static ssize_t metrics_cpu_kcycles_used_show(struct device *fbdev,
 	struct fb_info *fb_info = dev_get_drvdata(fbdev);
 	struct dlfb_data *dev = fb_info->par;
 	return snprintf(buf, PAGE_SIZE, "%u\n",
-			atomic_read(&dev->cpu_kcycles_used));
+			atomic_read_unchecked(&dev->cpu_kcycles_used));
 }
 
 static ssize_t edid_show(
@@ -1457,10 +1462,10 @@ static ssize_t metrics_reset_store(struct device *fbdev,
 	struct fb_info *fb_info = dev_get_drvdata(fbdev);
 	struct dlfb_data *dev = fb_info->par;
 
-	atomic_set(&dev->bytes_rendered, 0);
-	atomic_set(&dev->bytes_identical, 0);
-	atomic_set(&dev->bytes_sent, 0);
-	atomic_set(&dev->cpu_kcycles_used, 0);
+	atomic_set_unchecked(&dev->bytes_rendered, 0);
+	atomic_set_unchecked(&dev->bytes_identical, 0);
+	atomic_set_unchecked(&dev->bytes_sent, 0);
+	atomic_set_unchecked(&dev->cpu_kcycles_used, 0);
 
 	return count;
 }
@@ -1594,7 +1599,7 @@ static int dlfb_usb_probe(struct usb_interface *interface,
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (dev == NULL) {
-		err("dlfb_usb_probe: failed alloc of dev struct\n");
+		dev_err(&interface->dev, "dlfb_usb_probe: failed alloc of dev struct\n");
 		goto error;
 	}
 

@@ -18,6 +18,7 @@
 #include <asm/domain.h>
 #include <asm/unified.h>
 #include <asm/compiler.h>
+#include <asm/pgtable.h>
 
 #define VERIFY_READ 0
 #define VERIFY_WRITE 1
@@ -63,10 +64,37 @@ extern int __put_user_bad(void);
 static inline void set_fs(mm_segment_t fs)
 {
 	current_thread_info()->addr_limit = fs;
-	modify_domain(DOMAIN_KERNEL, fs ? DOMAIN_CLIENT : DOMAIN_MANAGER);
+	modify_domain(DOMAIN_KERNEL, fs ? DOMAIN_KERNELCLIENT : DOMAIN_MANAGER);
 }
 
 #define segment_eq(a,b)	((a) == (b))
+
+#define __HAVE_ARCH_PAX_OPEN_USERLAND
+#define __HAVE_ARCH_PAX_CLOSE_USERLAND
+
+static inline void pax_open_userland(void)
+{
+
+#ifdef CONFIG_PAX_MEMORY_UDEREF
+	if (segment_eq(get_fs(), USER_DS)) {
+		BUG_ON(test_domain(DOMAIN_USER, DOMAIN_UDEREF));
+		modify_domain(DOMAIN_USER, DOMAIN_UDEREF);
+	}
+#endif
+
+}
+
+static inline void pax_close_userland(void)
+{
+
+#ifdef CONFIG_PAX_MEMORY_UDEREF
+	if (segment_eq(get_fs(), USER_DS)) {
+		BUG_ON(test_domain(DOMAIN_USER, DOMAIN_NOACCESS));
+		modify_domain(DOMAIN_USER, DOMAIN_NOACCESS);
+	}
+#endif
+
+}
 
 #define __addr_ok(addr) ({ \
 	unsigned long flag; \
@@ -118,7 +146,7 @@ extern int __get_user_4(void *);
 		: "0" (__p), "r" (__l)					\
 		: __GUP_CLOBBER_##__s)
 
-#define get_user(x,p)							\
+#define __get_user_check(x,p)							\
 	({								\
 		unsigned long __limit = current_thread_info()->addr_limit - 1; \
 		register const typeof(*(p)) __user *__p asm("r0") = (p);\
@@ -141,6 +169,16 @@ extern int __get_user_4(void *);
 		__e;							\
 	})
 
+#define get_user(x,p)							\
+	({								\
+		int __e;						\
+		might_fault();						\
+		pax_open_userland();					\
+		__e = __get_user_check(x,p);				\
+		pax_close_userland();					\
+		__e;							\
+	 })
+
 extern int __put_user_1(void *, unsigned int);
 extern int __put_user_2(void *, unsigned int);
 extern int __put_user_4(void *, unsigned int);
@@ -155,7 +193,7 @@ extern int __put_user_8(void *, unsigned long long);
 		: "0" (__p), "r" (__r2), "r" (__l)			\
 		: "ip", "lr", "cc")
 
-#define put_user(x,p)							\
+#define __put_user_check(x,p)							\
 	({								\
 		unsigned long __limit = current_thread_info()->addr_limit - 1; \
 		register const typeof(*(p)) __r2 asm("r2") = (x);	\
@@ -180,6 +218,16 @@ extern int __put_user_8(void *, unsigned long long);
 		__e;							\
 	})
 
+#define put_user(x,p)							\
+	({								\
+		int __e;						\
+		might_fault();						\
+		pax_open_userland();					\
+		__e = __put_user_check(x,p);				\
+		pax_close_userland();					\
+		__e;							\
+	 })
+
 #else /* CONFIG_MMU */
 
 /*
@@ -188,8 +236,8 @@ extern int __put_user_8(void *, unsigned long long);
 #define USER_DS			KERNEL_DS
 
 #define segment_eq(a,b)		(1)
-#define __addr_ok(addr)		(1)
-#define __range_ok(addr,size)	(0)
+#define __addr_ok(addr)		((void)(addr),1)
+#define __range_ok(addr,size)	((void)(addr),0)
 #define get_fs()		(KERNEL_DS)
 
 static inline void set_fs(mm_segment_t fs)
@@ -203,6 +251,9 @@ static inline void set_fs(mm_segment_t fs)
 
 #define access_ok(type,addr,size)	(__range_ok(addr,size) == 0)
 
+#define user_addr_max() \
+	(segment_eq(get_fs(), USER_DS) ? TASK_SIZE : ~0UL)
+
 /*
  * The "__xxx" versions of the user access functions do not verify the
  * address space - it must have been done previously with a separate
@@ -215,13 +266,17 @@ static inline void set_fs(mm_segment_t fs)
 #define __get_user(x,ptr)						\
 ({									\
 	long __gu_err = 0;						\
+	pax_open_userland();						\
 	__get_user_err((x),(ptr),__gu_err);				\
+	pax_close_userland();						\
 	__gu_err;							\
 })
 
 #define __get_user_error(x,ptr,err)					\
 ({									\
+	pax_open_userland();						\
 	__get_user_err((x),(ptr),err);					\
+	pax_close_userland();						\
 	(void) 0;							\
 })
 
@@ -230,6 +285,7 @@ do {									\
 	unsigned long __gu_addr = (unsigned long)(ptr);			\
 	unsigned long __gu_val;						\
 	__chk_user_ptr(ptr);						\
+	might_fault();							\
 	switch (sizeof(*(ptr))) {					\
 	case 1:	__get_user_asm_byte(__gu_val,__gu_addr,err);	break;	\
 	case 2:	__get_user_asm_half(__gu_val,__gu_addr,err);	break;	\
@@ -296,13 +352,17 @@ do {									\
 #define __put_user(x,ptr)						\
 ({									\
 	long __pu_err = 0;						\
+	pax_open_userland();						\
 	__put_user_err((x),(ptr),__pu_err);				\
+	pax_close_userland();						\
 	__pu_err;							\
 })
 
 #define __put_user_error(x,ptr,err)					\
 ({									\
+	pax_open_userland();						\
 	__put_user_err((x),(ptr),err);					\
+	pax_close_userland();						\
 	(void) 0;							\
 })
 
@@ -311,6 +371,7 @@ do {									\
 	unsigned long __pu_addr = (unsigned long)(ptr);			\
 	__typeof__(*(ptr)) __pu_val = (x);				\
 	__chk_user_ptr(ptr);						\
+	might_fault();							\
 	switch (sizeof(*(ptr))) {					\
 	case 1: __put_user_asm_byte(__pu_val,__pu_addr,err);	break;	\
 	case 2: __put_user_asm_half(__pu_val,__pu_addr,err);	break;	\
@@ -401,22 +462,55 @@ do {									\
 
 
 #ifdef CONFIG_MMU
-extern unsigned long __must_check __copy_from_user(void *to, const void __user *from, unsigned long n);
-extern unsigned long __must_check __copy_to_user(void __user *to, const void *from, unsigned long n);
+extern unsigned long __must_check ___copy_from_user(void *to, const void __user *from, unsigned long n);
+extern unsigned long __must_check ___copy_to_user(void __user *to, const void *from, unsigned long n);
+
+static inline unsigned long __must_check __copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	unsigned long ret;
+
+	check_object_size(to, n, false);
+	pax_open_userland();
+	ret = ___copy_from_user(to, from, n);
+	pax_close_userland();
+	return ret;
+}
+
+static inline unsigned long __must_check __copy_to_user(void __user *to, const void *from, unsigned long n)
+{
+	unsigned long ret;
+
+	check_object_size(from, n, true);
+	pax_open_userland();
+	ret = ___copy_to_user(to, from, n);
+	pax_close_userland();
+	return ret;
+}
+
 extern unsigned long __must_check __copy_to_user_std(void __user *to, const void *from, unsigned long n);
-extern unsigned long __must_check __clear_user(void __user *addr, unsigned long n);
+extern unsigned long __must_check ___clear_user(void __user *addr, unsigned long n);
 extern unsigned long __must_check __clear_user_std(void __user *addr, unsigned long n);
+
+static inline unsigned long __must_check __clear_user(void __user *addr, unsigned long n)
+{
+	unsigned long ret;
+	pax_open_userland();
+	ret = ___clear_user(addr, n);
+	pax_close_userland();
+	return ret;
+}
+
 #else
 #define __copy_from_user(to,from,n)	(memcpy(to, (void __force *)from, n), 0)
 #define __copy_to_user(to,from,n)	(memcpy((void __force *)to, from, n), 0)
 #define __clear_user(addr,n)		(memset((void __force *)addr, 0, n), 0)
 #endif
 
-extern unsigned long __must_check __strncpy_from_user(char *to, const char __user *from, unsigned long count);
-extern unsigned long __must_check __strnlen_user(const char __user *s, long n);
-
 static inline unsigned long __must_check copy_from_user(void *to, const void __user *from, unsigned long n)
 {
+	if ((long)n < 0)
+		return n;
+
 	if (access_ok(VERIFY_READ, from, n))
 		n = __copy_from_user(to, from, n);
 	else /* security hole - plug it */
@@ -426,6 +520,9 @@ static inline unsigned long __must_check copy_from_user(void *to, const void __u
 
 static inline unsigned long __must_check copy_to_user(void __user *to, const void *from, unsigned long n)
 {
+	if ((long)n < 0)
+		return n;
+
 	if (access_ok(VERIFY_WRITE, to, n))
 		n = __copy_to_user(to, from, n);
 	return n;
@@ -441,24 +538,9 @@ static inline unsigned long __must_check clear_user(void __user *to, unsigned lo
 	return n;
 }
 
-static inline long __must_check strncpy_from_user(char *dst, const char __user *src, long count)
-{
-	long res = -EFAULT;
-	if (access_ok(VERIFY_READ, src, 1))
-		res = __strncpy_from_user(dst, src, count);
-	return res;
-}
+extern long strncpy_from_user(char *dest, const char __user *src, long count);
 
-#define strlen_user(s)	strnlen_user(s, ~0UL >> 1)
-
-static inline long __must_check strnlen_user(const char __user *s, long n)
-{
-	unsigned long res = 0;
-
-	if (__addr_ok(s))
-		res = __strnlen_user(s, n);
-
-	return res;
-}
+extern __must_check long strlen_user(const char __user *str);
+extern __must_check long strnlen_user(const char __user *str, long n);
 
 #endif /* _ASMARM_UACCESS_H */

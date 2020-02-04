@@ -258,19 +258,19 @@ static ssize_t process_vm_rw_core(pid_t pid, const struct iovec *lvec,
 	size_t iov_l_curr_offset = 0;
 	ssize_t iov_len;
 
+	return -ENOSYS; // PaX: until properly audited
+
 	/*
 	 * Work out how many pages of struct pages we're going to need
 	 * when eventually calling get_user_pages
 	 */
 	for (i = 0; i < riovcnt; i++) {
 		iov_len = rvec[i].iov_len;
-		if (iov_len > 0) {
-			nr_pages_iov = ((unsigned long)rvec[i].iov_base
-					+ iov_len)
-				/ PAGE_SIZE - (unsigned long)rvec[i].iov_base
-				/ PAGE_SIZE + 1;
-			nr_pages = max(nr_pages, nr_pages_iov);
-		}
+		if (iov_len <= 0)
+			continue;
+		nr_pages_iov = ((unsigned long)rvec[i].iov_base + iov_len) / PAGE_SIZE -
+				(unsigned long)rvec[i].iov_base / PAGE_SIZE + 1;
+		nr_pages = max(nr_pages, nr_pages_iov);
 	}
 
 	if (nr_pages == 0)
@@ -371,15 +371,15 @@ static ssize_t process_vm_rw(pid_t pid,
 	/* Check iovecs */
 	if (vm_write)
 		rc = rw_copy_check_uvector(WRITE, lvec, liovcnt, UIO_FASTIOV,
-					   iovstack_l, &iov_l, 1);
+					   iovstack_l, &iov_l);
 	else
 		rc = rw_copy_check_uvector(READ, lvec, liovcnt, UIO_FASTIOV,
-					   iovstack_l, &iov_l, 1);
+					   iovstack_l, &iov_l);
 	if (rc <= 0)
 		goto free_iovecs;
 
-	rc = rw_copy_check_uvector(READ, rvec, riovcnt, UIO_FASTIOV,
-				   iovstack_r, &iov_r, 0);
+	rc = rw_copy_check_uvector(CHECK_IOVEC_ONLY, rvec, riovcnt, UIO_FASTIOV,
+				   iovstack_r, &iov_r);
 	if (rc <= 0)
 		goto free_iovecs;
 
@@ -429,25 +429,19 @@ compat_process_vm_rw(compat_pid_t pid,
 	if (flags != 0)
 		return -EINVAL;
 
-	if (!access_ok(VERIFY_READ, lvec, liovcnt * sizeof(*lvec)))
-		goto out;
-
-	if (!access_ok(VERIFY_READ, rvec, riovcnt * sizeof(*rvec)))
-		goto out;
-
 	if (vm_write)
 		rc = compat_rw_copy_check_uvector(WRITE, lvec, liovcnt,
 						  UIO_FASTIOV, iovstack_l,
-						  &iov_l, 1);
+						  &iov_l);
 	else
 		rc = compat_rw_copy_check_uvector(READ, lvec, liovcnt,
 						  UIO_FASTIOV, iovstack_l,
-						  &iov_l, 1);
+						  &iov_l);
 	if (rc <= 0)
 		goto free_iovecs;
-	rc = compat_rw_copy_check_uvector(READ, rvec, riovcnt,
+	rc = compat_rw_copy_check_uvector(CHECK_IOVEC_ONLY, rvec, riovcnt,
 					  UIO_FASTIOV, iovstack_r,
-					  &iov_r, 0);
+					  &iov_r);
 	if (rc <= 0)
 		goto free_iovecs;
 
@@ -459,8 +453,6 @@ free_iovecs:
 		kfree(iov_r);
 	if (iov_l != iovstack_l)
 		kfree(iov_l);
-
-out:
 	return rc;
 }
 

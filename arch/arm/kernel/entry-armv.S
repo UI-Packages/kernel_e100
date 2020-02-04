@@ -47,6 +47,87 @@
 9997:
 	.endm
 
+	.macro	pax_enter_kernel
+#if defined(CONFIG_PAX_KERNEXEC) || defined(CONFIG_PAX_MEMORY_UDEREF)
+	@ make aligned space for saved DACR
+	sub	sp, sp, #8
+	@ save regs
+	stmdb	sp!, {r1, r2}
+	@ read DACR from cpu_domain into r1
+	mov	r2, sp
+	@ assume 8K pages, since we have to split the immediate in two
+	bic	r2, r2, #(0x1fc0)
+	bic	r2, r2, #(0x3f)
+	ldr	r1, [r2, #TI_CPU_DOMAIN]
+	@ store old DACR on stack 
+	str	r1, [sp, #8]
+#ifdef CONFIG_PAX_KERNEXEC
+	@ set type of DOMAIN_KERNEL to DOMAIN_KERNELCLIENT
+	bic	r1, r1, #(domain_val(DOMAIN_KERNEL, 3))
+	orr	r1, r1, #(domain_val(DOMAIN_KERNEL, DOMAIN_KERNELCLIENT))
+#endif
+#ifdef CONFIG_PAX_MEMORY_UDEREF
+	@ set current DOMAIN_USER to DOMAIN_NOACCESS
+	bic	r1, r1, #(domain_val(DOMAIN_USER, 3))
+#endif
+	@ write r1 to current_thread_info()->cpu_domain
+	str	r1, [r2, #TI_CPU_DOMAIN]
+	@ write r1 to DACR
+	mcr	p15, 0, r1, c3, c0, 0
+	@ instruction sync
+	instr_sync
+	@ restore regs
+	ldmia	sp!, {r1, r2}
+#endif
+	.endm
+
+	.macro	pax_open_userland
+#ifdef CONFIG_PAX_MEMORY_UDEREF
+	@ save regs
+	stmdb	sp!, {r0, r1}
+	@ read DACR from cpu_domain into r1
+	mov	r0, sp
+	@ assume 8K pages, since we have to split the immediate in two
+	bic	r0, r0, #(0x1fc0)
+	bic	r0, r0, #(0x3f)
+	ldr	r1, [r0, #TI_CPU_DOMAIN]
+	@ set current DOMAIN_USER to DOMAIN_CLIENT
+	bic	r1, r1, #(domain_val(DOMAIN_USER, 3))
+	orr	r1, r1, #(domain_val(DOMAIN_USER, DOMAIN_UDEREF))
+	@ write r1 to current_thread_info()->cpu_domain
+	str	r1, [r0, #TI_CPU_DOMAIN]
+	@ write r1 to DACR
+	mcr	p15, 0, r1, c3, c0, 0
+	@ instruction sync
+	instr_sync
+	@ restore regs
+	ldmia	sp!, {r0, r1}
+#endif
+	.endm
+
+	.macro	pax_close_userland
+#ifdef CONFIG_PAX_MEMORY_UDEREF
+	@ save regs
+	stmdb	sp!, {r0, r1}
+	@ read DACR from cpu_domain into r1
+	mov	r0, sp
+	@ assume 8K pages, since we have to split the immediate in two
+	bic	r0, r0, #(0x1fc0)
+	bic	r0, r0, #(0x3f)
+	ldr	r1, [r0, #TI_CPU_DOMAIN]
+	@ set current DOMAIN_USER to DOMAIN_NOACCESS
+	bic	r1, r1, #(domain_val(DOMAIN_USER, 3))
+	@ write r1 to current_thread_info()->cpu_domain
+	str	r1, [r0, #TI_CPU_DOMAIN]
+	@ write r1 to DACR
+	mcr	p15, 0, r1, c3, c0, 0
+	@ instruction sync
+	instr_sync
+	@ restore regs
+	ldmia	sp!, {r0, r1}
+#endif
+	.endm
+
 	.macro	pabt_helper
 	@ PABORT handler takes pt_regs in r2, fault address in r4 and psr in r5
 #ifdef MULTI_PABORT
@@ -89,11 +170,15 @@
  * Invalid mode handlers
  */
 	.macro	inv_entry, reason
+
+	pax_enter_kernel
+
 	sub	sp, sp, #S_FRAME_SIZE
  ARM(	stmib	sp, {r1 - lr}		)
  THUMB(	stmia	sp, {r0 - r12}		)
  THUMB(	str	sp, [sp, #S_SP]		)
  THUMB(	str	lr, [sp, #S_LR]		)
+
 	mov	r1, #\reason
 	.endm
 
@@ -149,7 +234,11 @@ ENDPROC(__und_invalid)
 	.macro	svc_entry, stack_hole=0
  UNWIND(.fnstart		)
  UNWIND(.save {r0 - pc}		)
+
+	pax_enter_kernel
+
 	sub	sp, sp, #(S_FRAME_SIZE + \stack_hole - 4)
+
 #ifdef CONFIG_THUMB2_KERNEL
  SPFIX(	str	r0, [sp]	)	@ temporarily saved
  SPFIX(	mov	r0, sp		)
@@ -164,7 +253,12 @@ ENDPROC(__und_invalid)
 	ldmia	r0, {r3 - r5}
 	add	r7, sp, #S_SP - 4	@ here for interlock avoidance
 	mov	r6, #-1			@  ""  ""      ""       ""
+#if defined(CONFIG_PAX_KERNEXEC) || defined(CONFIG_PAX_MEMORY_UDEREF)
+	@ offset sp by 8 as done in pax_enter_kernel
+	add	r2, sp, #(S_FRAME_SIZE + \stack_hole + 4)
+#else
 	add	r2, sp, #(S_FRAME_SIZE + \stack_hole - 4)
+#endif
  SPFIX(	addeq	r2, r2, #4	)
 	str	r3, [sp, #-4]!		@ save the "real" r0 copied
 					@ from the exception stack
@@ -192,18 +286,6 @@ __dabt_svc:
 	svc_entry
 	mov	r2, sp
 	dabt_helper
-
-	@
-	@ IRQs off again before pulling preserved data off the stack
-	@
-	disable_irq_notrace
-
-#ifdef CONFIG_TRACE_IRQFLAGS
-	tst	r5, #PSR_I_BIT
-	bleq	trace_hardirqs_on
-	tst	r5, #PSR_I_BIT
-	blne	trace_hardirqs_off
-#endif
 	svc_exit r5				@ return from exception
  UNWIND(.fnend		)
 ENDPROC(__dabt_svc)
@@ -216,19 +298,21 @@ __irq_svc:
 #ifdef CONFIG_PREEMPT
 	get_thread_info tsk
 	ldr	r8, [tsk, #TI_PREEMPT]		@ get preempt count
-	ldr	r0, [tsk, #TI_FLAGS]		@ get flags
 	teq	r8, #0				@ if preempt count != 0
+	bne	1f				@ return from exeption
+	ldr	r0, [tsk, #TI_FLAGS]		@ get flags
+	tst	r0, #_TIF_NEED_RESCHED		@ if NEED_RESCHED is set
+	blne	svc_preempt			@ preempt!
+
+	ldr	r8, [tsk, #TI_PREEMPT_LAZY]	@ get preempt lazy count
+	teq	r8, #0				@ if preempt lazy count != 0
 	movne	r0, #0				@ force flags to 0
-	tst	r0, #_TIF_NEED_RESCHED
+	tst	r0, #_TIF_NEED_RESCHED_LAZY
 	blne	svc_preempt
+1:
 #endif
 
-#ifdef CONFIG_TRACE_IRQFLAGS
-	@ The parent context IRQs must have been enabled to get here in
-	@ the first place, so there's no point checking the PSR I bit.
-	bl	trace_hardirqs_on
-#endif
-	svc_exit r5				@ return from exception
+	svc_exit r5, irq = 1			@ return from exception
  UNWIND(.fnend		)
 ENDPROC(__irq_svc)
 
@@ -240,6 +324,8 @@ svc_preempt:
 1:	bl	preempt_schedule_irq		@ irq en/disable is done inside
 	ldr	r0, [tsk, #TI_FLAGS]		@ get new tasks TI_FLAGS
 	tst	r0, #_TIF_NEED_RESCHED
+	bne	1b
+	tst	r0, #_TIF_NEED_RESCHED_LAZY
 	moveq	pc, r8				@ go again
 	b	1b
 #endif
@@ -295,22 +381,8 @@ __und_svc_fault:
 	mov	r0, sp				@ struct pt_regs *regs
 	bl	__und_fault
 
-	@
-	@ IRQs off again before pulling preserved data off the stack
-	@
 __und_svc_finish:
-	disable_irq_notrace
-
-	@
-	@ restore SPSR and restart the instruction
-	@
 	ldr	r5, [sp, #S_PSR]		@ Get SVC cpsr
-#ifdef CONFIG_TRACE_IRQFLAGS
-	tst	r5, #PSR_I_BIT
-	bleq	trace_hardirqs_on
-	tst	r5, #PSR_I_BIT
-	blne	trace_hardirqs_off
-#endif
 	svc_exit r5				@ return from exception
  UNWIND(.fnend		)
 ENDPROC(__und_svc)
@@ -320,18 +392,6 @@ __pabt_svc:
 	svc_entry
 	mov	r2, sp				@ regs
 	pabt_helper
-
-	@
-	@ IRQs off again before pulling preserved data off the stack
-	@
-	disable_irq_notrace
-
-#ifdef CONFIG_TRACE_IRQFLAGS
-	tst	r5, #PSR_I_BIT
-	bleq	trace_hardirqs_on
-	tst	r5, #PSR_I_BIT
-	blne	trace_hardirqs_off
-#endif
 	svc_exit r5				@ return from exception
  UNWIND(.fnend		)
 ENDPROC(__pabt_svc)
@@ -359,6 +419,9 @@ ENDPROC(__pabt_svc)
 	.macro	usr_entry
  UNWIND(.fnstart	)
  UNWIND(.cantunwind	)	@ don't unwind the user space
+
+	pax_enter_kernel_user
+
 	sub	sp, sp, #S_FRAME_SIZE
  ARM(	stmib	sp, {r1 - r12}	)
  THUMB(	stmia	sp, {r0 - r12}	)
@@ -396,6 +459,7 @@ ENDPROC(__pabt_svc)
 #ifdef CONFIG_IRQSOFF_TRACER
 	bl	trace_hardirqs_off
 #endif
+	ct_user_exit save = 0
 	.endm
 
 	.macro	kuser_cmpxchg_check
@@ -456,10 +520,11 @@ __und_usr:
 	tst	r3, #PSR_T_BIT			@ Thumb mode?
 	bne	__und_usr_thumb
 	sub	r4, r2, #4			@ ARM instr at LR - 4
+	pax_open_userland
 1:	ldrt	r0, [r4]
-#ifdef CONFIG_CPU_ENDIAN_BE8
-	rev	r0, r0				@ little endian instruction
-#endif
+	pax_close_userland
+ ARM_BE8(rev	r0, r0)				@ little endian instruction
+
 	@ r0 = 32-bit ARM instruction which caused the exception
 	@ r2 = PC value for the following instruction (:= regs->ARM_pc)
 	@ r4 = PC value for the faulting instruction
@@ -491,10 +556,14 @@ __und_usr_thumb:
  */
 	.arch	armv6t2
 #endif
+	pax_open_userland
 2:	ldrht	r5, [r4]
+	pax_close_userland
 	cmp	r5, #0xe800			@ 32bit instruction if xx != 0
 	blo	__und_usr_fault_16		@ 16bit undefined instruction
+	pax_open_userland
 3:	ldrht	r0, [r2]
+	pax_close_userland
 	add	r2, r2, #2			@ r2 is PC + 2, make it PC + 4
 	str	r2, [sp, #S_PC]			@ it's a 2x16bit instr, update
 	orr	r0, r0, r5, lsl #16
@@ -522,7 +591,9 @@ ENDPROC(__und_usr)
  * The out of line fixup for the ldrt instructions above.
  */
 	.pushsection .fixup, "ax"
-4:	mov	pc, r9
+	.align	2
+4:	pax_close_userland
+	mov	pc, r9
 	.popsection
 	.pushsection __ex_table,"a"
 	.long	1b, 4b
@@ -561,21 +632,21 @@ ENDPROC(__und_usr)
 	@ Fall-through from Thumb-2 __und_usr
 	@
 #ifdef CONFIG_NEON
+	get_thread_info r10			@ get current thread
 	adr	r6, .LCneon_thumb_opcodes
 	b	2f
 #endif
 call_fpe:
+	get_thread_info r10			@ get current thread
 #ifdef CONFIG_NEON
 	adr	r6, .LCneon_arm_opcodes
-2:
-	ldr	r7, [r6], #4			@ mask value
-	cmp	r7, #0				@ end mask?
-	beq	1f
-	and	r8, r0, r7
+2:	ldr	r5, [r6], #4			@ mask value
 	ldr	r7, [r6], #4			@ opcode bits matching in mask
+	cmp	r5, #0				@ end mask?
+	beq	1f
+	and	r8, r0, r5
 	cmp	r8, r7				@ NEON instruction?
 	bne	2b
-	get_thread_info r10
 	mov	r7, #1
 	strb	r7, [r10, #TI_USED_CP + 10]	@ mark CP#10 as used
 	strb	r7, [r10, #TI_USED_CP + 11]	@ mark CP#11 as used
@@ -584,12 +655,7 @@ call_fpe:
 #endif
 	tst	r0, #0x08000000			@ only CDP/CPRT/LDC/STC have bit 27
 	tstne	r0, #0x04000000			@ bit 26 set on both ARM and Thumb-2
-#if defined(CONFIG_CPU_ARM610) || defined(CONFIG_CPU_ARM710)
-	and	r8, r0, #0x0f000000		@ mask out op-code bits
-	teqne	r8, #0x0f000000			@ SWI (ARM6/7 bug)?
-#endif
 	moveq	pc, lr
-	get_thread_info r10			@ get current thread
 	and	r8, r0, #0x00000f00		@ mask out CP number
  THUMB(	lsr	r8, r8, #8		)
 	mov	r7, #1
@@ -736,7 +802,7 @@ ENTRY(__switch_to)
  THUMB(	stmia	ip!, {r4 - sl, fp}	   )	@ Store most regs on stack
  THUMB(	str	sp, [ip], #4		   )
  THUMB(	str	lr, [ip], #4		   )
-#ifdef CONFIG_CPU_USE_DOMAINS
+#if defined(CONFIG_CPU_USE_DOMAINS) || defined(CONFIG_PAX_KERNEXEC) || defined(CONFIG_PAX_MEMORY_UDEREF)
 	ldr	r6, [r2, #TI_CPU_DOMAIN]
 #endif
 	set_tls	r3, r4, r5
@@ -745,7 +811,7 @@ ENTRY(__switch_to)
 	ldr	r8, =__stack_chk_guard
 	ldr	r7, [r7, #TSK_STACK_CANARY]
 #endif
-#ifdef CONFIG_CPU_USE_DOMAINS
+#if defined(CONFIG_CPU_USE_DOMAINS) || defined(CONFIG_PAX_KERNEXEC) || defined(CONFIG_PAX_MEMORY_UDEREF)
 	mcr	p15, 0, r6, c3, c0, 0		@ Set domain register
 #endif
 	mov	r5, r0
@@ -787,6 +853,18 @@ ENDPROC(__switch_to)
 #endif
 	.endm
 
+	.macro	kuser_pad, sym, size
+	.if	(. - \sym) & 3
+	.rept	4 - (. - \sym) & 3
+	.byte	0
+	.endr
+	.endif
+	.rept	(\size - (. - \sym)) / 4
+	.word	0xe7fddef1
+	.endr
+	.endm
+
+#ifdef CONFIG_KUSER_HELPERS
 	.align	5
 	.globl	__kuser_helper_start
 __kuser_helper_start:
@@ -877,18 +955,13 @@ kuser_cmpxchg64_fixup:
 #error "incoherent kernel configuration"
 #endif
 
-	/* pad to next slot */
-	.rept	(16 - (. - __kuser_cmpxchg64)/4)
-	.word	0
-	.endr
-
-	.align	5
+	kuser_pad __kuser_cmpxchg64, 64
 
 __kuser_memory_barrier:				@ 0xffff0fa0
 	smp_dmb	arm
 	usr_ret	lr
 
-	.align	5
+	kuser_pad __kuser_memory_barrier, 32
 
 __kuser_cmpxchg:				@ 0xffff0fc0
 
@@ -961,13 +1034,14 @@ kuser_cmpxchg32_fixup:
 
 #endif
 
-	.align	5
+	kuser_pad __kuser_cmpxchg, 32
 
 __kuser_get_tls:				@ 0xffff0fe0
 	ldr	r0, [pc, #(16 - 8)]	@ read TLS, set in kuser_get_tls_init
 	usr_ret	lr
 	mrc	p15, 0, r0, c13, c0, 3	@ 0xffff0fe8 hardware TLS code
-	.rep	4
+	kuser_pad __kuser_get_tls, 16
+	.rep	3
 	.word	0			@ 0xffff0ff0 software TLS value, then
 	.endr				@ pad up to __kuser_helper_version
 
@@ -977,14 +1051,16 @@ __kuser_helper_version:				@ 0xffff0ffc
 	.globl	__kuser_helper_end
 __kuser_helper_end:
 
+#endif
+
  THUMB(	.thumb	)
 
 /*
  * Vector stubs.
  *
- * This code is copied to 0xffff0200 so we can use branches in the
- * vectors, rather than ldr's.  Note that this code must not
- * exceed 0x300 bytes.
+ * This code is copied to 0xffff1000 so we can use branches in the
+ * vectors, rather than ldr's.  Note that this code must not exceed
+ * a page size.
  *
  * Common stub entry macro:
  *   Enter in IRQ mode, spsr = SVC/USR CPSR, lr = SVC/USR PC
@@ -1031,8 +1107,17 @@ ENDPROC(vector_\name)
 1:
 	.endm
 
-	.globl	__stubs_start
+	.section .stubs, "ax", %progbits
 __stubs_start:
+	@ This must be the first word
+	.word	vector_swi
+
+vector_rst:
+ ARM(	swi	SYS_ERROR0	)
+ THUMB(	svc	#0		)
+ THUMB(	nop			)
+	b	vector_und
+
 /*
  * Interrupt dispatcher
  */
@@ -1127,6 +1212,16 @@ __stubs_start:
 	.align	5
 
 /*=============================================================================
+ * Address exception handler
+ *-----------------------------------------------------------------------------
+ * These aren't too critical.
+ * (they're not supposed to happen, and won't happen in 32-bit data mode).
+ */
+
+vector_addrexcptn:
+	b	vector_addrexcptn
+
+/*=============================================================================
  * Undefined FIQs
  *-----------------------------------------------------------------------------
  * Enter in FIQ mode, spsr = ANY CPSR, lr = ANY PC
@@ -1139,45 +1234,19 @@ __stubs_start:
 vector_fiq:
 	subs	pc, lr, #4
 
-/*=============================================================================
- * Address exception handler
- *-----------------------------------------------------------------------------
- * These aren't too critical.
- * (they're not supposed to happen, and won't happen in 32-bit data mode).
- */
+	.globl	vector_fiq_offset
+	.equ	vector_fiq_offset, vector_fiq
 
-vector_addrexcptn:
-	b	vector_addrexcptn
-
-/*
- * We group all the following data together to optimise
- * for CPUs with separate I & D caches.
- */
-	.align	5
-
-.LCvswi:
-	.word	vector_swi
-
-	.globl	__stubs_end
-__stubs_end:
-
-	.equ	stubs_offset, __vectors_start + 0x200 - __stubs_start
-
-	.globl	__vectors_start
+	.section .vectors, "ax", %progbits
 __vectors_start:
- ARM(	swi	SYS_ERROR0	)
- THUMB(	svc	#0		)
- THUMB(	nop			)
-	W(b)	vector_und + stubs_offset
-	W(ldr)	pc, .LCvswi + stubs_offset
-	W(b)	vector_pabt + stubs_offset
-	W(b)	vector_dabt + stubs_offset
-	W(b)	vector_addrexcptn + stubs_offset
-	W(b)	vector_irq + stubs_offset
-	W(b)	vector_fiq + stubs_offset
-
-	.globl	__vectors_end
-__vectors_end:
+	W(b)	vector_rst
+	W(b)	vector_und
+	W(ldr)	pc, __vectors_start + 0x1000
+	W(b)	vector_pabt
+	W(b)	vector_dabt
+	W(b)	vector_addrexcptn
+	W(b)	vector_irq
+	W(b)	vector_fiq
 
 	.data
 
