@@ -4,10 +4,27 @@
 #include <linux/ipv6.h>
 #include <linux/if_vlan.h>
 #include <net/ip.h>
+#include <net/ipv6.h>
+#include <linux/igmp.h>
+#include <linux/icmp.h>
+#include <linux/sctp.h>
+#include <linux/dccp.h>
 #include <linux/if_tunnel.h>
 #include <linux/if_pppox.h>
 #include <linux/ppp_defs.h>
 #include <net/flow_keys.h>
+#include <net/addrconf.h>
+
+static u32 ipv6_addr_hash(const struct in6_addr *addr)
+{
+	/*
+	 * We perform the hash function over the last 64 bits of the address
+	 * This will include the IEEE address token on links that support it.
+	 */
+	return jhash_2words((__force u32)addr->s6_addr32[2],
+			    (__force u32)addr->s6_addr32[3], 0)
+		& (IN6_ADDR_HSIZE - 1);
+}
 
 /* copy saddr & daddr, possibly using 64bit load/store
  * Equivalent to :	flow->src = iph->saddr;
@@ -35,7 +52,7 @@ again:
 		struct iphdr _iph;
 ip:
 		iph = skb_header_pointer(skb, nhoff, sizeof(_iph), &_iph);
-		if (!iph)
+		if (!iph || iph->ihl < 5)
 			return false;
 
 		if (ip_is_fragment(iph))
@@ -55,11 +72,12 @@ ipv6:
 			return false;
 
 		ip_proto = iph->nexthdr;
-		flow->src = iph->saddr.s6_addr32[3];
-		flow->dst = iph->daddr.s6_addr32[3];
+		flow->src = (__force __be32)ipv6_addr_hash(&iph->saddr);
+		flow->dst = (__force __be32)ipv6_addr_hash(&iph->daddr);
 		nhoff += sizeof(struct ipv6hdr);
 		break;
 	}
+	case __constant_htons(ETH_P_8021AD):
 	case __constant_htons(ETH_P_8021Q): {
 		const struct vlan_hdr *vlan;
 		struct vlan_hdr _vlan;
@@ -118,12 +136,27 @@ ipv6:
 				nhoff += 4;
 			if (hdr->flags & GRE_SEQ)
 				nhoff += 4;
+			if (proto == htons(ETH_P_TEB)) {
+				const struct ethhdr *eth;
+				struct ethhdr _eth;
+
+				eth = skb_header_pointer(skb, nhoff,
+							 sizeof(_eth), &_eth);
+				if (!eth)
+					return false;
+				proto = eth->h_proto;
+				nhoff += sizeof(*eth);
+			}
 			goto again;
 		}
 		break;
 	}
 	case IPPROTO_IPIP:
-		goto again;
+		proto = htons(ETH_P_IP);
+		goto ip;
+	case IPPROTO_IPV6:
+		proto = htons(ETH_P_IPV6);
+		goto ipv6;
 	default:
 		break;
 	}
@@ -133,12 +166,171 @@ ipv6:
 	if (poff >= 0) {
 		__be32 *ports, _ports;
 
-		nhoff += poff;
-		ports = skb_header_pointer(skb, nhoff, sizeof(_ports), &_ports);
+		ports = skb_header_pointer(skb, nhoff + poff,
+					   sizeof(_ports), &_ports);
 		if (ports)
 			flow->ports = *ports;
 	}
 
+	flow->thoff = (u16) nhoff;
+
 	return true;
 }
 EXPORT_SYMBOL(skb_flow_dissect);
+
+static u32 hashrnd __read_mostly;
+
+/* __skb_get_poff() returns the offset to the payload as far as it could
+ * be dissected. The main user is currently BPF, so that we can dynamically
+ * truncate packets without needing to push actual payload to the user
+ * space and can analyze headers only, instead.
+ */
+u32 __skb_get_poff(const struct sk_buff *skb)
+{
+	struct flow_keys keys;
+	u32 poff = 0;
+
+	if (!skb_flow_dissect(skb, &keys))
+		return 0;
+
+	poff += keys.thoff;
+	switch (keys.ip_proto) {
+	case IPPROTO_TCP: {
+		const struct tcphdr *tcph;
+		struct tcphdr _tcph;
+
+		tcph = skb_header_pointer(skb, poff, sizeof(_tcph), &_tcph);
+		if (!tcph)
+			return poff;
+
+		poff += max_t(u32, sizeof(struct tcphdr), tcph->doff * 4);
+		break;
+	}
+	case IPPROTO_UDP:
+	case IPPROTO_UDPLITE:
+		poff += sizeof(struct udphdr);
+		break;
+	/* For the rest, we do not really care about header
+	 * extensions at this point for now.
+	 */
+	case IPPROTO_ICMP:
+		poff += sizeof(struct icmphdr);
+		break;
+	case IPPROTO_ICMPV6:
+		poff += sizeof(struct icmp6hdr);
+		break;
+	case IPPROTO_IGMP:
+		poff += sizeof(struct igmphdr);
+		break;
+	case IPPROTO_DCCP:
+		poff += sizeof(struct dccp_hdr);
+		break;
+	case IPPROTO_SCTP:
+		poff += sizeof(struct sctphdr);
+		break;
+	}
+
+	return poff;
+}
+
+static inline u16 dev_cap_txqueue(struct net_device *dev, u16 queue_index)
+{
+	if (unlikely(queue_index >= dev->real_num_tx_queues)) {
+		printk("%s selects TX queue %d, but real number of TX queues is %d\n",
+				     dev->name, queue_index,
+				     dev->real_num_tx_queues);
+		return 0;
+	}
+	return queue_index;
+}
+
+static inline int get_xps_queue(struct net_device *dev, struct sk_buff *skb)
+{
+#ifdef CONFIG_XPS
+	struct xps_dev_maps *dev_maps;
+	struct xps_map *map;
+	int queue_index = -1;
+
+	rcu_read_lock();
+	dev_maps = rcu_dereference(dev->xps_maps);
+	if (dev_maps) {
+		map = rcu_dereference(
+		    dev_maps->cpu_map[raw_smp_processor_id()]);
+		if (map) {
+			if (map->len == 1)
+				queue_index = map->queues[0];
+			else {
+				u32 hash;
+				if (skb->sk && skb->sk->sk_hash)
+					hash = skb->sk->sk_hash;
+				else
+					hash = (__force u16) skb->protocol ^
+					    skb->rxhash;
+				hash = jhash_1word(hash, hashrnd);
+				queue_index = map->queues[
+				    ((u64)hash * map->len) >> 32];
+			}
+			if (unlikely(queue_index >= dev->real_num_tx_queues))
+				queue_index = -1;
+		}
+	}
+	rcu_read_unlock();
+
+	return queue_index;
+#else
+	return -1;
+#endif
+}
+
+u16 __netdev_pick_tx(struct net_device *dev, struct sk_buff *skb)
+{
+	struct sock *sk = skb->sk;
+	int queue_index = sk_tx_queue_get(sk);
+
+	if (queue_index < 0 || skb->ooo_okay ||
+	    queue_index >= dev->real_num_tx_queues) {
+		int new_index = get_xps_queue(dev, skb);
+		if (new_index < 0)
+			new_index = skb_tx_hash(dev, skb);
+
+		if (queue_index != new_index && sk) {
+			struct dst_entry *dst =
+				    rcu_dereference_check(sk->sk_dst_cache, 1);
+
+			if (dst && skb_dst(skb) == dst)
+				sk_tx_queue_set(sk, queue_index);
+
+		}
+
+		queue_index = new_index;
+	}
+
+	return queue_index;
+}
+EXPORT_SYMBOL(__netdev_pick_tx);
+
+struct netdev_queue *netdev_pick_tx(struct net_device *dev,
+				    struct sk_buff *skb)
+{
+	int queue_index = 0;
+
+	if (dev->real_num_tx_queues != 1) {
+		const struct net_device_ops *ops = dev->netdev_ops;
+		if (ops->ndo_select_queue)
+			queue_index = ops->ndo_select_queue(dev, skb);
+		else
+			queue_index = __netdev_pick_tx(dev, skb);
+		queue_index = dev_cap_txqueue(dev, queue_index);
+	}
+
+	skb_set_queue_mapping(skb, queue_index);
+	return netdev_get_tx_queue(dev, queue_index);
+}
+
+static int __init initialize_hashrnd(void)
+{
+	get_random_bytes(&hashrnd, sizeof(hashrnd));
+	return 0;
+}
+
+late_initcall_sync(initialize_hashrnd);

@@ -363,6 +363,10 @@ static int CVM_OCT_NAPI_POLL(struct napi_struct *napi, int budget)
 					ts->syststamp = cvm_oct_ptp_to_ktime(ns);
 					__skb_pull(skb, 8);
 				}
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+				skb->pkt_type = PACKET_HOST;
+#endif
+
 				skb->protocol = eth_type_trans(skb, priv->netdev);
 				skb->dev = priv->netdev;
 

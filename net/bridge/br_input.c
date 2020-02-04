@@ -68,6 +68,8 @@ int br_handle_frame_finish(struct sk_buff *skb)
 	if (p->state == BR_STATE_LEARNING)
 		goto drop;
 
+	skb->cvm_reserved |= SKB_CVM_RESERVED_2;
+
 	BR_INPUT_SKB_CB(skb)->brdev = br->dev;
 
 	/* The packet skb2 goes to the local host (NULL to skip). */
@@ -156,6 +158,8 @@ rx_handler_result_t br_handle_frame(struct sk_buff **pskb)
 	if (!is_valid_ether_addr(eth_hdr(skb)->h_source))
 		goto drop;
 
+	skb->cvm_reserved |= SKB_CVM_RESERVED_2;
+
 	skb = skb_share_check(skb, GFP_ATOMIC);
 	if (!skb)
 		return RX_HANDLER_CONSUMED;
@@ -202,8 +206,6 @@ rx_handler_result_t br_handle_frame(struct sk_buff **pskb)
 			return RX_HANDLER_PASS;	/* continue processing */
 		}
 	}
-
-	skb->cvm_reserved |= SKB_CVM_RESERVED_2;
 
 forward:
 	switch (p->state) {

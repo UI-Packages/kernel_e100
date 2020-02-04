@@ -380,6 +380,21 @@ struct cvm_udphdr {
 	__sum16 check;
 };
 
+struct cvm_pppoe_hdr {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	__u8 ver : 4;
+	__u8 type : 4;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+	__u8 type : 4;
+	__u8 ver : 4;
+#else
+#error  "Please fix <asm/byteorder.h>"
+#endif
+	__u8 code;
+	__be16 sid;
+	__be16 length;
+};
+
 struct cvm_vlan_hdr {
 	__be16 h_vlan_TCI;
 	__be16 h_vlan_encapsulated_proto;
@@ -395,6 +410,14 @@ typedef struct {
 	u32		ack_seq;    /* TCP acknowledge number (if present) */
 	int		qos_level;
 	struct cvm_vlan_hdr	vlan;
+	struct cvm_pppoe_hdr	pppoe;
+
+	union {
+		struct iphdr_new	outer_ip4;  /* IP header */
+		struct ipv6hdr_new	outer_ip6;
+	};
+
+	struct cvm_udphdr	outer_udp;
 
 	union {
 		struct {
@@ -414,6 +437,8 @@ enum {
 	SKB_CVM_RESERVED_0 = (1 << 0),
 	SKB_CVM_RESERVED_1 = (1 << 1),
 	SKB_CVM_RESERVED_2 = (1 << 2),
+	SKB_CVM_RESERVED_3 = (1 << 3),
+	SKB_CVM_RESERVED_4 = (1 << 4),
 };
 
 

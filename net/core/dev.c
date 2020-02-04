@@ -2529,12 +2529,6 @@ int dev_queue_xmit(struct sk_buff *skb)
 	struct Qdisc *q;
 	int rc = -ENOMEM;
 
-#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
-	if (cvm_ipfwd_tx_hook) {
-		if (cvm_ipfwd_tx_hook(skb) == (-ENOMEM))
-			goto out_kfree_skb;
-	}
-#endif
 	/* Disable soft irqs for various locks below. Also
 	 * stops preemption for RCU.
 	 */
@@ -2545,11 +2539,20 @@ int dev_queue_xmit(struct sk_buff *skb)
 	txq = dev_pick_tx(dev, skb);
 	q = rcu_dereference_bh(txq->qdisc);
 
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+	if (cvm_ipfwd_tx_hook && (!q->enqueue || q->ops == &pfifo_fast_ops)) {
+		if (cvm_ipfwd_tx_hook(skb) == (-ENOMEM))
+			goto out_kfree_skb;
+	}
+#endif
+
 #ifdef CONFIG_NET_CLS_ACT
 	skb->tc_verd = SET_TC_AT(skb->tc_verd, AT_EGRESS);
 #endif
 	trace_net_dev_queue(skb);
 	if (q->enqueue) {
+		if (q->ops != &pfifo_fast_ops)
+			skb->cvm_reserved |= SKB_CVM_RESERVED_4;
 		rc = __dev_xmit_skb(skb, q, dev, txq);
 		goto out;
 	}
@@ -2601,11 +2604,12 @@ recursion_alert:
 	}
 
 	rc = -ENETDOWN;
-	rcu_read_unlock_bh();
 
 out_kfree_skb:
+	rcu_read_unlock_bh();
 	kfree_skb(skb);
 	return rc;
+
 out:
 	rcu_read_unlock_bh();
 	return rc;
