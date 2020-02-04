@@ -53,6 +53,7 @@
 #include "ethernet-mdio.h"
 #include "ethernet-util.h"
 
+extern cvmx_bootinfo_t *octeon_bootinfo;
 
 #if defined(CONFIG_OCTEON_NUM_PACKET_BUFFERS) \
 	&& CONFIG_OCTEON_NUM_PACKET_BUFFERS
@@ -119,6 +120,8 @@ MODULE_PARM_DESC(max_rx_cpus, "\n"
 int rx_napi_weight = 32;
 module_param(rx_napi_weight, int, 0444);
 MODULE_PARM_DESC(rx_napi_weight, "The NAPI WEIGHT parameter.");
+
+extern int (*ubnt_eth_name_hook)(int port, char *name);
 
 /*
  * The offset from mac_addr_base that should be used for the next port
@@ -955,6 +958,9 @@ static int __init cvm_oct_init_module(void)
 				break;
 #endif
 			}
+            
+            if (ubnt_eth_name_hook)
+                ubnt_eth_name_hook(port, dev->name);
 
 			if (!dev->netdev_ops) {
 				kfree(dev);

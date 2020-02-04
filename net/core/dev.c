@@ -338,6 +338,9 @@ static inline void netdev_set_addr_lockdep_class(struct net_device *dev)
 uint32_t (*cvm_ipfwd_rx_hook)(struct sk_buff *) = NULL;
 int      (*cvm_ipfwd_tx_hook)(struct sk_buff *) = NULL;
 #endif
+
+int (*ubnt_eth_name_hook)(int port, char *name) = NULL;
+
 /*******************************************************************************
 
 		Protocol management and registration routines
@@ -5722,3 +5725,4 @@ late_initcall_sync(initialize_hashrnd);
 EXPORT_SYMBOL(cvm_ipfwd_rx_hook);
 EXPORT_SYMBOL(cvm_ipfwd_tx_hook);
 #endif 
+EXPORT_SYMBOL(ubnt_eth_name_hook);

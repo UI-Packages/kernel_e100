@@ -668,6 +668,12 @@ config NETFILTER_XT_MATCH_HL
 	in the IPv6 header, or the time-to-live field in the IPv4
 	header of the packet.
 
+config NETFILTER_XT_MATCH_IPP2P
+	tristate '"ipp2p" match support'
+	depends on NETFILTER_ADVANCED
+	help
+	  "ipp2p" match support.
+
 config NETFILTER_XT_MATCH_IPRANGE
 	tristate '"iprange" address range match support'
 	depends on NETFILTER_ADVANCED

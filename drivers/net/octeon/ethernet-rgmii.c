@@ -79,17 +79,11 @@ static void cvm_oct_rgmii_poll(struct net_device *dev)
 				 * checking and do it in software.
 				 */
 				union cvmx_gmxx_rxx_frm_ctl gmxx_rxx_frm_ctl;
-				union cvmx_ipd_sub_port_fcs ipd_sub_port_fcs;
 
 				/* Disable preamble checking */
 				gmxx_rxx_frm_ctl.u64 = cvmx_read_csr(CVMX_GMXX_RXX_FRM_CTL(index, interface));
 				gmxx_rxx_frm_ctl.s.pre_chk = 0;
 				cvmx_write_csr(CVMX_GMXX_RXX_FRM_CTL(index, interface), gmxx_rxx_frm_ctl.u64);
-
-				/* Disable FCS stripping */
-				ipd_sub_port_fcs.u64 = cvmx_read_csr(CVMX_IPD_SUB_PORT_FCS);
-				ipd_sub_port_fcs.s.port_bit &= 0xffffffffull ^ (1ull << priv->port);
-				cvmx_write_csr(CVMX_IPD_SUB_PORT_FCS, ipd_sub_port_fcs.u64);
 
 				/* Clear any error bits */
 				cvmx_write_csr(CVMX_GMXX_RXX_INT_REG(index, interface), gmxx_rxx_int_reg.u64);
@@ -107,7 +101,6 @@ static void cvm_oct_rgmii_poll(struct net_device *dev)
 	if (USE_10MBPS_PREAMBLE_WORKAROUND) {
 
 		union cvmx_gmxx_rxx_frm_ctl gmxx_rxx_frm_ctl;
-		union cvmx_ipd_sub_port_fcs ipd_sub_port_fcs;
 		union cvmx_gmxx_rxx_int_reg gmxx_rxx_int_reg;
 		int interface = INTERFACE(priv->port);
 		int index = INDEX(priv->port);
@@ -116,10 +109,6 @@ static void cvm_oct_rgmii_poll(struct net_device *dev)
 		gmxx_rxx_frm_ctl.u64 = cvmx_read_csr(CVMX_GMXX_RXX_FRM_CTL(index, interface));
 		gmxx_rxx_frm_ctl.s.pre_chk = 1;
 		cvmx_write_csr(CVMX_GMXX_RXX_FRM_CTL(index, interface), gmxx_rxx_frm_ctl.u64);
-		/* Enable FCS stripping */
-		ipd_sub_port_fcs.u64 = cvmx_read_csr(CVMX_IPD_SUB_PORT_FCS);
-		ipd_sub_port_fcs.s.port_bit |= 1ull << priv->port;
-		cvmx_write_csr(CVMX_IPD_SUB_PORT_FCS, ipd_sub_port_fcs.u64);
 		/* Clear any error bits */
 		gmxx_rxx_int_reg.u64 = cvmx_read_csr(CVMX_GMXX_RXX_INT_REG(index, interface));
 		cvmx_write_csr(CVMX_GMXX_RXX_INT_REG(index, interface), gmxx_rxx_int_reg.u64);
@@ -249,6 +238,7 @@ static void cvm_oct_rgmii_immediate_poll(struct work_struct *work)
 
 int cvm_oct_rgmii_init(struct net_device *dev)
 {
+	union cvmx_ipd_sub_port_fcs ipd_sub_port_fcs;
 	struct octeon_ethernet *priv = netdev_priv(dev);
 	int r;
 
@@ -296,12 +286,18 @@ int cvm_oct_rgmii_init(struct net_device *dev)
 			priv->poll = cvm_oct_rgmii_poll;
 		}
 	}
+        /* Disable FCS stripping for PKI-602*/
+        ipd_sub_port_fcs.u64 = cvmx_read_csr(CVMX_IPD_SUB_PORT_FCS);
+        ipd_sub_port_fcs.s.port_bit &= 0xffffffffull ^ (1ull << priv->port);
+        cvmx_write_csr(CVMX_IPD_SUB_PORT_FCS, ipd_sub_port_fcs.u64);
+        priv->rx_strip_fcs = 1;
 
 	return 0;
 }
 
 void cvm_oct_rgmii_uninit(struct net_device *dev)
 {
+	union cvmx_ipd_sub_port_fcs ipd_sub_port_fcs;
 	struct octeon_ethernet *priv = netdev_priv(dev);
 	cvm_oct_common_uninit(dev);
 
@@ -335,4 +331,10 @@ void cvm_oct_rgmii_uninit(struct net_device *dev)
 	if (number_rgmii_ports == 0)
 		free_irq(OCTEON_IRQ_RML, &number_rgmii_ports);
 	cancel_work_sync(&priv->port_work);
+
+        /* re-Enable FCS stripping */
+        ipd_sub_port_fcs.u64 = cvmx_read_csr(CVMX_IPD_SUB_PORT_FCS);
+        ipd_sub_port_fcs.s.port_bit |= 1ull << priv->port;
+        cvmx_write_csr(CVMX_IPD_SUB_PORT_FCS, ipd_sub_port_fcs.u64);
+        priv->rx_strip_fcs = 0;
 }

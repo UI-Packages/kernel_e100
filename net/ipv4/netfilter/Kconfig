@@ -101,15 +101,6 @@ config IP_NF_MATCH_TTL
 	(e.g. when running oldconfig). It selects
 	CONFIG_NETFILTER_XT_MATCH_HL.
 
-config IP_NF_MATCH_IPP2P
-	tristate '"ipp2p" match support'
-	depends on IP_NF_IPTABLES
-	depends on NETFILTER_ADVANCED
-	help
-	  This adds CONFIG_IP_NF_MATCH_IPP2P option for matching p2p traffic.
-
-	  To compile it as a module, choose M here.  If unsure, say N.
-
 # `filter', generic and specific targets
 config IP_NF_FILTER
 	tristate "Packet filtering"

@@ -191,6 +191,7 @@ static irqreturn_t cvm_oct_do_interrupt(int cpl, void *dev_id)
  */
 static inline int cvm_oct_check_rcv_error(cvmx_wqe_t *work)
 {
+	bool err  = false;
 	if ((work->word2.snoip.err_code == 10) && (work->len <= 64)) {
 		/*
 		 * Ignore length errors on min size packets. Some
@@ -198,9 +199,8 @@ static inline int cvm_oct_check_rcv_error(cvmx_wqe_t *work)
 		 * instead of 60+4FCS.  Note these packets still get
 		 * counted as frame errors.
 		 */
-	} else
-	    if (USE_10MBPS_PREAMBLE_WORKAROUND
-		&& ((work->word2.snoip.err_code == 5)
+	} else if (USE_10MBPS_PREAMBLE_WORKAROUND &&
+		   ((work->word2.snoip.err_code == 5)
 		    || (work->word2.snoip.err_code == 7))) {
 
 		/*
@@ -250,8 +250,13 @@ static inline int cvm_oct_check_rcv_error(cvmx_wqe_t *work)
 				cvm_oct_free_work(work);
 				return 1;
 			}
+		} else {
+			err  = true;
 		}
 	} else {
+			err  = true;
+	}
+	if (err) {
 		DEBUGPRINT("Port %d receive error code %d, packet dropped\n",
 			   work->ipprt, work->word2.snoip.err_code);
 		cvm_oct_free_work(work);
@@ -333,6 +338,7 @@ static int cvm_oct_napi_poll(struct napi_struct *napi, int budget)
 		enum cvm_oct_callback_result callback_result;
 		int skb_in_hw;
 		cvmx_wqe_t *work;
+		int packet_len;
 
 		if (USE_ASYNC_IOBDMA && did_work_request)
 			work = cvmx_pow_work_response_async(CVMX_SCR_SCRATCH);
@@ -431,6 +437,16 @@ static int cvm_oct_napi_poll(struct napi_struct *napi, int budget)
 				continue;
 		}
 
+		{
+		struct octeon_ethernet *priv = cvm_oct_by_port[work->ipprt];
+		if (priv->rx_strip_fcs) {
+			packet_len = work->len - 4;
+			work->len -= 4;
+		}
+		else
+			packet_len = work->len;
+		}
+
 		/*
 		 * We can only use the zero copy path if skbuffs are
 		 * in the FPA pool and the packet fits in a single
@@ -439,7 +455,7 @@ static int cvm_oct_napi_poll(struct napi_struct *napi, int budget)
 		if (likely(skb_in_hw)) {
 			skb->data = skb->head + work->packet_ptr.s.addr - cvmx_ptr_to_phys(skb->head);
 			prefetch(skb->data);
-			skb->len = work->len;
+			skb->len = packet_len; //work->len;
 			skb_set_tail_pointer(skb, skb->len);
 			packet_not_copied = 1;
 		} else {
@@ -447,7 +463,7 @@ static int cvm_oct_napi_poll(struct napi_struct *napi, int budget)
 			 * We have to copy the packet. First allocate
 			 * an skbuff for it.
 			 */
-			skb = dev_alloc_skb(work->len);
+			skb = dev_alloc_skb(packet_len);
 			if (!skb) {
 				DEBUGPRINT("Port %d failed to allocate skbuff, packet dropped\n",
 					   work->ipprt);
@@ -472,12 +488,12 @@ static int cvm_oct_napi_poll(struct napi_struct *napi, int budget)
 					else
 						ptr += 6;
 				}
-				memcpy(skb_put(skb, work->len), ptr, work->len);
+				memcpy(skb_put(skb, packet_len), ptr, packet_len);
 				/* No packet buffers to free */
 			} else {
 				int segments = work->word2.s.bufs;
 				union cvmx_buf_ptr segment_ptr = work->packet_ptr;
-				int len = work->len;
+				//int len = work->len;
 
 				while (segments--) {
 					union cvmx_buf_ptr  next_ptr;
@@ -500,13 +516,13 @@ static int cvm_oct_napi_poll(struct napi_struct *napi, int budget)
 					 * Don't copy more than what
 					 * is left in the packet.
 					 */
-					if (segment_size > len)
-						segment_size = len;
+					if (segment_size > packet_len)
+						segment_size = packet_len;
 					/* Copy the data into the packet */
 					memcpy(skb_put(skb, segment_size),
 					       cvmx_phys_to_ptr(segment_ptr.s.addr),
 					       segment_size);
-					len -= segment_size;
+					packet_len -= segment_size;
 					segment_ptr = next_ptr;
 				}
 			}
@@ -561,6 +577,9 @@ static int cvm_oct_napi_poll(struct napi_struct *napi, int budget)
 				rx_count++;
 				if (priv->intercept_cb) {
 					callback_result = priv->intercept_cb(priv->netdev, work, skb);
+                               if (priv->rx_strip_fcs)
+                                  work->len += 4;
+                    
 					switch (callback_result) {
 					case CVM_OCT_PASS:
 						netif_receive_skb(skb);
