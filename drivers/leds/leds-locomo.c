@@ -10,6 +10,7 @@
 
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/device.h>
 #include <linux/leds.h>
 
@@ -44,7 +45,7 @@ static void locomoled_brightness_set1(struct led_classdev *led_cdev,
 
 static struct led_classdev locomo_led0 = {
 	.name			= "locomo:amber:charge",
-	.default_trigger	= "sharpsl-charge",
+	.default_trigger	= "main-battery-charging",
 	.brightness_set		= locomoled_brightness_set0,
 };
 

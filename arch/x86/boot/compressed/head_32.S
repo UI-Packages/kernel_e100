@@ -32,6 +32,36 @@
 
 	__HEAD
 ENTRY(startup_32)
+#ifdef CONFIG_EFI_STUB
+	jmp	preferred_addr
+
+	.balign	0x10
+	/*
+	 * We don't need the return address, so set up the stack so
+	 * efi_main() can find its arugments.
+	 */
+	add	$0x4, %esp
+
+	call	efi_main
+	cmpl	$0, %eax
+	movl	%eax, %esi
+	jne	2f
+1:
+	/* EFI init failed, so hang. */
+	hlt
+	jmp	1b
+2:
+	call	3f
+3:
+	popl	%eax
+	subl	$3b, %eax
+	subl	BP_pref_address(%esi), %eax
+	add	BP_code32_start(%esi), %eax
+	leal	preferred_addr(%eax), %eax
+	jmp	*%eax
+
+preferred_addr:
+#endif
 	cld
 	/*
 	 * Test KEEP_SEGMENTS flag to see if the bootloader is asking
@@ -122,6 +152,19 @@ relocated:
 	subl	%edi, %ecx
 	shrl	$2, %ecx
 	rep	stosl
+
+/*
+ * Adjust our own GOT
+ */
+	leal	_got(%ebx), %edx
+	leal	_egot(%ebx), %ecx
+1:
+	cmpl	%ecx, %edx
+	jae	2f
+	addl	%ebx, (%edx)
+	addl	$4, %edx
+	jmp	1b
+2:
 
 /*
  * Do the decompression, and jump to the new kernel..

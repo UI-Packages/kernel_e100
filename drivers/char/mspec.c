@@ -44,9 +44,8 @@
 #include <linux/slab.h>
 #include <linux/numa.h>
 #include <asm/page.h>
-#include <asm/system.h>
 #include <asm/pgtable.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/tlbflush.h>
 #include <asm/uncached.h>
 #include <asm/sn/addrs.h>
@@ -248,7 +247,7 @@ static const struct vm_operations_struct mspec_vm_ops = {
 /*
  * mspec_mmap
  *
- * Called when mmaping the device.  Initializes the vma with a fault handler
+ * Called when mmapping the device.  Initializes the vma with a fault handler
  * and private data structure necessary to allocate, track, and free the
  * underlying pages.
  */
@@ -271,21 +270,20 @@ mspec_mmap(struct file *file, struct vm_area_struct *vma,
 	pages = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
 	vdata_size = sizeof(struct vma_data) + pages * sizeof(long);
 	if (vdata_size <= PAGE_SIZE)
-		vdata = kmalloc(vdata_size, GFP_KERNEL);
+		vdata = kzalloc(vdata_size, GFP_KERNEL);
 	else {
-		vdata = vmalloc(vdata_size);
+		vdata = vzalloc(vdata_size);
 		flags = VMD_VMALLOCED;
 	}
 	if (!vdata)
 		return -ENOMEM;
-	memset(vdata, 0, vdata_size);
 
 	vdata->vm_start = vma->vm_start;
 	vdata->vm_end = vma->vm_end;
 	vdata->flags = flags;
 	vdata->type = type;
 	spin_lock_init(&vdata->lock);
-	vdata->refcnt = ATOMIC_INIT(1);
+	atomic_set(&vdata->refcnt, 1);
 	vma->vm_private_data = vdata;
 
 	vma->vm_flags |= (VM_IO | VM_RESERVED | VM_PFNMAP | VM_DONTEXPAND);
@@ -316,7 +314,8 @@ uncached_mmap(struct file *file, struct vm_area_struct *vma)
 
 static const struct file_operations fetchop_fops = {
 	.owner = THIS_MODULE,
-	.mmap = fetchop_mmap
+	.mmap = fetchop_mmap,
+	.llseek = noop_llseek,
 };
 
 static struct miscdevice fetchop_miscdev = {
@@ -327,7 +326,8 @@ static struct miscdevice fetchop_miscdev = {
 
 static const struct file_operations cached_fops = {
 	.owner = THIS_MODULE,
-	.mmap = cached_mmap
+	.mmap = cached_mmap,
+	.llseek = noop_llseek,
 };
 
 static struct miscdevice cached_miscdev = {
@@ -338,7 +338,8 @@ static struct miscdevice cached_miscdev = {
 
 static const struct file_operations uncached_fops = {
 	.owner = THIS_MODULE,
-	.mmap = uncached_mmap
+	.mmap = uncached_mmap,
+	.llseek = noop_llseek,
 };
 
 static struct miscdevice uncached_miscdev = {

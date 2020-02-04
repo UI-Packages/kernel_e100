@@ -19,21 +19,27 @@
 #define OCTEON_EHCI_HCD_NAME "octeon-ehci"
 
 /* Common clock init code.  */
-void octeon2_usb_clocks_start(void);
+void octeon2_usb_clocks_start(struct device *dev);
 void octeon2_usb_clocks_stop(void);
 
-static void ehci_octeon_start(void)
+static void ehci_octeon_start(struct device *dev)
 {
 	union cvmx_uctlx_ehci_ctl ehci_ctl;
 
-	octeon2_usb_clocks_start();
+	octeon2_usb_clocks_start(dev);
 
 	ehci_ctl.u64 = cvmx_read_csr(CVMX_UCTLX_EHCI_CTL(0));
 	/* Use 64-bit addressing. */
 	ehci_ctl.s.ehci_64b_addr_en = 1;
 	ehci_ctl.s.l2c_addr_msb = 0;
+#ifdef __BIG_ENDIAN
 	ehci_ctl.s.l2c_buff_emod = 1; /* Byte swapped. */
 	ehci_ctl.s.l2c_desc_emod = 1; /* Byte swapped. */
+#else
+	ehci_ctl.s.l2c_buff_emod = 0; /* not swapped. */
+	ehci_ctl.s.l2c_desc_emod = 0; /* not swapped. */
+	ehci_ctl.s.inv_reg_a2 = 1;
+#endif
 	cvmx_write_csr(CVMX_UCTLX_EHCI_CTL(0), ehci_ctl.u64);
 }
 
@@ -124,9 +130,10 @@ static int ehci_octeon_drv_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	hcd->rsrc_start = res_mem->start;
-	hcd->rsrc_len = res_mem->end - res_mem->start + 1;
+	hcd->rsrc_len = resource_size(res_mem);
 
-	if (!request_mem_region(hcd->rsrc_start, hcd->rsrc_len, OCTEON_EHCI_HCD_NAME)) {
+	if (!request_mem_region(hcd->rsrc_start, hcd->rsrc_len,
+				OCTEON_EHCI_HCD_NAME)) {
 		dev_err(&pdev->dev, "request_mem_region failed\n");
 		ret = -EBUSY;
 		goto err1;
@@ -139,7 +146,7 @@ static int ehci_octeon_drv_probe(struct platform_device *pdev)
 		goto err2;
 	}
 
-	ehci_octeon_start();
+	ehci_octeon_start(&pdev->dev);
 
 	ehci = hcd_to_ehci(hcd);
 
@@ -149,16 +156,26 @@ static int ehci_octeon_drv_probe(struct platform_device *pdev)
 #endif
 
 	ehci->caps = hcd->regs;
-	ehci->regs = hcd->regs + HC_LENGTH(ehci_readl(ehci, &ehci->caps->hc_capbase));
+	ehci->regs = hcd->regs +
+		HC_LENGTH(ehci, ehci_readl(ehci, &ehci->caps->hc_capbase));
 	/* cache this readonly data; minimize chip reads */
 	ehci->hcs_params = ehci_readl(ehci, &ehci->caps->hcs_params);
 
-	ret = usb_add_hcd(hcd, irq, IRQF_DISABLED | IRQF_SHARED);
-	if (ret == 0) {
-		platform_set_drvdata(pdev, hcd);
-		return ret;
+	ehci_reset(ehci);
+
+	ret = usb_add_hcd(hcd, irq, IRQF_SHARED);
+	if (ret) {
+		dev_dbg(&pdev->dev, "failed to add hcd with err %d\n", ret);
+		goto err3;
 	}
 
+	platform_set_drvdata(pdev, hcd);
+
+	/* root ports should always stay powered */
+	ehci_port_power(ehci, 1);
+
+	return 0;
+err3:
 	ehci_octeon_stop();
 
 	iounmap(hcd->regs);
@@ -185,6 +202,14 @@ static int ehci_octeon_drv_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static struct of_device_id ehci_octeon_match[] = {
+	{
+		.compatible = "cavium,octeon-6335-ehci",
+	},
+	{},
+};
+MODULE_DEVICE_TABLE(of, ehci_octeon_match);
+
 static struct platform_driver ehci_octeon_driver = {
 	.probe		= ehci_octeon_drv_probe,
 	.remove		= ehci_octeon_drv_remove,
@@ -192,6 +217,7 @@ static struct platform_driver ehci_octeon_driver = {
 	.driver = {
 		.name	= OCTEON_EHCI_HCD_NAME,
 		.owner	= THIS_MODULE,
+		.of_match_table = ehci_octeon_match,
 	}
 };
 

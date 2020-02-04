@@ -32,6 +32,7 @@
 #include <linux/pci_hotplug.h>
 #include <linux/acpi.h>
 #include <linux/pci-acpi.h>
+#include <linux/slab.h>
 
 #define MY_NAME	"acpi_pcihp"
 
@@ -43,7 +44,7 @@
 #define	METHOD_NAME__SUN	"_SUN"
 #define	METHOD_NAME_OSHP	"OSHP"
 
-static int debug_acpi;
+static bool debug_acpi;
 
 static acpi_status
 decode_type0_hpx_record(union acpi_object *record, struct hotplug_params *hpx)
@@ -337,9 +338,7 @@ int acpi_get_hp_hw_control_from_firmware(struct pci_dev *pdev, u32 flags)
 	acpi_handle chandle, handle;
 	struct acpi_buffer string = { ACPI_ALLOCATE_BUFFER, NULL };
 
-	flags &= (OSC_PCI_EXPRESS_NATIVE_HP_CONTROL |
-		  OSC_SHPC_NATIVE_HP_CONTROL |
-		  OSC_PCI_EXPRESS_CAP_STRUCTURE_CONTROL);
+	flags &= OSC_SHPC_NATIVE_HP_CONTROL;
 	if (!flags) {
 		err("Invalid flags %u specified!\n", flags);
 		return -EINVAL;
@@ -352,16 +351,18 @@ int acpi_get_hp_hw_control_from_firmware(struct pci_dev *pdev, u32 flags)
 	 * To handle different BIOS behavior, we look for _OSC on a root
 	 * bridge preferentially (according to PCI fw spec). Later for
 	 * OSHP within the scope of the hotplug controller and its parents,
-	 * upto the host bridge under which this controller exists.
+	 * up to the host bridge under which this controller exists.
 	 */
 	handle = acpi_find_root_bridge_handle(pdev);
 	if (handle) {
 		acpi_get_name(handle, ACPI_FULL_PATHNAME, &string);
 		dbg("Trying to get hotplug control for %s\n",
 				(char *)string.pointer);
-		status = acpi_pci_osc_control_set(handle, flags);
+		status = acpi_pci_osc_control_set(handle, &flags, flags);
 		if (ACPI_SUCCESS(status))
 			goto got_one;
+		if (status == AE_SUPPORT)
+			goto no_control;
 		kfree(string.pointer);
 		string = (struct acpi_buffer){ ACPI_ALLOCATE_BUFFER, NULL };
 	}
@@ -394,10 +395,9 @@ int acpi_get_hp_hw_control_from_firmware(struct pci_dev *pdev, u32 flags)
 		if (ACPI_FAILURE(status))
 			break;
 	}
-
+no_control:
 	dbg("Cannot get control of hotplug hardware for pci %s\n",
 	    pci_name(pdev));
-
 	kfree(string.pointer);
 	return -ENODEV;
 got_one:
@@ -408,7 +408,7 @@ got_one:
 }
 EXPORT_SYMBOL(acpi_get_hp_hw_control_from_firmware);
 
-static int is_ejectable(acpi_handle handle)
+static int pcihp_is_ejectable(acpi_handle handle)
 {
 	acpi_status status;
 	acpi_handle tmp;
@@ -442,7 +442,7 @@ int acpi_pci_check_ejectable(struct pci_bus *pbus, acpi_handle handle)
 		return 0;
 	if (bridge_handle != parent_handle)
 		return 0;
-	return is_ejectable(handle);
+	return pcihp_is_ejectable(handle);
 }
 EXPORT_SYMBOL_GPL(acpi_pci_check_ejectable);
 
@@ -450,7 +450,7 @@ static acpi_status
 check_hotplug(acpi_handle handle, u32 lvl, void *context, void **rv)
 {
 	int *found = (int *)context;
-	if (is_ejectable(handle)) {
+	if (pcihp_is_ejectable(handle)) {
 		*found = 1;
 		return AE_CTRL_TERMINATE;
 	}
@@ -471,7 +471,7 @@ int acpi_pci_detect_ejectable(acpi_handle handle)
 		return found;
 
 	acpi_walk_namespace(ACPI_TYPE_DEVICE, handle, 1,
-			    check_hotplug, (void *)&found, NULL);
+			    check_hotplug, NULL, (void *)&found, NULL);
 	return found;
 }
 EXPORT_SYMBOL_GPL(acpi_pci_detect_ejectable);

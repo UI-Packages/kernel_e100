@@ -74,31 +74,6 @@ struct inode *unionfs_iget(struct super_block *sb, unsigned long ino)
 }
 
 /*
- * we now define delete_inode, because there are two VFS paths that may
- * destroy an inode: one of them calls clear inode before doing everything
- * else that's needed, and the other is fine.  This way we truncate the inode
- * size (and its pages) and then clear our own inode, which will do an iput
- * on our and the lower inode.
- *
- * No need to lock sb info's rwsem.
- */
-static void unionfs_delete_inode(struct inode *inode)
-{
-#if BITS_PER_LONG == 32 && defined(CONFIG_SMP)
-	spin_lock(&inode->i_lock);
-#endif
-	i_size_write(inode, 0);	/* every f/s seems to do that */
-#if BITS_PER_LONG == 32 && defined(CONFIG_SMP)
-	spin_unlock(&inode->i_lock);
-#endif
-
-	if (inode->i_data.nrpages)
-		truncate_inode_pages(&inode->i_data, 0);
-
-	clear_inode(inode);
-}
-
-/*
  * final actions when unmounting a file system
  *
  * No need to lock rwsem.
@@ -151,6 +126,7 @@ static int unionfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	struct super_block *sb;
 	struct dentry *lower_dentry;
 	struct dentry *parent;
+	struct path lower_path;
 	bool valid;
 
 	sb = dentry->d_sb;
@@ -167,7 +143,10 @@ static int unionfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	unionfs_check_dentry(dentry);
 
 	lower_dentry = unionfs_lower_dentry(sb->s_root);
-	err = vfs_statfs(lower_dentry, buf);
+	lower_path.dentry = lower_dentry;
+	lower_path.mnt = unionfs_mntget(sb->s_root, 0);
+	err = vfs_statfs(&lower_path, buf);
+	mntput(lower_path.mnt);
 
 	/* set return buf to our f/s to avoid confusing user-level utils */
 	buf->f_type = UNIONFS_SUPER_MAGIC;
@@ -204,7 +183,7 @@ static noinline_for_stack int do_remount_mode_option(
 	int err = -EINVAL;
 	int perms, idx;
 	char *modename = strchr(optarg, '=');
-	struct nameidata nd;
+	struct path path;
 
 	/* by now, optarg contains the branch name */
 	if (!*optarg) {
@@ -231,7 +210,7 @@ static noinline_for_stack int do_remount_mode_option(
 	 * and cache-coherency resolved, we'll address the branch-path
 	 * uniqueness.
 	 */
-	err = path_lookup(optarg, LOOKUP_FOLLOW, &nd);
+	err = kern_path(optarg, LOOKUP_FOLLOW, &path);
 	if (err) {
 		printk(KERN_ERR "unionfs: error accessing "
 		       "lower directory \"%s\" (error %d)\n",
@@ -239,10 +218,10 @@ static noinline_for_stack int do_remount_mode_option(
 		goto out;
 	}
 	for (idx = 0; idx < cur_branches; idx++)
-		if (nd.path.mnt == new_lower_paths[idx].mnt &&
-		    nd.path.dentry == new_lower_paths[idx].dentry)
+		if (path.mnt == new_lower_paths[idx].mnt &&
+		    path.dentry == new_lower_paths[idx].dentry)
 			break;
-	path_put(&nd.path);	/* no longer needed */
+	path_put(&path);	/* no longer needed */
 	if (idx == cur_branches) {
 		err = -ENOENT;	/* err may have been reset above */
 		printk(KERN_ERR "unionfs: branch \"%s\" "
@@ -265,7 +244,7 @@ static noinline_for_stack int do_remount_del_option(
 {
 	int err = -EINVAL;
 	int idx;
-	struct nameidata nd;
+	struct path path;
 
 	/* optarg contains the branch name to delete */
 
@@ -275,7 +254,7 @@ static noinline_for_stack int do_remount_del_option(
 	 * and cache-coherency resolved, we'll address the branch-path
 	 * uniqueness.
 	 */
-	err = path_lookup(optarg, LOOKUP_FOLLOW, &nd);
+	err = kern_path(optarg, LOOKUP_FOLLOW, &path);
 	if (err) {
 		printk(KERN_ERR "unionfs: error accessing "
 		       "lower directory \"%s\" (error %d)\n",
@@ -283,10 +262,10 @@ static noinline_for_stack int do_remount_del_option(
 		goto out;
 	}
 	for (idx = 0; idx < cur_branches; idx++)
-		if (nd.path.mnt == new_lower_paths[idx].mnt &&
-		    nd.path.dentry == new_lower_paths[idx].dentry)
+		if (path.mnt == new_lower_paths[idx].mnt &&
+		    path.dentry == new_lower_paths[idx].dentry)
 			break;
-	path_put(&nd.path);	/* no longer needed */
+	path_put(&path);	/* no longer needed */
 	if (idx == cur_branches) {
 		printk(KERN_ERR "unionfs: branch \"%s\" "
 		       "not found\n", optarg);
@@ -332,7 +311,7 @@ static noinline_for_stack int do_remount_add_option(
 	int perms;
 	int idx = 0;		/* default: insert at beginning */
 	char *new_branch , *modename = NULL;
-	struct nameidata nd;
+	struct path path;
 
 	/*
 	 * optarg can be of several forms:
@@ -360,7 +339,7 @@ static noinline_for_stack int do_remount_add_option(
 	 * and cache-coherency resolved, we'll address the branch-path
 	 * uniqueness.
 	 */
-	err = path_lookup(optarg, LOOKUP_FOLLOW, &nd);
+	err = kern_path(optarg, LOOKUP_FOLLOW, &path);
 	if (err) {
 		printk(KERN_ERR "unionfs: error accessing "
 		       "lower directory \"%s\" (error %d)\n",
@@ -368,10 +347,10 @@ static noinline_for_stack int do_remount_add_option(
 		goto out;
 	}
 	for (idx = 0; idx < cur_branches; idx++)
-		if (nd.path.mnt == new_lower_paths[idx].mnt &&
-		    nd.path.dentry == new_lower_paths[idx].dentry)
+		if (path.mnt == new_lower_paths[idx].mnt &&
+		    path.dentry == new_lower_paths[idx].dentry)
 			break;
-	path_put(&nd.path);	/* no longer needed */
+	path_put(&path);	/* no longer needed */
 	if (idx == cur_branches) {
 		printk(KERN_ERR "unionfs: branch \"%s\" "
 		       "not found\n", optarg);
@@ -400,7 +379,7 @@ found_insertion_point:
 		       "branch \"%s\"\n", modename, new_branch);
 		goto out;
 	}
-	err = path_lookup(new_branch, LOOKUP_FOLLOW, &nd);
+	err = kern_path(new_branch, LOOKUP_FOLLOW, &path);
 	if (err) {
 		printk(KERN_ERR "unionfs: error accessing "
 		       "lower directory \"%s\" (error %d)\n",
@@ -414,11 +393,11 @@ found_insertion_point:
 	 * because this code base doesn't support stacking unionfs: the ODF
 	 * code base supports that correctly.
 	 */
-	err = check_branch(&nd);
+	err = check_branch(&path);
 	if (err) {
 		printk(KERN_ERR "unionfs: lower directory "
 		       "\"%s\" is not a valid branch\n", optarg);
-		path_put(&nd.path);
+		path_put(&path);
 		goto out;
 	}
 
@@ -435,10 +414,10 @@ found_insertion_point:
 		memmove(&new_lower_paths[idx+1], &new_lower_paths[idx],
 			(cur_branches - idx) * sizeof(struct path));
 	}
-	new_lower_paths[idx].dentry = nd.path.dentry;
-	new_lower_paths[idx].mnt = nd.path.mnt;
+	new_lower_paths[idx].dentry = path.dentry;
+	new_lower_paths[idx].mnt = path.mnt;
 
-	new_data[idx].sb = nd.path.dentry->d_sb;
+	new_data[idx].sb = path.dentry->d_sb;
 	atomic_set(&new_data[idx].open_files, 0);
 	new_data[idx].branchperms = perms;
 	new_data[idx].branch_id = ++*high_branch_id; /* assign new branch ID */
@@ -590,10 +569,10 @@ static int unionfs_remount_fs(struct super_block *sb, int *flags,
 		path_get(&tmp_lower_paths[i]); /* drop refs at end of fxn */
 
 	/*******************************************************************
-	 * For each branch command, do path_lookup on the requested branch,
+	 * For each branch command, do kern_path on the requested branch,
 	 * and apply the change to a temp branch list.  To handle errors, we
 	 * already dup'ed the old arrays (above), and increased the refcnts
-	 * on various f/s objects.  So now we can do all the path_lookups
+	 * on various f/s objects.  So now we can do all the kern_path'ss
 	 * and branch-management commands on the new arrays.  If it fail mid
 	 * way, we free the tmp arrays and *put all objects.  If we succeed,
 	 * then we free old arrays and *put its objects, and then replace
@@ -848,12 +827,15 @@ out_error:
  *
  * No need to lock sb info's rwsem.
  */
-static void unionfs_clear_inode(struct inode *inode)
+static void unionfs_evict_inode(struct inode *inode)
 {
 	int bindex, bstart, bend;
 	struct inode *lower_inode;
 	struct list_head *pos, *n;
 	struct unionfs_dir_state *rdstate;
+
+	truncate_inode_pages(&inode->i_data, 0);
+	end_writeback(inode);
 
 	list_for_each_safe(pos, n, &UNIONFS_I(inode)->readdircache) {
 		rdstate = list_entry(pos, struct unionfs_dir_state, cache);
@@ -938,7 +920,8 @@ void unionfs_destroy_inode_cache(void)
  *
  * No need to grab sb info's rwsem.
  */
-static int unionfs_write_inode(struct inode *inode, int sync)
+static int unionfs_write_inode(struct inode *inode,
+			       struct writeback_control *wbc)
 {
 	struct list_head *pos, *n;
 	struct unionfs_dir_state *rdstate;
@@ -982,17 +965,18 @@ static void unionfs_umount_begin(struct super_block *sb)
 	unionfs_read_unlock(sb);
 }
 
-static int unionfs_show_options(struct seq_file *m, struct vfsmount *mnt)
+static int unionfs_show_options(struct seq_file *m, struct dentry *root)
 {
-	struct super_block *sb = mnt->mnt_sb;
+	struct super_block *sb = root->d_sb;
 	int ret = 0;
 	char *tmp_page;
 	char *path;
 	int bindex, bstart, bend;
 	int perms;
 
+	/* to prevent a silly lockdep warning with namespace_sem */
+	lockdep_off();
 	unionfs_read_lock(sb, UNIONFS_SMUTEX_CHILD);
-
 	unionfs_lock_dentry(sb->s_root, UNIONFS_DMUTEX_CHILD);
 
 	tmp_page = (char *) __get_free_page(GFP_KERNEL);
@@ -1027,18 +1011,17 @@ out:
 	free_page((unsigned long) tmp_page);
 
 	unionfs_unlock_dentry(sb->s_root);
-
 	unionfs_read_unlock(sb);
+	lockdep_on();
 
 	return ret;
 }
 
 struct super_operations unionfs_sops = {
-	.delete_inode	= unionfs_delete_inode,
 	.put_super	= unionfs_put_super,
 	.statfs		= unionfs_statfs,
 	.remount_fs	= unionfs_remount_fs,
-	.clear_inode	= unionfs_clear_inode,
+	.evict_inode	= unionfs_evict_inode,
 	.umount_begin	= unionfs_umount_begin,
 	.show_options	= unionfs_show_options,
 	.write_inode	= unionfs_write_inode,

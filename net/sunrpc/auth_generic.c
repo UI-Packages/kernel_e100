@@ -5,6 +5,7 @@
  */
 
 #include <linux/err.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/sched.h>
@@ -26,7 +27,6 @@ struct generic_cred {
 };
 
 static struct rpc_auth generic_auth;
-static struct rpc_cred_cache generic_cred_cache;
 static const struct rpc_credops generic_credops;
 
 /*
@@ -41,31 +41,28 @@ EXPORT_SYMBOL_GPL(rpc_lookup_cred);
 /*
  * Public call interface for looking up machine creds.
  */
-struct rpc_cred *rpc_lookup_machine_cred(void)
+struct rpc_cred *rpc_lookup_machine_cred(const char *service_name)
 {
 	struct auth_cred acred = {
 		.uid = RPC_MACHINE_CRED_USERID,
 		.gid = RPC_MACHINE_CRED_GROUPID,
+		.principal = service_name,
 		.machine_cred = 1,
 	};
 
-	dprintk("RPC:       looking up machine cred\n");
+	dprintk("RPC:       looking up machine cred for service %s\n",
+			service_name);
 	return generic_auth.au_ops->lookup_cred(&generic_auth, &acred, 0);
 }
 EXPORT_SYMBOL_GPL(rpc_lookup_machine_cred);
 
-static void
-generic_bind_cred(struct rpc_task *task, struct rpc_cred *cred, int lookupflags)
+static struct rpc_cred *generic_bind_cred(struct rpc_task *task,
+		struct rpc_cred *cred, int lookupflags)
 {
 	struct rpc_auth *auth = task->tk_client->cl_auth;
 	struct auth_cred *acred = &container_of(cred, struct generic_cred, gc_base)->acred;
-	struct rpc_cred *ret;
 
-	ret = auth->au_ops->lookup_cred(auth, acred, lookupflags);
-	if (!IS_ERR(ret))
-		task->tk_msg.rpc_cred = ret;
-	else
-		task->tk_status = PTR_ERR(ret);
+	return auth->au_ops->lookup_cred(auth, acred, lookupflags);
 }
 
 /*
@@ -95,6 +92,7 @@ generic_create_cred(struct rpc_auth *auth, struct auth_cred *acred, int flags)
 	if (gcred->acred.group_info != NULL)
 		get_group_info(gcred->acred.group_info);
 	gcred->acred.machine_cred = acred->machine_cred;
+	gcred->acred.principal = acred->principal;
 
 	dprintk("RPC:       allocated %s cred %p for uid %d gid %d\n",
 			gcred->acred.machine_cred ? "machine" : "generic",
@@ -126,6 +124,17 @@ generic_destroy_cred(struct rpc_cred *cred)
 	call_rcu(&cred->cr_rcu, generic_free_cred_callback);
 }
 
+static int
+machine_cred_match(struct auth_cred *acred, struct generic_cred *gcred, int flags)
+{
+	if (!gcred->acred.machine_cred ||
+	    gcred->acred.principal != acred->principal ||
+	    gcred->acred.uid != acred->uid ||
+	    gcred->acred.gid != acred->gid)
+		return 0;
+	return 1;
+}
+
 /*
  * Match credentials against current process creds.
  */
@@ -135,9 +144,12 @@ generic_match(struct auth_cred *acred, struct rpc_cred *cred, int flags)
 	struct generic_cred *gcred = container_of(cred, struct generic_cred, gc_base);
 	int i;
 
+	if (acred->machine_cred)
+		return machine_cred_match(acred, gcred, flags);
+
 	if (gcred->acred.uid != acred->uid ||
 	    gcred->acred.gid != acred->gid ||
-	    gcred->acred.machine_cred != acred->machine_cred)
+	    gcred->acred.machine_cred != 0)
 		goto out_nomatch;
 
 	/* Optimisation in the case where pointers are identical... */
@@ -158,19 +170,15 @@ out_nomatch:
 	return 0;
 }
 
-void __init rpc_init_generic_auth(void)
+int __init rpc_init_generic_auth(void)
 {
-	spin_lock_init(&generic_cred_cache.lock);
+	return rpcauth_init_credcache(&generic_auth);
 }
 
-void __exit rpc_destroy_generic_auth(void)
+void rpc_destroy_generic_auth(void)
 {
-	rpcauth_clear_credcache(&generic_cred_cache);
+	rpcauth_destroy_credcache(&generic_auth);
 }
-
-static struct rpc_cred_cache generic_cred_cache = {
-	{{ NULL, },},
-};
 
 static const struct rpc_authops generic_auth_ops = {
 	.owner = THIS_MODULE,
@@ -182,7 +190,6 @@ static const struct rpc_authops generic_auth_ops = {
 static struct rpc_auth generic_auth = {
 	.au_ops = &generic_auth_ops,
 	.au_count = ATOMIC_INIT(0),
-	.au_credcache = &generic_cred_cache,
 };
 
 static const struct rpc_credops generic_credops = {

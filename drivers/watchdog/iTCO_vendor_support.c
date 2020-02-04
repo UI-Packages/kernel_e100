@@ -17,10 +17,11 @@
  *	Includes, defines, variables, module parameters, ...
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 /* Module and version information */
 #define DRV_NAME	"iTCO_vendor_support"
 #define DRV_VERSION	"1.04"
-#define PFX		DRV_NAME ": "
 
 /* Includes */
 #include <linux/module.h>		/* For module specific items */
@@ -99,13 +100,6 @@ static void supermicro_old_pre_stop(unsigned long acpibase)
 	val32 = inl(SMI_EN);
 	val32 |= 0x00002000;	/* Turn on SMI clearing watchdog */
 	outl(val32, SMI_EN);	/* Needed to deactivate watchdog */
-}
-
-static void supermicro_old_pre_keepalive(unsigned long acpibase)
-{
-	/* Reload TCO Timer (done in iTCO_wdt_keepalive) + */
-	/* Clear "Expire Flag" (Bit 3 of TC01_STS register) */
-	outb(0x08, TCO1_STS);
 }
 
 /*
@@ -337,9 +331,7 @@ EXPORT_SYMBOL(iTCO_vendor_pre_stop);
 
 void iTCO_vendor_pre_keepalive(unsigned long acpibase, unsigned int heartbeat)
 {
-	if (vendorsupport == SUPERMICRO_OLD_BOARD)
-		supermicro_old_pre_keepalive(acpibase);
-	else if (vendorsupport == SUPERMICRO_NEW_BOARD)
+	if (vendorsupport == SUPERMICRO_NEW_BOARD)
 		supermicro_new_pre_set_heartbeat(heartbeat);
 }
 EXPORT_SYMBOL(iTCO_vendor_pre_keepalive);
@@ -364,13 +356,13 @@ EXPORT_SYMBOL(iTCO_vendor_check_noreboot_on);
 
 static int __init iTCO_vendor_init_module(void)
 {
-	printk(KERN_INFO PFX "vendor-support=%d\n", vendorsupport);
+	pr_info("vendor-support=%d\n", vendorsupport);
 	return 0;
 }
 
 static void __exit iTCO_vendor_exit_module(void)
 {
-	printk(KERN_INFO PFX "Module Unloaded\n");
+	pr_info("Module Unloaded\n");
 }
 
 module_init(iTCO_vendor_init_module);

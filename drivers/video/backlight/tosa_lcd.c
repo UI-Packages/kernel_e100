@@ -15,6 +15,7 @@
 #include <linux/device.h>
 #include <linux/spi/spi.h>
 #include <linux/i2c.h>
+#include <linux/slab.h>
 #include <linux/gpio.h>
 #include <linux/delay.h>
 #include <linux/lcd.h>
@@ -177,7 +178,7 @@ static int __devinit tosa_lcd_probe(struct spi_device *spi)
 	if (!data)
 		return -ENOMEM;
 
-	data->is_vga = true; /* defaut to VGA mode */
+	data->is_vga = true; /* default to VGA mode */
 
 	/*
 	 * bits_per_word cannot be configured in platform data
@@ -270,7 +271,7 @@ static int tosa_lcd_resume(struct spi_device *spi)
 }
 #else
 #define tosa_lcd_suspend	NULL
-#define tosa_lcd_reume NULL
+#define tosa_lcd_resume NULL
 #endif
 
 static struct spi_driver tosa_lcd_driver = {
@@ -284,18 +285,7 @@ static struct spi_driver tosa_lcd_driver = {
 	.resume		= tosa_lcd_resume,
 };
 
-static int __init tosa_lcd_init(void)
-{
-	return spi_register_driver(&tosa_lcd_driver);
-}
-
-static void __exit tosa_lcd_exit(void)
-{
-	spi_unregister_driver(&tosa_lcd_driver);
-}
-
-module_init(tosa_lcd_init);
-module_exit(tosa_lcd_exit);
+module_spi_driver(tosa_lcd_driver);
 
 MODULE_AUTHOR("Dmitry Baryshkov");
 MODULE_LICENSE("GPL v2");

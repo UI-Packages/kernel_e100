@@ -107,8 +107,7 @@ ENTRY(startup_32)
 	lgdt	gdt(%ebp)
 
 	/* Enable PAE mode */
-	xorl	%eax, %eax
-	orl	$(X86_CR4_PAE), %eax
+	movl	$(X86_CR4_PAE), %eax
 	movl	%eax, %cr4
 
  /*
@@ -183,7 +182,7 @@ no_longmode:
 	hlt
 	jmp     1b
 
-#include "../../kernel/verify_cpu_64.S"
+#include "../../kernel/verify_cpu.S"
 
 	/*
 	 * Be careful here startup_64 needs to be at a predictable
@@ -200,6 +199,36 @@ ENTRY(startup_64)
 	 * an identity mapped page table being provied that maps our
 	 * entire text+data+bss and hopefully all of memory.
 	 */
+#ifdef CONFIG_EFI_STUB
+	/*
+	 * The entry point for the PE/COFF executable is 0x210, so only
+	 * legacy boot loaders will execute this jmp.
+	 */
+	jmp	preferred_addr
+
+	.org 0x210
+	mov	%rcx, %rdi
+	mov	%rdx, %rsi
+	call	efi_main
+	movq	%rax,%rsi
+	cmpq	$0,%rax
+	jne	2f
+1:
+	/* EFI init failed, so hang. */
+	hlt
+	jmp	1b
+2:
+	call	3f
+3:
+	popq	%rax
+	subq	$3b, %rax
+	subq	BP_pref_address(%rsi), %rax
+	add	BP_code32_start(%esi), %eax
+	leaq	preferred_addr(%rax), %rax
+	jmp	*%rax
+
+preferred_addr:
+#endif
 
 	/* Setup data segments. */
 	xorl	%eax, %eax
@@ -280,6 +309,19 @@ relocated:
 	shrq	$3, %rcx
 	rep	stosq
 
+/*
+ * Adjust our own GOT
+ */
+	leaq	_got(%rip), %rdx
+	leaq	_egot(%rip), %rcx
+1:
+	cmpq	%rcx, %rdx
+	jae	2f
+	addq	%rbx, (%rdx)
+	addq	$8, %rdx
+	jmp	1b
+2:
+	
 /*
  * Do the decompression, and jump to the new kernel..
  */

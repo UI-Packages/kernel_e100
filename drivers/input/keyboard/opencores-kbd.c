@@ -14,6 +14,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 struct opencores_kbd {
 	struct input_dev *input;
@@ -162,18 +163,7 @@ static struct platform_driver opencores_kbd_device_driver = {
 		.name = "opencores-kbd",
 	},
 };
-
-static int __init opencores_kbd_init(void)
-{
-	return platform_driver_register(&opencores_kbd_device_driver);
-}
-module_init(opencores_kbd_init);
-
-static void __exit opencores_kbd_exit(void)
-{
-	platform_driver_unregister(&opencores_kbd_device_driver);
-}
-module_exit(opencores_kbd_exit);
+module_platform_driver(opencores_kbd_device_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Javier Herrero <jherrero@hvsistemas.es>");

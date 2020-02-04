@@ -148,8 +148,8 @@ static inline unsigned long long native_read_pmc(int counter)
 #define rdmsr(msr, val1, val2)					\
 do {								\
 	u64 __val = native_read_msr((msr));			\
-	(val1) = (u32)__val;					\
-	(val2) = (u32)(__val >> 32);				\
+	(void)((val1) = (u32)__val);				\
+	(void)((val2) = (u32)(__val >> 32));			\
 } while (0)
 
 static inline void wrmsr(unsigned msr, unsigned low, unsigned high)
@@ -169,7 +169,14 @@ static inline int wrmsr_safe(unsigned msr, unsigned low, unsigned high)
 	return native_write_msr_safe(msr, low, high);
 }
 
-/* rdmsr with exception handling */
+/*
+ * rdmsr with exception handling.
+ *
+ * Please note that the exception handling works only after we've
+ * switched to the "smart" #GP handler in trap_init() which knows about
+ * exception tables - using this macro earlier than that causes machine
+ * hangs on boxes which do not implement the @msr in the first argument.
+ */
 #define rdmsr_safe(msr, p1, p2)					\
 ({								\
 	int __err;						\
@@ -185,33 +192,6 @@ static inline int rdmsrl_safe(unsigned msr, unsigned long long *p)
 
 	*p = native_read_msr_safe(msr, &err);
 	return err;
-}
-
-static inline int rdmsrl_amd_safe(unsigned msr, unsigned long long *p)
-{
-	u32 gprs[8] = { 0 };
-	int err;
-
-	gprs[1] = msr;
-	gprs[7] = 0x9c5a203a;
-
-	err = native_rdmsr_safe_regs(gprs);
-
-	*p = gprs[0] | ((u64)gprs[2] << 32);
-
-	return err;
-}
-
-static inline int wrmsrl_amd_safe(unsigned msr, unsigned long long val)
-{
-	u32 gprs[8] = { 0 };
-
-	gprs[0] = (u32)val;
-	gprs[1] = msr;
-	gprs[2] = val >> 32;
-	gprs[7] = 0x9c5a203a;
-
-	return native_wrmsr_safe_regs(gprs);
 }
 
 static inline int rdmsr_safe_regs(u32 regs[8])
@@ -237,6 +217,8 @@ do {							\
 	(high) = (u32)(_l >> 32);			\
 } while (0)
 
+#define rdpmcl(counter, val) ((val) = native_read_pmc(counter))
+
 #define rdtscp(low, high, aux)					\
 do {                                                            \
 	unsigned long long _val = native_read_tscp(&(aux));     \
@@ -248,13 +230,12 @@ do {                                                            \
 
 #endif	/* !CONFIG_PARAVIRT */
 
-
-#define checking_wrmsrl(msr, val) wrmsr_safe((msr), (u32)(val),		\
+#define wrmsrl_safe(msr, val) wrmsr_safe((msr), (u32)(val),		\
 					     (u32)((val) >> 32))
 
-#define write_tsc(val1, val2) wrmsr(0x10, (val1), (val2))
+#define write_tsc(val1, val2) wrmsr(MSR_IA32_TSC, (val1), (val2))
 
-#define write_rdtscp_aux(val) wrmsr(0xc0000103, (val), 0)
+#define write_rdtscp_aux(val) wrmsr(MSR_TSC_AUX, (val), 0)
 
 struct msr *msrs_alloc(void);
 void msrs_free(struct msr *msrs);
@@ -279,12 +260,12 @@ static inline int wrmsr_on_cpu(unsigned int cpu, u32 msr_no, u32 l, u32 h)
 	wrmsr(msr_no, l, h);
 	return 0;
 }
-static inline void rdmsr_on_cpus(const cpumask_t *m, u32 msr_no,
+static inline void rdmsr_on_cpus(const struct cpumask *m, u32 msr_no,
 				struct msr *msrs)
 {
        rdmsr_on_cpu(0, msr_no, &(msrs[0].l), &(msrs[0].h));
 }
-static inline void wrmsr_on_cpus(const cpumask_t *m, u32 msr_no,
+static inline void wrmsr_on_cpus(const struct cpumask *m, u32 msr_no,
 				struct msr *msrs)
 {
        wrmsr_on_cpu(0, msr_no, msrs[0].l, msrs[0].h);

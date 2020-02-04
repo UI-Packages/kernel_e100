@@ -28,6 +28,7 @@
 #include <linux/fs.h>
 #include <linux/err.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/spinlock.h>
 #include <linux/mutex.h>
@@ -82,9 +83,6 @@
  */
 #define INUM_WARN_WATERMARK 0xFFF00000
 #define INUM_WATERMARK      0xFFFFFF00
-
-/* Largest key size supported in this implementation */
-#define CUR_MAX_KEY_LEN UBIFS_SK_LEN
 
 /* Maximum number of entries in each LPT (LEB category) heap */
 #define LPT_HEAP_SZ 256
@@ -276,10 +274,10 @@ struct ubifs_old_idx {
 
 /* The below union makes it easier to deal with keys */
 union ubifs_key {
-	uint8_t u8[CUR_MAX_KEY_LEN];
-	uint32_t u32[CUR_MAX_KEY_LEN/4];
-	uint64_t u64[CUR_MAX_KEY_LEN/8];
-	__le32 j32[CUR_MAX_KEY_LEN/4];
+	uint8_t u8[UBIFS_SK_LEN];
+	uint32_t u32[UBIFS_SK_LEN/4];
+	uint64_t u64[UBIFS_SK_LEN/8];
+	__le32 j32[UBIFS_SK_LEN/4];
 };
 
 /**
@@ -388,9 +386,9 @@ struct ubifs_gced_idx_leb {
  * The @ui_size is a "shadow" variable for @inode->i_size and UBIFS uses
  * @ui_size instead of @inode->i_size. The reason for this is that UBIFS cannot
  * make sure @inode->i_size is always changed under @ui_mutex, because it
- * cannot call 'vmtruncate()' with @ui_mutex locked, because it would deadlock
- * with 'ubifs_writepage()' (see file.c). All the other inode fields are
- * changed under @ui_mutex, so they do not need "shadow" fields. Note, one
+ * cannot call 'truncate_setsize()' with @ui_mutex locked, because it would
+ * deadlock with 'ubifs_writepage()' (see file.c). All the other inode fields
+ * are changed under @ui_mutex, so they do not need "shadow" fields. Note, one
  * could consider to rework locking and base it on "shadow" fields.
  */
 struct ubifs_inode {
@@ -1186,6 +1184,8 @@ struct ubifs_debug_info;
  * @freeable_list: list of freeable non-index LEBs (free + dirty == @leb_size)
  * @frdi_idx_list: list of freeable index LEBs (free + dirty == @leb_size)
  * @freeable_cnt: number of freeable LEBs in @freeable_list
+ * @in_a_category_cnt: count of lprops which are in a certain category, which
+ *                     basically meants that they were loaded from the flash
  *
  * @ltab_lnum: LEB number of LPT's own lprops table
  * @ltab_offs: offset of LPT's own lprops table
@@ -1415,6 +1415,7 @@ struct ubifs_info {
 	struct list_head freeable_list;
 	struct list_head frdi_idx_list;
 	int freeable_cnt;
+	int in_a_category_cnt;
 
 	int ltab_lnum;
 	int ltab_offs;
@@ -1624,7 +1625,7 @@ int ubifs_tnc_start_commit(struct ubifs_info *c, struct ubifs_zbranch *zroot);
 int ubifs_tnc_end_commit(struct ubifs_info *c);
 
 /* shrinker.c */
-int ubifs_shrinker(int nr_to_scan, gfp_t gfp_mask);
+int ubifs_shrinker(struct shrinker *shrink, struct shrink_control *sc);
 
 /* commit.c */
 int ubifs_bg_thread(void *info);
@@ -1728,12 +1729,12 @@ const struct ubifs_lprops *ubifs_fast_find_frdi_idx(struct ubifs_info *c);
 int ubifs_calc_dark(const struct ubifs_info *c, int spc);
 
 /* file.c */
-int ubifs_fsync(struct file *file, struct dentry *dentry, int datasync);
+int ubifs_fsync(struct file *file, loff_t start, loff_t end, int datasync);
 int ubifs_setattr(struct dentry *dentry, struct iattr *attr);
 
 /* dir.c */
 struct inode *ubifs_new_inode(struct ubifs_info *c, const struct inode *dir,
-			      int mode);
+			      umode_t mode);
 int ubifs_getattr(struct vfsmount *mnt, struct dentry *dentry,
 		  struct kstat *stat);
 

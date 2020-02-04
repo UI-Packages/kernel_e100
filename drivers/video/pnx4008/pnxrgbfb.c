@@ -18,7 +18,6 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -194,17 +193,6 @@ static struct platform_driver rgbfb_driver = {
 	.remove = rgbfb_remove,
 };
 
-static int __init rgbfb_init(void)
-{
-	return platform_driver_register(&rgbfb_driver);
-}
-
-static void __exit rgbfb_exit(void)
-{
-	platform_driver_unregister(&rgbfb_driver);
-}
-
-module_init(rgbfb_init);
-module_exit(rgbfb_exit);
+module_platform_driver(rgbfb_driver);
 
 MODULE_LICENSE("GPL");

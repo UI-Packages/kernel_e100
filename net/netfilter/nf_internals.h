@@ -6,7 +6,7 @@
 #include <linux/netdevice.h>
 
 #ifdef CONFIG_NETFILTER_DEBUG
-#define NFDEBUG(format, args...)  printk(format , ## args)
+#define NFDEBUG(format, args...)  printk(KERN_DEBUG format , ## args)
 #else
 #define NFDEBUG(format, args...)
 #endif
@@ -29,7 +29,7 @@ extern int nf_queue(struct sk_buff *skb,
 		    struct net_device *indev,
 		    struct net_device *outdev,
 		    int (*okfn)(struct sk_buff *),
-		    unsigned int queuenum);
+		    unsigned int queuenum, unsigned int queuetype);
 extern int __init netfilter_queue_init(void);
 
 /* nf_log.c */

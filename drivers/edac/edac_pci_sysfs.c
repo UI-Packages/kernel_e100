@@ -7,7 +7,8 @@
  *
  */
 #include <linux/module.h>
-#include <linux/sysdev.h>
+#include <linux/edac.h>
+#include <linux/slab.h>
 #include <linux/ctype.h>
 
 #include "edac_core.h"
@@ -121,7 +122,7 @@ static ssize_t edac_pci_instance_store(struct kobject *kobj,
 }
 
 /* fs_ops table */
-static struct sysfs_ops pci_instance_ops = {
+static const struct sysfs_ops pci_instance_ops = {
 	.show = edac_pci_instance_show,
 	.store = edac_pci_instance_store
 };
@@ -261,7 +262,7 @@ static ssize_t edac_pci_dev_store(struct kobject *kobj,
 	return -EIO;
 }
 
-static struct sysfs_ops edac_pci_sysfs_ops = {
+static const struct sysfs_ops edac_pci_sysfs_ops = {
 	.show = edac_pci_dev_show,
 	.store = edac_pci_dev_store
 };
@@ -337,12 +338,12 @@ static struct kobj_type ktype_edac_pci_main_kobj = {
  * edac_pci_main_kobj_setup()
  *
  *	setup the sysfs for EDAC PCI attributes
- *	assumes edac_class has already been initialized
+ *	assumes edac_subsys has already been initialized
  */
 static int edac_pci_main_kobj_setup(void)
 {
 	int err;
-	struct sysdev_class *edac_class;
+	struct bus_type *edac_subsys;
 
 	debugf0("%s()\n", __func__);
 
@@ -351,11 +352,11 @@ static int edac_pci_main_kobj_setup(void)
 		return 0;
 
 	/* First time, so create the main kobject and its
-	 * controls and atributes
+	 * controls and attributes
 	 */
-	edac_class = edac_get_edac_class();
-	if (edac_class == NULL) {
-		debugf1("%s() no edac_class\n", __func__);
+	edac_subsys = edac_get_sysfs_subsys();
+	if (edac_subsys == NULL) {
+		debugf1("%s() no edac_subsys\n", __func__);
 		err = -ENODEV;
 		goto decrement_count_fail;
 	}
@@ -367,7 +368,7 @@ static int edac_pci_main_kobj_setup(void)
 	if (!try_module_get(THIS_MODULE)) {
 		debugf1("%s() try_module_get() failed\n", __func__);
 		err = -ENODEV;
-		goto decrement_count_fail;
+		goto mod_get_fail;
 	}
 
 	edac_pci_top_main_kobj = kzalloc(sizeof(struct kobject), GFP_KERNEL);
@@ -380,7 +381,7 @@ static int edac_pci_main_kobj_setup(void)
 	/* Instanstiate the pci object */
 	err = kobject_init_and_add(edac_pci_top_main_kobj,
 				   &ktype_edac_pci_main_kobj,
-				   &edac_class->kset.kobj, "pci");
+				   &edac_subsys->dev_root->kobj, "pci");
 	if (err) {
 		debugf1("Failed to register '.../edac/pci'\n");
 		goto kobject_init_and_add_fail;
@@ -401,6 +402,9 @@ kobject_init_and_add_fail:
 
 kzalloc_fail:
 	module_put(THIS_MODULE);
+
+mod_get_fail:
+	edac_put_sysfs_subsys();
 
 decrement_count_fail:
 	/* if are on this error exit, nothing to tear down */
@@ -428,6 +432,7 @@ static void edac_pci_main_kobj_teardown(void)
 			__func__);
 		kobject_put(edac_pci_top_main_kobj);
 	}
+	edac_put_sysfs_subsys();
 }
 
 /*
@@ -534,8 +539,6 @@ static void edac_pci_dev_parity_clear(struct pci_dev *dev)
 {
 	u8 header_type;
 
-	debugf0("%s()\n", __func__);
-
 	get_pci_parity_status(dev, 0);
 
 	/* read the device TYPE, looking for bridges */
@@ -548,7 +551,7 @@ static void edac_pci_dev_parity_clear(struct pci_dev *dev)
 /*
  *  PCI Parity polling
  *
- *	Fucntion to retrieve the current parity status
+ *	Function to retrieve the current parity status
  *	and decode it
  *
  */

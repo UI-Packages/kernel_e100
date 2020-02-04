@@ -25,7 +25,6 @@
 #include <linux/miscdevice.h>
 #include <linux/blkdev.h>
 #include <linux/pci.h>
-#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 
@@ -38,7 +37,6 @@
 #include <asm/mac_via.h>
 
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/uaccess.h>
 

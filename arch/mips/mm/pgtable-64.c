@@ -11,6 +11,7 @@
 #include <asm/fixmap.h>
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
+#include <asm/tlbflush.h>
 
 void pgd_init(unsigned long page)
 {
@@ -61,6 +62,37 @@ void pmd_init(unsigned long addr, unsigned long pagetable)
 }
 #endif
 
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+
+void pmdp_splitting_flush(struct vm_area_struct *vma,
+			 unsigned long address,
+			 pmd_t *pmdp)
+{
+	if (!pmd_trans_splitting(*pmdp)) {
+		pmd_t pmd = pmd_mksplitting(*pmdp);
+		set_pmd_at(vma->vm_mm, address, pmdp, pmd);
+		/* already flushed TLB in set_pmd_at() */
+	}
+}
+
+#endif
+
+pmd_t mk_pmd(struct page *page, pgprot_t prot)
+{
+	pmd_t pmd;
+
+	pmd_val(pmd) = (page_to_pfn(page) << _PFN_SHIFT) | pgprot_val(prot);
+
+	return pmd;
+}
+
+void set_pmd_at(struct mm_struct *mm, unsigned long addr,
+		pmd_t *pmdp, pmd_t pmd)
+{
+	*pmdp = pmd;
+	flush_tlb_all();
+}
+
 void __init pagetable_init(void)
 {
 	unsigned long vaddr;
@@ -76,5 +108,5 @@ void __init pagetable_init(void)
 	 * Fixed mappings:
 	 */
 	vaddr = __fix_to_virt(__end_of_fixed_addresses - 1) & PMD_MASK;
-	fixrange_init(vaddr, 0, pgd_base);
+	fixrange_init(vaddr, vaddr + FIXADDR_SIZE, pgd_base);
 }

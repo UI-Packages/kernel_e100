@@ -2,6 +2,7 @@
 #include <linux/pci.h>
 #include <linux/module.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/wait.h>
 
@@ -12,7 +13,7 @@
  * configuration space.
  */
 
-static DEFINE_SPINLOCK(pci_lock);
+DEFINE_RAW_SPINLOCK(pci_lock);
 
 /*
  *  Wrappers for all PCI configuration access functions.  They just check
@@ -32,10 +33,10 @@ int pci_bus_read_config_##size \
 	unsigned long flags;						\
 	u32 data = 0;							\
 	if (PCI_##size##_BAD) return PCIBIOS_BAD_REGISTER_NUMBER;	\
-	spin_lock_irqsave(&pci_lock, flags);				\
+	raw_spin_lock_irqsave(&pci_lock, flags);			\
 	res = bus->ops->read(bus, devfn, pos, len, &data);		\
 	*value = (type)data;						\
-	spin_unlock_irqrestore(&pci_lock, flags);			\
+	raw_spin_unlock_irqrestore(&pci_lock, flags);		\
 	return res;							\
 }
 
@@ -46,9 +47,9 @@ int pci_bus_write_config_##size \
 	int res;							\
 	unsigned long flags;						\
 	if (PCI_##size##_BAD) return PCIBIOS_BAD_REGISTER_NUMBER;	\
-	spin_lock_irqsave(&pci_lock, flags);				\
+	raw_spin_lock_irqsave(&pci_lock, flags);			\
 	res = bus->ops->write(bus, devfn, pos, len, value);		\
-	spin_unlock_irqrestore(&pci_lock, flags);			\
+	raw_spin_unlock_irqrestore(&pci_lock, flags);		\
 	return res;							\
 }
 
@@ -78,10 +79,10 @@ struct pci_ops *pci_bus_set_ops(struct pci_bus *bus, struct pci_ops *ops)
 	struct pci_ops *old_ops;
 	unsigned long flags;
 
-	spin_lock_irqsave(&pci_lock, flags);
+	raw_spin_lock_irqsave(&pci_lock, flags);
 	old_ops = bus->ops;
 	bus->ops = ops;
-	spin_unlock_irqrestore(&pci_lock, flags);
+	raw_spin_unlock_irqrestore(&pci_lock, flags);
 	return old_ops;
 }
 EXPORT_SYMBOL(pci_bus_set_ops);
@@ -126,49 +127,59 @@ EXPORT_SYMBOL(pci_write_vpd);
  * We have a bit per device to indicate it's blocked and a global wait queue
  * for callers to sleep on until devices are unblocked.
  */
-static DECLARE_WAIT_QUEUE_HEAD(pci_ucfg_wait);
+static DECLARE_WAIT_QUEUE_HEAD(pci_cfg_wait);
 
-static noinline void pci_wait_ucfg(struct pci_dev *dev)
+static noinline void pci_wait_cfg(struct pci_dev *dev)
 {
 	DECLARE_WAITQUEUE(wait, current);
 
-	__add_wait_queue(&pci_ucfg_wait, &wait);
+	__add_wait_queue(&pci_cfg_wait, &wait);
 	do {
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		spin_unlock_irq(&pci_lock);
+		raw_spin_unlock_irq(&pci_lock);
 		schedule();
-		spin_lock_irq(&pci_lock);
-	} while (dev->block_ucfg_access);
-	__remove_wait_queue(&pci_ucfg_wait, &wait);
+		raw_spin_lock_irq(&pci_lock);
+	} while (dev->block_cfg_access);
+	__remove_wait_queue(&pci_cfg_wait, &wait);
 }
 
+/* Returns 0 on success, negative values indicate error. */
 #define PCI_USER_READ_CONFIG(size,type)					\
 int pci_user_read_config_##size						\
 	(struct pci_dev *dev, int pos, type *val)			\
 {									\
 	int ret = 0;							\
 	u32 data = -1;							\
-	if (PCI_##size##_BAD) return PCIBIOS_BAD_REGISTER_NUMBER;	\
-	spin_lock_irq(&pci_lock);					\
-	if (unlikely(dev->block_ucfg_access)) pci_wait_ucfg(dev);	\
+	if (PCI_##size##_BAD)						\
+		return -EINVAL;						\
+	raw_spin_lock_irq(&pci_lock);				\
+	if (unlikely(dev->block_cfg_access))				\
+		pci_wait_cfg(dev);					\
 	ret = dev->bus->ops->read(dev->bus, dev->devfn,			\
 					pos, sizeof(type), &data);	\
-	spin_unlock_irq(&pci_lock);					\
+	raw_spin_unlock_irq(&pci_lock);				\
 	*val = (type)data;						\
+	if (ret > 0)							\
+		ret = -EINVAL;						\
 	return ret;							\
 }
 
+/* Returns 0 on success, negative values indicate error. */
 #define PCI_USER_WRITE_CONFIG(size,type)				\
 int pci_user_write_config_##size					\
 	(struct pci_dev *dev, int pos, type val)			\
 {									\
 	int ret = -EIO;							\
-	if (PCI_##size##_BAD) return PCIBIOS_BAD_REGISTER_NUMBER;	\
-	spin_lock_irq(&pci_lock);					\
-	if (unlikely(dev->block_ucfg_access)) pci_wait_ucfg(dev);	\
+	if (PCI_##size##_BAD)						\
+		return -EINVAL;						\
+	raw_spin_lock_irq(&pci_lock);				\
+	if (unlikely(dev->block_cfg_access))				\
+		pci_wait_cfg(dev);					\
 	ret = dev->bus->ops->write(dev->bus, dev->devfn,		\
 					pos, sizeof(type), val);	\
-	spin_unlock_irq(&pci_lock);					\
+	raw_spin_unlock_irq(&pci_lock);				\
+	if (ret > 0)							\
+		ret = -EINVAL;						\
 	return ret;							\
 }
 
@@ -196,6 +207,8 @@ struct pci_vpd_pci22 {
  * This code has to spin since there is no other notification from the PCI
  * hardware. Since the VPD is often implemented by serial attachment to an
  * EEPROM, it may take many milliseconds to complete.
+ *
+ * Returns 0 on success, negative values indicate error.
  */
 static int pci_vpd_pci22_wait(struct pci_dev *dev)
 {
@@ -211,7 +224,7 @@ static int pci_vpd_pci22_wait(struct pci_dev *dev)
 	for (;;) {
 		ret = pci_user_read_config_word(dev, vpd->cap + PCI_VPD_ADDR,
 						&status);
-		if (ret)
+		if (ret < 0)
 			return ret;
 
 		if ((status & PCI_VPD_ADDR_F) == vpd->flag) {
@@ -219,8 +232,13 @@ static int pci_vpd_pci22_wait(struct pci_dev *dev)
 			return 0;
 		}
 
-		if (time_after(jiffies, timeout))
+		if (time_after(jiffies, timeout)) {
+			dev_printk(KERN_DEBUG, &dev->dev,
+				   "vpd r/w failed.  This is likely a firmware "
+				   "bug on this device.  Contact the card "
+				   "vendor for a firmware update.");
 			return -ETIMEDOUT;
+		}
 		if (fatal_signal_pending(current))
 			return -EINTR;
 		if (!cond_resched())
@@ -318,6 +336,8 @@ static ssize_t pci_vpd_pci22_write(struct pci_dev *dev, loff_t pos, size_t count
 		vpd->busy = true;
 		vpd->flag = 0;
 		ret = pci_vpd_pci22_wait(dev);
+		if (ret < 0)
+			break;
 
 		pos += sizeof(u32);
 	}
@@ -383,47 +403,67 @@ int pci_vpd_truncate(struct pci_dev *dev, size_t size)
 EXPORT_SYMBOL(pci_vpd_truncate);
 
 /**
- * pci_block_user_cfg_access - Block userspace PCI config reads/writes
+ * pci_cfg_access_lock - Lock PCI config reads/writes
  * @dev:	pci device struct
  *
- * When user access is blocked, any reads or writes to config space will
- * sleep until access is unblocked again.  We don't allow nesting of
- * block/unblock calls.
+ * When access is locked, any userspace reads or writes to config
+ * space and concurrent lock requests will sleep until access is
+ * allowed via pci_cfg_access_unlocked again.
  */
-void pci_block_user_cfg_access(struct pci_dev *dev)
+void pci_cfg_access_lock(struct pci_dev *dev)
 {
-	unsigned long flags;
-	int was_blocked;
+	might_sleep();
 
-	spin_lock_irqsave(&pci_lock, flags);
-	was_blocked = dev->block_ucfg_access;
-	dev->block_ucfg_access = 1;
-	spin_unlock_irqrestore(&pci_lock, flags);
-
-	/* If we BUG() inside the pci_lock, we're guaranteed to hose
-	 * the machine */
-	BUG_ON(was_blocked);
+	raw_spin_lock_irq(&pci_lock);
+	if (dev->block_cfg_access)
+		pci_wait_cfg(dev);
+	dev->block_cfg_access = 1;
+	raw_spin_unlock_irq(&pci_lock);
 }
-EXPORT_SYMBOL_GPL(pci_block_user_cfg_access);
+EXPORT_SYMBOL_GPL(pci_cfg_access_lock);
 
 /**
- * pci_unblock_user_cfg_access - Unblock userspace PCI config reads/writes
+ * pci_cfg_access_trylock - try to lock PCI config reads/writes
  * @dev:	pci device struct
  *
- * This function allows userspace PCI config accesses to resume.
+ * Same as pci_cfg_access_lock, but will return 0 if access is
+ * already locked, 1 otherwise. This function can be used from
+ * atomic contexts.
  */
-void pci_unblock_user_cfg_access(struct pci_dev *dev)
+bool pci_cfg_access_trylock(struct pci_dev *dev)
+{
+	unsigned long flags;
+	bool locked = true;
+
+	raw_spin_lock_irqsave(&pci_lock, flags);
+	if (dev->block_cfg_access)
+		locked = false;
+	else
+		dev->block_cfg_access = 1;
+	raw_spin_unlock_irqrestore(&pci_lock, flags);
+
+	return locked;
+}
+EXPORT_SYMBOL_GPL(pci_cfg_access_trylock);
+
+/**
+ * pci_cfg_access_unlock - Unlock PCI config reads/writes
+ * @dev:	pci device struct
+ *
+ * This function allows PCI config accesses to resume.
+ */
+void pci_cfg_access_unlock(struct pci_dev *dev)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&pci_lock, flags);
+	raw_spin_lock_irqsave(&pci_lock, flags);
 
 	/* This indicates a problem in the caller, but we don't need
 	 * to kill them, unlike a double-block above. */
-	WARN_ON(!dev->block_ucfg_access);
+	WARN_ON(!dev->block_cfg_access);
 
-	dev->block_ucfg_access = 0;
-	wake_up_all(&pci_ucfg_wait);
-	spin_unlock_irqrestore(&pci_lock, flags);
+	dev->block_cfg_access = 0;
+	wake_up_all_locked(&pci_cfg_wait);
+	raw_spin_unlock_irqrestore(&pci_lock, flags);
 }
-EXPORT_SYMBOL_GPL(pci_unblock_user_cfg_access);
+EXPORT_SYMBOL_GPL(pci_cfg_access_unlock);

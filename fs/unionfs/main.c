@@ -145,7 +145,7 @@ skip:
 			 * properly.  Finally we must return this new
 			 * dentry.
 			 */
-			spliced->d_op = &unionfs_dops;
+			d_set_d_op(spliced, &unionfs_dops);
 			spliced->d_fsdata = dentry->d_fsdata;
 			dentry->d_fsdata = NULL;
 			dentry = spliced;
@@ -215,14 +215,14 @@ void unionfs_reinterpose(struct dentry *dentry)
  * 2) it exists
  * 3) is a directory
  */
-int check_branch(struct nameidata *nd)
+int check_branch(const struct path *path)
 {
 	/* XXX: remove in ODF code -- stacking unions allowed there */
-	if (!strcmp(nd->path.dentry->d_sb->s_type->name, UNIONFS_NAME))
+	if (!strcmp(path->dentry->d_sb->s_type->name, UNIONFS_NAME))
 		return -EINVAL;
-	if (!nd->path.dentry->d_inode)
+	if (!path->dentry->d_inode)
 		return -ENOENT;
-	if (!S_ISDIR(nd->path.dentry->d_inode->i_mode))
+	if (!S_ISDIR(path->dentry->d_inode->i_mode))
 		return -ENOTDIR;
 	return 0;
 }
@@ -274,7 +274,7 @@ int parse_branch_mode(const char *name, int *perms)
 static int parse_dirs_option(struct super_block *sb, struct unionfs_dentry_info
 			     *lower_root_info, char *options)
 {
-	struct nameidata nd;
+	struct path path;
 	char *name;
 	int err = 0;
 	int branches = 1;
@@ -350,7 +350,7 @@ static int parse_dirs_option(struct super_block *sb, struct unionfs_dentry_info
 			goto out;
 		}
 
-		err = path_lookup(name, LOOKUP_FOLLOW, &nd);
+		err = kern_path(name, LOOKUP_FOLLOW, &path);
 		if (err) {
 			printk(KERN_ERR "unionfs: error accessing "
 			       "lower directory '%s' (error %d)\n",
@@ -358,16 +358,16 @@ static int parse_dirs_option(struct super_block *sb, struct unionfs_dentry_info
 			goto out;
 		}
 
-		err = check_branch(&nd);
+		err = check_branch(&path);
 		if (err) {
 			printk(KERN_ERR "unionfs: lower directory "
 			       "'%s' is not a valid branch\n", name);
-			path_put(&nd.path);
+			path_put(&path);
 			goto out;
 		}
 
-		lower_root_info->lower_paths[bindex].dentry = nd.path.dentry;
-		lower_root_info->lower_paths[bindex].mnt = nd.path.mnt;
+		lower_root_info->lower_paths[bindex].dentry = path.dentry;
+		lower_root_info->lower_paths[bindex].mnt = path.mnt;
 
 		set_branchperms(sb, bindex, perms);
 		set_branch_count(sb, bindex, 0);
@@ -526,32 +526,6 @@ out:
 }
 
 /*
- * our custom d_alloc_root work-alike
- *
- * we can't use d_alloc_root if we want to use our own interpose function
- * unchanged, so we simply call our own "fake" d_alloc_root
- */
-static struct dentry *unionfs_d_alloc_root(struct super_block *sb)
-{
-	struct dentry *ret = NULL;
-
-	if (sb) {
-		static const struct qstr name = {
-			.name = "/",
-			.len = 1
-		};
-
-		ret = d_alloc(NULL, &name);
-		if (likely(ret)) {
-			ret->d_op = &unionfs_dops;
-			ret->d_sb = sb;
-			ret->d_parent = ret;
-		}
-	}
-	return ret;
-}
-
-/*
  * There is no need to lock the unionfs_super_info's rwsem as there is no
  * way anyone can have a reference to the superblock at this point in time.
  */
@@ -561,6 +535,7 @@ static int unionfs_read_super(struct super_block *sb, void *raw_data,
 	int err = 0;
 	struct unionfs_dentry_info *lower_root_info = NULL;
 	int bindex, bstart, bend;
+	struct inode *inode = NULL;
 
 	if (!raw_data) {
 		printk(KERN_ERR
@@ -618,18 +593,26 @@ static int unionfs_read_super(struct super_block *sb, void *raw_data,
 
 	sb->s_op = &unionfs_sops;
 
-	/* See comment next to the definition of unionfs_d_alloc_root */
-	sb->s_root = unionfs_d_alloc_root(sb);
+	/* get a new inode and allocate our root dentry */
+	inode = unionfs_iget(sb, iunique(sb, UNIONFS_ROOT_INO));
+	if (IS_ERR(inode)) {
+		err = PTR_ERR(inode);
+		goto out_dput;
+	}
+	sb->s_root = d_make_root(inode);
 	if (unlikely(!sb->s_root)) {
 		err = -ENOMEM;
 		goto out_dput;
 	}
+	d_set_d_op(sb->s_root, &unionfs_dops);
 
 	/* link the upper and lower dentries */
 	sb->s_root->d_fsdata = NULL;
 	err = new_dentry_private_data(sb->s_root, UNIONFS_DMUTEX_ROOT);
 	if (unlikely(err))
 		goto out_freedpd;
+
+	/* if get here: cannot have error */
 
 	/* Set the lower dentries for s_root */
 	for (bindex = bstart; bindex <= bend; bindex++) {
@@ -648,15 +631,18 @@ static int unionfs_read_super(struct super_block *sb, void *raw_data,
 	/* Set the generation number to one, since this is for the mount. */
 	atomic_set(&UNIONFS_D(sb->s_root)->generation, 1);
 
+	if (atomic_read(&inode->i_count) <= 1)
+		unionfs_fill_inode(sb->s_root, inode);
+
 	/*
-	 * Call interpose to create the upper level inode.  Only
-	 * INTERPOSE_LOOKUP can return a value other than 0 on err.
+	 * No need to call interpose because we already have a positive
+	 * dentry, which was instantiated by d_make_root.  Just need to
+	 * d_rehash it.
 	 */
-	err = PTR_ERR(unionfs_interpose(sb->s_root, sb, 0));
+	d_rehash(sb->s_root);
+
 	unionfs_unlock_dentry(sb->s_root);
-	if (!err)
-		goto out;
-	/* else fall through */
+	goto out; /* all is well */
 
 out_freedpd:
 	if (UNIONFS_D(sb->s_root)) {
@@ -664,6 +650,8 @@ out_freedpd:
 		free_dentry_private_data(sb->s_root);
 	}
 	dput(sb->s_root);
+
+	iput(inode);
 
 out_dput:
 	if (lower_root_info && !IS_ERR(lower_root_info)) {
@@ -693,22 +681,23 @@ out:
 	return err;
 }
 
-static int unionfs_get_sb(struct file_system_type *fs_type,
-			  int flags, const char *dev_name,
-			  void *raw_data, struct vfsmount *mnt)
+static struct dentry *unionfs_mount(struct file_system_type *fs_type,
+				    int flags, const char *dev_name,
+				    void *raw_data)
 {
-	int err;
-	err = get_sb_nodev(fs_type, flags, raw_data, unionfs_read_super, mnt);
-	if (!err)
-		UNIONFS_SB(mnt->mnt_sb)->dev_name =
+	struct dentry *dentry;
+
+	dentry = mount_nodev(fs_type, flags, raw_data, unionfs_read_super);
+	if (!IS_ERR(dentry))
+		UNIONFS_SB(dentry->d_sb)->dev_name =
 			kstrdup(dev_name, GFP_KERNEL);
-	return err;
+	return dentry;
 }
 
 static struct file_system_type unionfs_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= UNIONFS_NAME,
-	.get_sb		= unionfs_get_sb,
+	.mount		= unionfs_mount,
 	.kill_sb	= generic_shutdown_super,
 	.fs_flags	= FS_REVAL_DOT,
 };

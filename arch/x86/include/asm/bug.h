@@ -22,18 +22,22 @@ do {								\
 		     ".popsection"				\
 		     : : "i" (__FILE__), "i" (__LINE__),	\
 		     "i" (sizeof(struct bug_entry)));		\
-	for (;;) ;						\
+	unreachable();						\
 } while (0)
 
 #else
 #define BUG()							\
 do {								\
 	asm volatile("ud2");					\
-	for (;;) ;						\
+	unreachable();						\
 } while (0)
 #endif
 
 #endif /* !CONFIG_BUG */
 
 #include <asm-generic/bug.h>
+
+
+extern void show_regs_common(void);
+
 #endif /* _ASM_X86_BUG_H */

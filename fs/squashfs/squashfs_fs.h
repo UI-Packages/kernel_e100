@@ -4,7 +4,7 @@
  * Squashfs
  *
  * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008
- * Phillip Lougher <phillip@lougher.demon.co.uk>
+ * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -30,20 +30,22 @@
 
 /* size of metadata (inode and directory) blocks */
 #define SQUASHFS_METADATA_SIZE		8192
-#define SQUASHFS_METADATA_LOG		13
 
-/* default size of data blocks */
-#define SQUASHFS_FILE_SIZE		131072
-#define SQUASHFS_FILE_LOG		17
+/* default size of block device I/O */
+#ifdef CONFIG_SQUASHFS_4K_DEVBLK_SIZE
+#define SQUASHFS_DEVBLK_SIZE 4096
+#else
+#define SQUASHFS_DEVBLK_SIZE 1024
+#endif
 
 #define SQUASHFS_FILE_MAX_SIZE		1048576
 #define SQUASHFS_FILE_MAX_LOG		20
 
-/* Max number of uids and gids */
-#define SQUASHFS_IDS			65536
-
 /* Max length of filename (not 255) */
 #define SQUASHFS_NAME_LEN		256
+
+/* Max value for directory header count*/
+#define SQUASHFS_DIR_COUNT		256
 
 #define SQUASHFS_INVALID_FRAG		(0xffffffffU)
 #define SQUASHFS_INVALID_XATTR		(0xffffffffU)
@@ -57,6 +59,7 @@
 #define SQUASHFS_ALWAYS_FRAG		5
 #define SQUASHFS_DUPLICATE		6
 #define SQUASHFS_EXPORT			7
+#define SQUASHFS_COMP_OPT		10
 
 #define SQUASHFS_BIT(flag, bit)		((flag >> bit) & 1)
 
@@ -80,6 +83,9 @@
 
 #define SQUASHFS_EXPORTABLE(flags)		SQUASHFS_BIT(flags, \
 						SQUASHFS_EXPORT)
+
+#define SQUASHFS_COMP_OPTS(flags)		SQUASHFS_BIT(flags, \
+						SQUASHFS_COMP_OPT)
 
 /* Max number of types and file types */
 #define SQUASHFS_DIR_TYPE		1
@@ -130,9 +136,6 @@
 
 #define SQUASHFS_MKINODE(A, B)		((long long)(((long long) (A)\
 					<< 16) + (B)))
-
-/* Translate between VFS mode and squashfs mode */
-#define SQUASHFS_MODE(A)		((A) & 0xfff)
 
 /* fragment and fragment table defines */
 #define SQUASHFS_FRAGMENT_BYTES(A)	\
@@ -204,13 +207,6 @@
 /* cached data constants for filesystem */
 #define SQUASHFS_CACHED_BLKS		8
 
-#define SQUASHFS_MAX_FILE_SIZE_LOG	64
-
-#define SQUASHFS_MAX_FILE_SIZE		(1LL << \
-					(SQUASHFS_MAX_FILE_SIZE_LOG - 2))
-
-#define SQUASHFS_MARKER_BYTE		0xff
-
 /* meta index cache */
 #define SQUASHFS_META_INDEXES	(SQUASHFS_METADATA_SIZE / sizeof(unsigned int))
 #define SQUASHFS_META_ENTRIES	127
@@ -237,7 +233,10 @@ struct meta_index {
 /*
  * definitions for structures on disk
  */
-#define ZLIB_COMPRESSION	 1
+#define ZLIB_COMPRESSION	1
+#define LZMA_COMPRESSION	2
+#define LZO_COMPRESSION		3
+#define XZ_COMPRESSION		4
 
 struct squashfs_super_block {
 	__le32			s_magic;
@@ -274,7 +273,7 @@ struct squashfs_base_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 };
 
 struct squashfs_ipc_inode {
@@ -283,7 +282,7 @@ struct squashfs_ipc_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 	__le32			nlink;
 };
 
@@ -293,7 +292,7 @@ struct squashfs_lipc_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 	__le32			nlink;
 	__le32			xattr;
 };
@@ -304,7 +303,7 @@ struct squashfs_dev_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 	__le32			nlink;
 	__le32			rdev;
 };
@@ -315,7 +314,7 @@ struct squashfs_ldev_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 	__le32			nlink;
 	__le32			rdev;
 	__le32			xattr;
@@ -327,7 +326,7 @@ struct squashfs_symlink_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 	__le32			nlink;
 	__le32			symlink_size;
 	char			symlink[0];
@@ -339,7 +338,7 @@ struct squashfs_reg_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 	__le32			start_block;
 	__le32			fragment;
 	__le32			offset;
@@ -353,7 +352,7 @@ struct squashfs_lreg_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 	__le64			start_block;
 	__le64			file_size;
 	__le64			sparse;
@@ -370,7 +369,7 @@ struct squashfs_dir_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 	__le32			start_block;
 	__le32			nlink;
 	__le16			file_size;
@@ -384,7 +383,7 @@ struct squashfs_ldir_inode {
 	__le16			uid;
 	__le16			guid;
 	__le32			mtime;
-	__le32	 		inode_number;
+	__le32			inode_number;
 	__le32			nlink;
 	__le32			file_size;
 	__le32			start_block;

@@ -12,7 +12,7 @@
  *      2 of the License, or (at your option) any later version.
  */
 
-#include <linux/lmb.h>
+#include <linux/memblock.h>
 
 #include <asm/pgtable.h>
 #include <asm/mmu.h>
@@ -21,8 +21,6 @@
 #include <asm/cputable.h>
 #include <asm/prom.h>
 #include <asm/abs_addr.h>
-#include <asm/firmware.h>
-#include <asm/iseries/hv_call.h>
 
 struct stab_entry {
 	unsigned long esid_data;
@@ -243,7 +241,7 @@ void __init stabs_alloc(void)
 {
 	int cpu;
 
-	if (cpu_has_feature(CPU_FTR_SLB))
+	if (mmu_has_feature(MMU_FTR_SLB))
 		return;
 
 	for_each_possible_cpu(cpu) {
@@ -252,7 +250,7 @@ void __init stabs_alloc(void)
 		if (cpu == 0)
 			continue; /* stab for CPU 0 is statically allocated */
 
-		newstab = lmb_alloc_base(HW_PAGE_SIZE, HW_PAGE_SIZE,
+		newstab = memblock_alloc_base(HW_PAGE_SIZE, HW_PAGE_SIZE,
 					 1<<SID_SHIFT);
 		newstab = (unsigned long)__va(newstab);
 
@@ -284,13 +282,6 @@ void stab_initialize(unsigned long stab)
 
 	/* Set ASR */
 	stabreal = get_paca()->stab_real | 0x1ul;
-
-#ifdef CONFIG_PPC_ISERIES
-	if (firmware_has_feature(FW_FEATURE_ISERIES)) {
-		HvCall1(HvCallBaseSetASR, stabreal);
-		return;
-	}
-#endif /* CONFIG_PPC_ISERIES */
 
 	mtspr(SPRN_ASR, stabreal);
 }

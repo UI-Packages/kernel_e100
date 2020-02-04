@@ -10,6 +10,7 @@
  */
 
 #include "union.h"
+#include "../mount.h"
 
 /*
  * Helper debugging functions for maintainers (and for users to report back
@@ -439,9 +440,25 @@ void __unionfs_check_nd(const struct nameidata *nd,
 			PRINT_CALLER(fname, fxn, line);
 			pr_debug(" CND1: lower_file of type %s\n",
 				 file->f_path.dentry->d_sb->s_type->name);
-			BUG();
 		}
 	}
+}
+
+static unsigned int __mnt_get_count(struct vfsmount *mnt)
+{
+	struct mount *m = real_mount(mnt);
+#ifdef CONFIG_SMP
+	unsigned int count = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		count += per_cpu_ptr(m->mnt_pcp, cpu)->mnt_count;
+	}
+
+	return count;
+#else
+	return m->mnt_count;
+#endif
 }
 
 /* useful to track vfsmount leaks that could cause EBUSY on unmount */
@@ -458,7 +475,7 @@ void __show_branch_counts(const struct super_block *sb,
 		else
 			mnt = NULL;
 		printk(KERN_CONT "%d:",
-		       (mnt ? atomic_read(&mnt->mnt_count) : -99));
+		       (mnt ? __mnt_get_count(mnt) : -99));
 	}
 	printk(KERN_CONT "%s:%s:%d\n", file, fxn, line);
 }

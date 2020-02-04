@@ -1,9 +1,6 @@
 #
-# Makefile for RIO devices
+# Makefile for RapidIO devices
 #
 
+obj-$(CONFIG_RAPIDIO_TSI721)	+= tsi721.o
 obj-$(CONFIG_RAPIDIO_CN6XXX)	+= cn6xxx.o
-
-ifeq ($(CONFIG_RAPIDIO_DEBUG),y)
-EXTRA_CFLAGS += -DDEBUG
-endif

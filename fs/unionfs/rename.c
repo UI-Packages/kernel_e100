@@ -28,6 +28,7 @@ static int unionfs_refresh_lower_dentry(struct dentry *dentry,
 	struct dentry *lower_dentry;
 	struct dentry *lower_parent;
 	int err = 0;
+	struct nameidata lower_nd;
 
 	verify_locked(dentry);
 
@@ -35,8 +36,12 @@ static int unionfs_refresh_lower_dentry(struct dentry *dentry,
 
 	BUG_ON(!S_ISDIR(lower_parent->d_inode->i_mode));
 
-	lower_dentry = lookup_one_len(dentry->d_name.name, lower_parent,
-				      dentry->d_name.len);
+	err = init_lower_nd(&lower_nd, LOOKUP_OPEN);
+	if (unlikely(err < 0))
+		goto out;
+	lower_dentry = lookup_one_len_nd(dentry->d_name.name, lower_parent,
+					 dentry->d_name.len, &lower_nd);
+	release_lower_nd(&lower_nd, err);
 	if (IS_ERR(lower_dentry)) {
 		err = PTR_ERR(lower_dentry);
 		goto out;
@@ -108,8 +113,6 @@ static int __unionfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	lower_old_dir_dentry = dget_parent(lower_old_dentry);
 	lower_new_dir_dentry = dget_parent(lower_new_dentry);
 
-	/* see Documentation/filesystems/unionfs/issues.txt */
-	lockdep_off();
 	trap = lock_rename(lower_old_dir_dentry, lower_new_dir_dentry);
 	/* source should not be ancenstor of target */
 	if (trap == lower_old_dentry) {
@@ -130,7 +133,6 @@ out_err_unlock:
 		fsstack_copy_attr_times(new_dir, lower_new_dir_dentry->d_inode);
 	}
 	unlock_rename(lower_old_dir_dentry, lower_new_dir_dentry);
-	lockdep_on();
 
 	dput(lower_old_dir_dentry);
 	dput(lower_new_dir_dentry);
@@ -210,8 +212,8 @@ static int do_unionfs_rename(struct inode *old_dir,
 		fsstack_copy_attr_times(new_parent->d_inode,
 					unlink_dir_dentry->d_inode);
 		/* propagate number of hard-links */
-		new_parent->d_inode->i_nlink =
-			unionfs_get_nlinks(new_parent->d_inode);
+		set_nlink(new_parent->d_inode,
+			  unionfs_get_nlinks(new_parent->d_inode));
 
 		unlock_dir(unlink_dir_dentry);
 		if (!err) {

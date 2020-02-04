@@ -26,9 +26,12 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/io.h>
-#include <asm/system.h>
 #include <linux/spinlock.h>
-#include <mach/mux.h>
+
+#include <asm/system.h>
+
+#include <plat/cpu.h>
+#include <plat/mux.h>
 
 #ifdef CONFIG_OMAP_MUX
 
@@ -54,8 +57,12 @@ int __init_or_module omap_cfg_reg(const unsigned long index)
 {
 	struct pin_config *reg;
 
-	if (cpu_is_omap44xx())
-		return 0;
+	if (!cpu_class_is_omap1()) {
+		printk(KERN_ERR "mux: Broken omap_cfg_reg(%lu) entry\n",
+				index);
+		WARN_ON(1);
+		return -EINVAL;
+	}
 
 	if (mux_cfg == NULL) {
 		printk(KERN_ERR "Pin mux table not initialized\n");

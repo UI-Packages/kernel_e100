@@ -16,6 +16,8 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include "m5602_s5k4aa.h"
 
 static int s5k4aa_get_exposure(struct gspca_dev *gspca_dev, __s32 *val);
@@ -46,6 +48,12 @@ static
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "FUJITSU SIEMENS"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "AMILO Xa 2528")
+		}
+	}, {
+		.ident = "Fujitsu-Siemens Amilo Xi 2428",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "FUJITSU SIEMENS"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "AMILO Xi 2428")
 		}
 	}, {
 		.ident = "Fujitsu-Siemens Amilo Xi 2528",
@@ -137,13 +145,13 @@ static const struct ctrl s5k4aa_ctrls[] = {
 #define VFLIP_IDX 0
 	{
 		{
-			.id 		= V4L2_CID_VFLIP,
-			.type 		= V4L2_CTRL_TYPE_BOOLEAN,
-			.name 		= "vertical flip",
-			.minimum 	= 0,
-			.maximum 	= 1,
-			.step 		= 1,
-			.default_value 	= 0
+			.id		= V4L2_CID_VFLIP,
+			.type		= V4L2_CTRL_TYPE_BOOLEAN,
+			.name		= "vertical flip",
+			.minimum	= 0,
+			.maximum	= 1,
+			.step		= 1,
+			.default_value	= 0
 		},
 		.set = s5k4aa_set_vflip,
 		.get = s5k4aa_get_vflip
@@ -151,13 +159,13 @@ static const struct ctrl s5k4aa_ctrls[] = {
 #define HFLIP_IDX 1
 	{
 		{
-			.id 		= V4L2_CID_HFLIP,
-			.type 		= V4L2_CTRL_TYPE_BOOLEAN,
-			.name 		= "horizontal flip",
-			.minimum 	= 0,
-			.maximum 	= 1,
-			.step 		= 1,
-			.default_value 	= 0
+			.id		= V4L2_CID_HFLIP,
+			.type		= V4L2_CTRL_TYPE_BOOLEAN,
+			.name		= "horizontal flip",
+			.minimum	= 0,
+			.maximum	= 1,
+			.step		= 1,
+			.default_value	= 0
 		},
 		.set = s5k4aa_set_hflip,
 		.get = s5k4aa_get_hflip
@@ -234,7 +242,7 @@ int s5k4aa_probe(struct sd *sd)
 
 	if (force_sensor) {
 		if (force_sensor == S5K4AA_SENSOR) {
-			info("Forcing a %s sensor", s5k4aa.name);
+			pr_info("Forcing a %s sensor\n", s5k4aa.name);
 			goto sensor_found;
 		}
 		/* If we want to force another sensor, don't try to probe this
@@ -242,7 +250,7 @@ int s5k4aa_probe(struct sd *sd)
 		return -ENODEV;
 	}
 
-	info("Probing for a s5k4aa sensor");
+	PDEBUG(D_PROBE, "Probing for a s5k4aa sensor");
 
 	/* Preinit the sensor */
 	for (i = 0; i < ARRAY_SIZE(preinit_s5k4aa) && !err; i++) {
@@ -270,7 +278,7 @@ int s5k4aa_probe(struct sd *sd)
 						  data, 2);
 			break;
 		default:
-			info("Invalid stream command, exiting init");
+			pr_info("Invalid stream command, exiting init\n");
 			return -EINVAL;
 		}
 	}
@@ -286,7 +294,7 @@ int s5k4aa_probe(struct sd *sd)
 	if (memcmp(prod_id, expected_prod_id, sizeof(prod_id)))
 		return -ENODEV;
 	else
-		info("Detected a s5k4aa sensor");
+		pr_info("Detected a s5k4aa sensor\n");
 
 sensor_found:
 	sensor_settings = kmalloc(
@@ -341,7 +349,7 @@ int s5k4aa_start(struct sd *sd)
 			break;
 
 			default:
-				err("Invalid stream command, exiting init");
+				pr_err("Invalid stream command, exiting init\n");
 				return -EINVAL;
 			}
 		}
@@ -377,7 +385,7 @@ int s5k4aa_start(struct sd *sd)
 			break;
 
 			default:
-				err("Invalid stream command, exiting init");
+				pr_err("Invalid stream command, exiting init\n");
 				return -EINVAL;
 			}
 		}
@@ -441,7 +449,7 @@ int s5k4aa_init(struct sd *sd)
 				init_s5k4aa[i][1], data, 2);
 			break;
 		default:
-			info("Invalid stream command, exiting init");
+			pr_info("Invalid stream command, exiting init\n");
 			return -EINVAL;
 		}
 	}
@@ -525,7 +533,10 @@ static int s5k4aa_set_vflip(struct gspca_dev *gspca_dev, __s32 val)
 	err = m5602_read_sensor(sd, S5K4AA_ROWSTART_LO, &data, 1);
 	if (err < 0)
 		return err;
-	data = (data & 0xfe) | !val;
+	if (val)
+		data &= 0xfe;
+	else
+		data |= 0x01;
 	err = m5602_write_sensor(sd, S5K4AA_ROWSTART_LO, &data, 1);
 	return err;
 }
@@ -570,7 +581,10 @@ static int s5k4aa_set_hflip(struct gspca_dev *gspca_dev, __s32 val)
 	err = m5602_read_sensor(sd, S5K4AA_COLSTART_LO, &data, 1);
 	if (err < 0)
 		return err;
-	data = (data & 0xfe) | !val;
+	if (val)
+		data &= 0xfe;
+	else
+		data |= 0x01;
 	err = m5602_write_sensor(sd, S5K4AA_COLSTART_LO, &data, 1);
 	return err;
 }
@@ -674,20 +688,21 @@ static void s5k4aa_dump_registers(struct sd *sd)
 	m5602_read_sensor(sd, S5K4AA_PAGE_MAP, &old_page, 1);
 	for (page = 0; page < 16; page++) {
 		m5602_write_sensor(sd, S5K4AA_PAGE_MAP, &page, 1);
-		info("Dumping the s5k4aa register state for page 0x%x", page);
+		pr_info("Dumping the s5k4aa register state for page 0x%x\n",
+			page);
 		for (address = 0; address <= 0xff; address++) {
 			u8 value = 0;
 			m5602_read_sensor(sd, address, &value, 1);
-			info("register 0x%x contains 0x%x",
-			     address, value);
+			pr_info("register 0x%x contains 0x%x\n",
+				address, value);
 		}
 	}
-	info("s5k4aa register state dump complete");
+	pr_info("s5k4aa register state dump complete\n");
 
 	for (page = 0; page < 16; page++) {
 		m5602_write_sensor(sd, S5K4AA_PAGE_MAP, &page, 1);
-		info("Probing for which registers that are "
-		     "read/write for page 0x%x", page);
+		pr_info("Probing for which registers that are read/write for page 0x%x\n",
+			page);
 		for (address = 0; address <= 0xff; address++) {
 			u8 old_value, ctrl_value, test_value = 0xff;
 
@@ -696,14 +711,16 @@ static void s5k4aa_dump_registers(struct sd *sd)
 			m5602_read_sensor(sd, address, &ctrl_value, 1);
 
 			if (ctrl_value == test_value)
-				info("register 0x%x is writeable", address);
+				pr_info("register 0x%x is writeable\n",
+					address);
 			else
-				info("register 0x%x is read only", address);
+				pr_info("register 0x%x is read only\n",
+					address);
 
 			/* Restore original value */
 			m5602_write_sensor(sd, address, &old_value, 1);
 		}
 	}
-	info("Read/write register probing complete");
+	pr_info("Read/write register probing complete\n");
 	m5602_write_sensor(sd, S5K4AA_PAGE_MAP, &old_page, 1);
 }

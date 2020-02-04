@@ -15,6 +15,7 @@
 #include <linux/pci.h>
 #include <linux/pci_hotplug.h>
 #include <linux/proc_fs.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/mutex.h>
 
@@ -553,7 +554,7 @@ static int disable_slot(struct hotplug_slot *bss_hotplug_slot)
 				   	     PCI_FUNC(func)));
 		if (dev) {
 			sn_bus_free_data(dev);
-			pci_remove_bus_device(dev);
+			pci_stop_and_remove_bus_device(dev);
 			pci_dev_put(dev);
 		}
 	}

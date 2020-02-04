@@ -121,6 +121,25 @@
 		.endm
 #else
 		.macro	get_saved_sp	/* Uniprocessor variation */
+#ifdef CONFIG_CPU_JUMP_WORKAROUNDS
+		/*
+		 * Clear BTB (branch target buffer), forbid RAS (return address
+		 * stack) to workaround the Out-of-order Issue in Loongson2F
+		 * via its diagnostic register.
+		 */
+		move	k0, ra
+		jal	1f
+		 nop
+1:		jal	1f
+		 nop
+1:		jal	1f
+		 nop
+1:		jal	1f
+		 nop
+1:		move	ra, k0
+		li	k0, 3
+		mtc0	k0, $22
+#endif /* CONFIG_CPU_LOONGSON2F */
 #if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
 		lui	k1, %hi(kernelsp)
 #else
@@ -176,9 +195,9 @@
 		 * to cover the pipeline delay.
 		 */
 		.set	mips32
-		mfc0	v1, CP0_TCSTATUS
+		mfc0	k0, CP0_TCSTATUS
 		.set	mips0
-		LONG_S	v1, PT_TCSTATUS(sp)
+		LONG_S	k0, PT_TCSTATUS(sp)
 #endif /* CONFIG_MIPS_MT_SMTC */
 		LONG_S	$4, PT_R4(sp)
 		LONG_S	$5, PT_R5(sp)
@@ -207,8 +226,6 @@
 		    corrupt it */
 		jal     octeon_mult_save
 		LONG_L  v1, 0($28)  /* Load the current pointer */
-			 /* Restore $31(ra) that was changed by the jal */
-		LONG_L  ra, PT_R31(sp)
 		pref    0, 0(v1)    /* Prefetch the current thread */
 #endif
 		.set	pop
@@ -327,7 +344,7 @@
 		 * we can't dispatch it directly without trashing
 		 * some registers, so we'll try to detect this unlikely
 		 * case and program a software interrupt in the VPE,
-		 * as would be done for a cross-VPE IPI.  To accomodate
+		 * as would be done for a cross-VPE IPI.  To accommodate
 		 * the handling of that case, we're doing a DVPE instead
 		 * of just a DMT here to protect against other threads.
 		 * This is a lot of cruft to cover a tiny window.
@@ -431,8 +448,7 @@
 		LONG_L	sp, PT_R29(sp)
 		.set	mips3
 #ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
-		/* K0 = thread pointer */
-		LONG_L	k0, FAST_ACCESS_THREAD_OFFSET($0)
+		LONG_L	k0, FAST_ACCESS_THREAD_OFFSET($0) /* K0 = thread pointer */
 #endif
 		eret
 		.set	mips0

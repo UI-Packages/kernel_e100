@@ -26,17 +26,19 @@
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/console.h>
+#include <linux/export.h>
 #include <linux/pci.h>
 #include <linux/of_platform.h>
+#include <linux/gfp.h>
 
 #include <asm/prom.h>
-#include <asm/system.h>
 #include <asm/iommu.h>
 #include <asm/machdep.h>
 #include <asm/mpic.h>
 #include <asm/smp.h>
 #include <asm/time.h>
 #include <asm/mmu.h>
+#include <asm/debug.h>
 
 #include <pcmcia/ss.h>
 #include <pcmcia/cistpl.h>
@@ -71,7 +73,7 @@ static void pas_restart(char *cmd)
 }
 
 #ifdef CONFIG_SMP
-static raw_spinlock_t timebase_lock;
+static arch_spinlock_t timebase_lock;
 static unsigned long timebase;
 
 static void __devinit pas_give_timebase(void)
@@ -80,11 +82,11 @@ static void __devinit pas_give_timebase(void)
 
 	local_irq_save(flags);
 	hard_irq_disable();
-	__raw_spin_lock(&timebase_lock);
+	arch_spin_lock(&timebase_lock);
 	mtspr(SPRN_TBCTL, TBCTL_FREEZE);
 	isync();
 	timebase = get_tb();
-	__raw_spin_unlock(&timebase_lock);
+	arch_spin_unlock(&timebase_lock);
 
 	while (timebase)
 		barrier();
@@ -97,10 +99,10 @@ static void __devinit pas_take_timebase(void)
 	while (!timebase)
 		smp_rmb();
 
-	__raw_spin_lock(&timebase_lock);
+	arch_spin_lock(&timebase_lock);
 	set_tb(timebase >> 32, timebase & 0xffffffff);
 	timebase = 0;
-	__raw_spin_unlock(&timebase_lock);
+	arch_spin_unlock(&timebase_lock);
 }
 
 struct smp_ops_t pas_smp_ops = {
@@ -222,7 +224,7 @@ static __init void pas_init_IRQ(void)
 	openpic_addr = of_read_number(opprop, naddr);
 	printk(KERN_DEBUG "OpenPIC addr: %lx\n", openpic_addr);
 
-	mpic_flags = MPIC_PRIMARY | MPIC_LARGE_VECTORS | MPIC_NO_BIAS;
+	mpic_flags = MPIC_LARGE_VECTORS | MPIC_NO_BIAS | MPIC_NO_RESET;
 
 	nmiprop = of_get_property(mpic_node, "nmi-source", NULL);
 	if (nmiprop)
@@ -232,14 +234,14 @@ static __init void pas_init_IRQ(void)
 			  mpic_flags, 0, 0, "PASEMI-OPIC");
 	BUG_ON(!mpic);
 
-	mpic_assign_isu(mpic, 0, openpic_addr + 0x10000);
+	mpic_assign_isu(mpic, 0, mpic->paddr + 0x10000);
 	mpic_init(mpic);
 	/* The NMI/MCK source needs to be prio 15 */
 	if (nmiprop) {
 		nmi_virq = irq_create_mapping(NULL, *nmiprop);
 		mpic_irq_set_priority(nmi_virq, 15);
-		set_irq_type(nmi_virq, IRQ_TYPE_EDGE_RISING);
-		mpic_unmask_irq(nmi_virq);
+		irq_set_irq_type(nmi_virq, IRQ_TYPE_EDGE_RISING);
+		mpic_unmask_irq(irq_get_irq_data(nmi_virq));
 	}
 
 	of_node_put(mpic_node);
@@ -265,7 +267,7 @@ static int pas_machine_check_handler(struct pt_regs *regs)
 	if (nmi_virq != NO_IRQ && mpic_get_mcirq() == nmi_virq) {
 		printk(KERN_ERR "NMI delivered\n");
 		debugger(regs);
-		mpic_end_irq(nmi_virq);
+		mpic_end_irq(irq_get_irq_data(nmi_virq));
 		goto out;
 	}
 
@@ -359,10 +361,10 @@ static int pcmcia_notify(struct notifier_block *nb, unsigned long action,
 	/* We know electra_cf devices will always have of_node set, since
 	 * electra_cf is an of_platform driver.
 	 */
-	if (!parent->archdata.of_node)
+	if (!parent->of_node)
 		return 0;
 
-	if (!of_device_is_compatible(parent->archdata.of_node, "electra-cf"))
+	if (!of_device_is_compatible(parent->of_node, "electra-cf"))
 		return 0;
 
 	/* We use the direct ops for localbus */

@@ -54,7 +54,7 @@
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <linux/mutex.h>
 
 #include <sound/core.h>
@@ -84,10 +84,10 @@ MODULE_SUPPORTED_DEVICE("{"
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;/* Enable this card */
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;/* Enable this card */
 static char *model[SNDRV_CARDS];
-static int omni[SNDRV_CARDS];				/* Delta44 & 66 Omni I/O support */
-static int cs8427_timeout[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS-1)] = 500}; /* CS8427 S/PDIF transciever reset timeout value in msec */
+static bool omni[SNDRV_CARDS];				/* Delta44 & 66 Omni I/O support */
+static int cs8427_timeout[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS-1)] = 500}; /* CS8427 S/PDIF transceiver reset timeout value in msec */
 static int dxr_enable[SNDRV_CARDS];			/* DXR enable for DMX6FIRE */
 
 module_param_array(index, int, NULL, 0444);
@@ -106,7 +106,7 @@ module_param_array(dxr_enable, int, NULL, 0444);
 MODULE_PARM_DESC(dxr_enable, "Enable DXR support for Terratec DMX6FIRE.");
 
 
-static const struct pci_device_id snd_ice1712_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_ice1712_ids) = {
 	{ PCI_VDEVICE(ICE, PCI_DEVICE_ID_ICE_1712), 0 },   /* ICE1712 */
 	{ 0, }
 };
@@ -296,6 +296,16 @@ static void snd_ice1712_set_gpio_dir(struct snd_ice1712 *ice, unsigned int data)
 {
 	snd_ice1712_write(ice, ICE1712_IREG_GPIO_DIRECTION, data);
 	inb(ICEREG(ice, DATA)); /* dummy read for pci-posting */
+}
+
+static unsigned int snd_ice1712_get_gpio_dir(struct snd_ice1712 *ice)
+{
+	return snd_ice1712_read(ice, ICE1712_IREG_GPIO_DIRECTION);
+}
+
+static unsigned int snd_ice1712_get_gpio_mask(struct snd_ice1712 *ice)
+{
+	return snd_ice1712_read(ice, ICE1712_IREG_GPIO_WRITE_MASK);
 }
 
 static void snd_ice1712_set_gpio_mask(struct snd_ice1712 *ice, unsigned int data)
@@ -1170,6 +1180,10 @@ static int snd_ice1712_playback_pro_open(struct snd_pcm_substream *substream)
 	snd_pcm_set_sync(substream);
 	snd_pcm_hw_constraint_msbits(runtime, 0, 32, 24);
 	snd_pcm_hw_constraint_list(runtime, 0, SNDRV_PCM_HW_PARAM_RATE, &hw_constraints_rates);
+	if (is_pro_rate_locked(ice)) {
+		runtime->hw.rate_min = PRO_RATE_DEFAULT;
+		runtime->hw.rate_max = PRO_RATE_DEFAULT;
+	}
 
 	if (ice->spdif.ops.open)
 		ice->spdif.ops.open(ice, substream);
@@ -1187,6 +1201,11 @@ static int snd_ice1712_capture_pro_open(struct snd_pcm_substream *substream)
 	snd_pcm_set_sync(substream);
 	snd_pcm_hw_constraint_msbits(runtime, 0, 32, 24);
 	snd_pcm_hw_constraint_list(runtime, 0, SNDRV_PCM_HW_PARAM_RATE, &hw_constraints_rates);
+	if (is_pro_rate_locked(ice)) {
+		runtime->hw.rate_min = PRO_RATE_DEFAULT;
+		runtime->hw.rate_max = PRO_RATE_DEFAULT;
+	}
+
 	return 0;
 }
 
@@ -2557,7 +2576,9 @@ static int __devinit snd_ice1712_create(struct snd_card *card,
 	mutex_init(&ice->i2c_mutex);
 	mutex_init(&ice->open_mutex);
 	ice->gpio.set_mask = snd_ice1712_set_gpio_mask;
+	ice->gpio.get_mask = snd_ice1712_get_gpio_mask;
 	ice->gpio.set_dir = snd_ice1712_set_gpio_dir;
+	ice->gpio.get_dir = snd_ice1712_get_gpio_dir;
 	ice->gpio.set_data = snd_ice1712_set_gpio_data;
 	ice->gpio.get_data = snd_ice1712_get_gpio_data;
 
@@ -2586,7 +2607,7 @@ static int __devinit snd_ice1712_create(struct snd_card *card,
 	ice->profi_port = pci_resource_start(pci, 3);
 
 	if (request_irq(pci->irq, snd_ice1712_interrupt, IRQF_SHARED,
-			"ICE1712", ice)) {
+			KBUILD_MODNAME, ice)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_ice1712_free(ice);
 		return -EIO;
@@ -2727,14 +2748,15 @@ static int __devinit snd_ice1712_probe(struct pci_dev *pci,
 	if (!c->no_mpu401) {
 		err = snd_mpu401_uart_new(card, 0, MPU401_HW_ICE1712,
 			ICEREG(ice, MPU1_CTRL),
-			(c->mpu401_1_info_flags | MPU401_INFO_INTEGRATED),
-			ice->irq, 0, &ice->rmidi[0]);
+			c->mpu401_1_info_flags |
+			MPU401_INFO_INTEGRATED | MPU401_INFO_IRQ_HOOK,
+			-1, &ice->rmidi[0]);
 		if (err < 0) {
 			snd_card_free(card);
 			return err;
 		}
 		if (c->mpu401_1_name)
-			/*  Prefered name available in card_info */
+			/*  Preferred name available in card_info */
 			snprintf(ice->rmidi[0]->name,
 				 sizeof(ice->rmidi[0]->name),
 				 "%s %d", c->mpu401_1_name, card->number);
@@ -2743,15 +2765,16 @@ static int __devinit snd_ice1712_probe(struct pci_dev *pci,
 			/*  2nd port used  */
 			err = snd_mpu401_uart_new(card, 1, MPU401_HW_ICE1712,
 				ICEREG(ice, MPU2_CTRL),
-				(c->mpu401_2_info_flags | MPU401_INFO_INTEGRATED),
-				ice->irq, 0, &ice->rmidi[1]);
+				c->mpu401_2_info_flags |
+				MPU401_INFO_INTEGRATED | MPU401_INFO_IRQ_HOOK,
+				-1, &ice->rmidi[1]);
 
 			if (err < 0) {
 				snd_card_free(card);
 				return err;
 			}
 			if (c->mpu401_2_name)
-				/*  Prefered name available in card_info */
+				/*  Preferred name available in card_info */
 				snprintf(ice->rmidi[1]->name,
 					 sizeof(ice->rmidi[1]->name),
 					 "%s %d", c->mpu401_2_name,
@@ -2781,7 +2804,7 @@ static void __devexit snd_ice1712_remove(struct pci_dev *pci)
 }
 
 static struct pci_driver driver = {
-	.name = "ICE1712",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_ice1712_ids,
 	.probe = snd_ice1712_probe,
 	.remove = __devexit_p(snd_ice1712_remove),

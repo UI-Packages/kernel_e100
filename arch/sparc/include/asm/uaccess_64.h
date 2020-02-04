@@ -6,11 +6,11 @@
  */
 
 #ifdef __KERNEL__
+#include <linux/errno.h>
 #include <linux/compiler.h>
 #include <linux/string.h>
 #include <linux/thread_info.h>
 #include <asm/asi.h>
-#include <asm/system.h>
 #include <asm/spitfire.h>
 #include <asm-generic/uaccess-unaligned.h>
 #endif
@@ -216,6 +216,7 @@ copy_from_user(void *to, const void __user *from, unsigned long size)
 
 	if (unlikely(ret))
 		ret = copy_from_user_fixup(to, from, size);
+
 	return ret;
 }
 #define __copy_from_user copy_from_user

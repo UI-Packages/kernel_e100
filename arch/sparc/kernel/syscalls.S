@@ -62,7 +62,7 @@ sys32_rt_sigreturn:
 #endif
 	.align	32
 1:	ldx	[%g6 + TI_FLAGS], %l5
-	andcc	%l5, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %g0
+	andcc	%l5, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT|_TIF_SYSCALL_TRACEPOINT), %g0
 	be,pt	%icc, rtrap
 	 nop
 	call	syscall_trace_leave
@@ -110,31 +110,12 @@ sys_clone:
 
 	.globl	ret_from_syscall
 ret_from_syscall:
-	/* Clear current_thread_info()->new_child, and
-	 * check performance counter stuff too.
-	 */
+	/* Clear current_thread_info()->new_child. */
 	stb	%g0, [%g6 + TI_NEW_CHILD]
 	ldx	[%g6 + TI_FLAGS], %l0
 	call	schedule_tail
 	 mov	%g7, %o0
-	andcc	%l0, _TIF_PERFCTR, %g0
-	be,pt	%icc, 1f
-	 nop
-	ldx	[%g6 + TI_PCR], %o7
-	wr	%g0, %o7, %pcr
-
-	/* Blackbird errata workaround.  See commentary in
-	 * smp.c:smp_percpu_timer_interrupt() for more
-	 * information.
-	 */
-	ba,pt	%xcc, 99f
-	 nop
-
-	.align	64
-99:	wr	%g0, %g0, %pic
-	rd	%pic, %g0
-
-1:	ba,pt	%xcc, ret_sys_call
+	ba,pt	%xcc, ret_sys_call
 	 ldx	[%sp + PTREGS_OFF + PT_V9_I0], %o0
 
 	.globl	sparc_exit
@@ -187,7 +168,7 @@ linux_syscall_trace:
 	.globl	linux_sparc_syscall32
 linux_sparc_syscall32:
 	/* Direct access to user regs, much faster. */
-	cmp	%g1, NR_SYSCALLS			! IEU1	Group
+	cmp	%g1, NR_syscalls			! IEU1	Group
 	bgeu,pn	%xcc, linux_sparc_ni_syscall		! CTI
 	 srl	%i0, 0, %o0				! IEU0
 	sll	%g1, 2, %l4				! IEU0	Group
@@ -198,7 +179,7 @@ linux_sparc_syscall32:
 
 	srl	%i5, 0, %o5				! IEU1
 	srl	%i2, 0, %o2				! IEU0	Group
-	andcc	%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %g0
+	andcc	%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT|_TIF_SYSCALL_TRACEPOINT), %g0
 	bne,pn	%icc, linux_syscall_trace32		! CTI
 	 mov	%i0, %l5				! IEU1
 	call	%l7					! CTI	Group brk forced
@@ -210,7 +191,7 @@ linux_sparc_syscall32:
 	.globl	linux_sparc_syscall
 linux_sparc_syscall:
 	/* Direct access to user regs, much faster. */
-	cmp	%g1, NR_SYSCALLS			! IEU1	Group
+	cmp	%g1, NR_syscalls			! IEU1	Group
 	bgeu,pn	%xcc, linux_sparc_ni_syscall		! CTI
 	 mov	%i0, %o0				! IEU0
 	sll	%g1, 2, %l4				! IEU0	Group
@@ -221,7 +202,7 @@ linux_sparc_syscall:
 
 	mov	%i3, %o3				! IEU1
 	mov	%i4, %o4				! IEU0	Group
-	andcc	%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %g0
+	andcc	%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT|_TIF_SYSCALL_TRACEPOINT), %g0
 	bne,pn	%icc, linux_syscall_trace		! CTI	Group
 	 mov	%i0, %l5				! IEU0
 2:	call	%l7					! CTI	Group brk forced
@@ -231,24 +212,20 @@ linux_sparc_syscall:
 3:	stx	%o0, [%sp + PTREGS_OFF + PT_V9_I0]
 ret_sys_call:
 	ldx	[%sp + PTREGS_OFF + PT_V9_TSTATE], %g3
-	ldx	[%sp + PTREGS_OFF + PT_V9_TNPC], %l1 ! pc = npc
 	sra	%o0, 0, %o0
 	mov	%ulo(TSTATE_XCARRY | TSTATE_ICARRY), %g2
 	sllx	%g2, 32, %g2
 
-	/* Check if force_successful_syscall_return()
-	 * was invoked.
-	 */
-	ldub	[%g6 + TI_SYS_NOERROR], %l2
-	brnz,a,pn %l2, 80f
-	 stb	%g0, [%g6 + TI_SYS_NOERROR]
-
 	cmp	%o0, -ERESTART_RESTARTBLOCK
 	bgeu,pn	%xcc, 1f
-	 andcc	%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %l6
-80:
+	 andcc	%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT|_TIF_SYSCALL_TRACEPOINT), %g0
+	ldx	[%sp + PTREGS_OFF + PT_V9_TNPC], %l1 ! pc = npc
+
+2:
+	stb	%g0, [%g6 + TI_SYS_NOERROR]
 	/* System call success, clear Carry condition code. */
 	andn	%g3, %g2, %g3
+3:
 	stx	%g3, [%sp + PTREGS_OFF + PT_V9_TSTATE]	
 	bne,pn	%icc, linux_syscall_trace2
 	 add	%l1, 0x4, %l2			! npc = npc+4
@@ -257,20 +234,20 @@ ret_sys_call:
 	 stx	%l2, [%sp + PTREGS_OFF + PT_V9_TNPC]
 
 1:
+	/* Check if force_successful_syscall_return()
+	 * was invoked.
+	 */
+	ldub	[%g6 + TI_SYS_NOERROR], %l2
+	brnz,pn %l2, 2b
+	 ldx	[%sp + PTREGS_OFF + PT_V9_TNPC], %l1 ! pc = npc
 	/* System call failure, set Carry condition code.
 	 * Also, get abs(errno) to return to the process.
 	 */
-	andcc	%l0, (_TIF_SYSCALL_TRACE|_TIF_SECCOMP|_TIF_SYSCALL_AUDIT), %l6	
 	sub	%g0, %o0, %o0
-	or	%g3, %g2, %g3
 	stx	%o0, [%sp + PTREGS_OFF + PT_V9_I0]
-	stx	%g3, [%sp + PTREGS_OFF + PT_V9_TSTATE]
-	bne,pn	%icc, linux_syscall_trace2
-	 add	%l1, 0x4, %l2			! npc = npc+4
-	stx	%l1, [%sp + PTREGS_OFF + PT_V9_TPC]
+	ba,pt	%xcc, 3b
+	 or	%g3, %g2, %g3
 
-	b,pt	%xcc, rtrap
-	 stx	%l2, [%sp + PTREGS_OFF + PT_V9_TNPC]
 linux_syscall_trace2:
 	call	syscall_trace_leave
 	 add	%sp, PTREGS_OFF, %o0

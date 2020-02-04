@@ -188,15 +188,17 @@ out:
 	return err;
 }
 
-int unionfs_fsync(struct file *file, struct dentry *dentry, int datasync)
+int unionfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	int bindex, bstart, bend;
 	struct file *lower_file;
+	struct dentry *dentry = file->f_path.dentry;
 	struct dentry *lower_dentry;
 	struct dentry *parent;
 	struct inode *lower_inode, *inode;
 	int err = -EINVAL;
 
+	lockdep_off();
 	unionfs_read_lock(dentry->d_sb, UNIONFS_SMUTEX_PARENT);
 	parent = unionfs_lock_parent(dentry, UNIONFS_DMUTEX_PARENT);
 	unionfs_lock_dentry(dentry, UNIONFS_DMUTEX_CHILD);
@@ -205,6 +207,10 @@ int unionfs_fsync(struct file *file, struct dentry *dentry, int datasync)
 	if (unlikely(err))
 		goto out;
 	unionfs_check_file(file);
+
+	err = generic_file_fsync(file, start, end, datasync);
+	if (err)
+		goto out;
 
 	bstart = fbstart(file);
 	bend = fbend(file);
@@ -223,13 +229,9 @@ int unionfs_fsync(struct file *file, struct dentry *dentry, int datasync)
 			continue;
 		lower_file = unionfs_lower_file_idx(file, bindex);
 		lower_dentry = unionfs_lower_dentry_idx(dentry, bindex);
-		mutex_lock(&lower_inode->i_mutex);
-		err = lower_inode->i_fop->fsync(lower_file,
-						lower_dentry,
-						datasync);
+		err = vfs_fsync_range(lower_file, start, end, datasync);
 		if (!err && bindex == bstart)
 			fsstack_copy_attr_times(inode, lower_inode);
-		mutex_unlock(&lower_inode->i_mutex);
 		if (err)
 			goto out;
 	}
@@ -240,6 +242,7 @@ out:
 	unionfs_unlock_dentry(dentry);
 	unionfs_unlock_parent(dentry, parent);
 	unionfs_read_unlock(dentry->d_sb);
+	lockdep_on();
 	return err;
 }
 
@@ -369,6 +372,9 @@ struct file_operations unionfs_main_fops = {
 	.write		= unionfs_write,
 	.readdir	= unionfs_file_readdir,
 	.unlocked_ioctl	= unionfs_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= unionfs_ioctl,
+#endif
 	.mmap		= unionfs_mmap,
 	.open		= unionfs_open,
 	.flush		= unionfs_flush,

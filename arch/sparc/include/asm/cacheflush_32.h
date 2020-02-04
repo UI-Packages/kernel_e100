@@ -75,11 +75,21 @@ BTFIXUPDEF_CALL(void, flush_sig_insns, struct mm_struct *, unsigned long)
 
 extern void sparc_flush_page_to_ram(struct page *page);
 
+#define ARCH_IMPLEMENTS_FLUSH_DCACHE_PAGE 1
 #define flush_dcache_page(page)			sparc_flush_page_to_ram(page)
 #define flush_dcache_mmap_lock(mapping)		do { } while (0)
 #define flush_dcache_mmap_unlock(mapping)	do { } while (0)
 
 #define flush_cache_vmap(start, end)		flush_cache_all()
 #define flush_cache_vunmap(start, end)		flush_cache_all()
+
+/* When a context switch happens we must flush all user windows so that
+ * the windows of the current process are flushed onto its stack. This
+ * way the windows are all clean for the next process and the stack
+ * frames are up to date.
+ */
+extern void flush_user_windows(void);
+extern void kill_user_windows(void);
+extern void flushw_all(void);
 
 #endif /* _SPARC_CACHEFLUSH_H */

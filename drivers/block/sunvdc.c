@@ -691,9 +691,8 @@ static int probe_disk(struct vdc_port *port)
 
 	port->disk = g;
 
-	blk_queue_max_hw_segments(q, port->ring_cookies);
-	blk_queue_max_phys_segments(q, port->ring_cookies);
-	blk_queue_max_sectors(q, port->max_xfer_size);
+	blk_queue_max_segments(q, port->ring_cookies);
+	blk_queue_max_hw_sectors(q, port->max_xfer_size);
 	g->major = vdc_major;
 	g->first_minor = port->vio.vdev->dev_no << PARTITION_SHIFT;
 	strcpy(g->disk_name, port->disk_name);
@@ -840,10 +839,7 @@ static struct vio_driver vdc_port_driver = {
 	.id_table	= vdc_port_match,
 	.probe		= vdc_port_probe,
 	.remove		= vdc_port_remove,
-	.driver		= {
-		.name	= "vdc_port",
-		.owner	= THIS_MODULE,
-	}
+	.name		= "vdc_port",
 };
 
 static int __init vdc_init(void)

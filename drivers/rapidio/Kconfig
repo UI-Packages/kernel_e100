@@ -1,8 +1,7 @@
 #
 # RapidIO configuration
 #
-menu "RapidIO"
-	depends on RAPIDIO
+source "drivers/rapidio/devices/Kconfig"
 
 config RAPIDIO_DISC_TIMEOUT
 	int "Discovery timeout duration (seconds)"
@@ -23,13 +22,6 @@ config RAPIDIO_ENABLE_RX_TX_PORTS
 	  ports for Input/Output direction to allow other traffic
 	  than Maintenance transfers.
 
-menu "Switches"
-source "drivers/rapidio/switches/Kconfig"
-endmenu
-menu "Devices"
-source "drivers/rapidio/devices/Kconfig"
-endmenu
-
 config RAPIDIO_DEBUG
 	bool "RapidIO subsystem debug messages"
 	depends on RAPIDIO
@@ -41,4 +33,4 @@ config RAPIDIO_DEBUG
 
 	  If you are unsure about this, say N here.
 
-endmenu
+source "drivers/rapidio/switches/Kconfig"

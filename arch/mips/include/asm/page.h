@@ -31,19 +31,23 @@
 #define PAGE_SHIFT	16
 #endif
 #define PAGE_SIZE	(_AC(1,UL) << PAGE_SHIFT)
-#define PAGE_MASK       (~((1 << PAGE_SHIFT) - 1))
+#define PAGE_MASK       (~(PAGE_SIZE - 1))
 
-#ifdef CONFIG_HUGETLB_PAGE
+#ifdef CONFIG_MIPS_HUGE_TLB_SUPPORT
 #define HPAGE_SHIFT	(PAGE_SHIFT + PAGE_SHIFT - 3)
 #define HPAGE_SIZE	(_AC(1,UL) << HPAGE_SHIFT)
 #define HPAGE_MASK	(~(HPAGE_SIZE - 1))
 #define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
-#endif /* CONFIG_HUGETLB_PAGE */
+#else /* !CONFIG_MIPS_HUGE_TLB_SUPPORT */
+#define HPAGE_SHIFT	({BUILD_BUG(); 0; })
+#define HPAGE_SIZE	({BUILD_BUG(); 0; })
+#define HPAGE_MASK	({BUILD_BUG(); 0; })
+#define HUGETLB_PAGE_ORDER	({BUILD_BUG(); 0; })
+#endif /* CONFIG_MIPS_HUGE_TLB_SUPPORT */
 
 #ifndef __ASSEMBLY__
 
 #include <linux/pfn.h>
-#include <asm/io.h>
 
 extern void build_clear_page(void);
 extern void build_copy_page(void);
@@ -134,24 +138,33 @@ typedef struct { unsigned long pgprot; } pgprot_t;
  */
 #define ptep_buddy(x)	((pte_t *)((unsigned long)(x) ^ sizeof(pte_t)))
 
-#endif /* !__ASSEMBLY__ */
 
 /*
  * __pa()/__va() should be used only during mem init.
  */
 #ifdef CONFIG_64BIT
-#define __pa(x)								\
-({									\
-    unsigned long __x = (unsigned long)(x);				\
-    __x < CKSEG0 ? XPHYSADDR(__x) : CPHYSADDR(__x);			\
-})
+unsigned long __phys_addr(unsigned long x);
+#define __pa(x)	__phys_addr((unsigned long)x)
 #else
 #define __pa(x)								\
     ((unsigned long)(x) - PAGE_OFFSET + PHYS_OFFSET)
 #endif
 #define __va(x)		((void *)((unsigned long)(x) + PAGE_OFFSET - PHYS_OFFSET))
 
-#ifndef __ASSEMBLY__
+#include <asm/io.h>
+
+/*
+ * RELOC_HIDE was originally added by 6007b903dfe5f1d13e0c711ac2894bdd4a61b1ad
+ * (lmo) rsp. 8431fd094d625b94d364fe393076ccef88e6ce18 (kernel.org).  The
+ * discussion can be found in lkml posting
+ * <a2ebde260608230500o3407b108hc03debb9da6e62c@mail.gmail.com> which is
+ * archived at http://lists.linuxcoding.com/kernel/2006-q3/msg17360.html
+ *
+ * It is unclear if the misscompilations mentioned in
+ * http://lkml.org/lkml/2010/8/8/138 also affect MIPS so we keep this one
+ * until GCC 3.x has been retired before we can apply
+ * https://patchwork.linux-mips.org/patch/1541/
+ */
 # ifdef CONFIG_MAPPED_KERNEL
 extern unsigned long phys_to_kernel_offset;
 #  define __pa_symbol(x)	(RELOC_HIDE((unsigned long)(x), 0) - phys_to_kernel_offset)

@@ -3,6 +3,7 @@
  *  include/asm-mips/kprobes.h
  *
  *  Copyright 2006 Sony Corp.
+ *  Copyright 2010 Cavium Networks
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -35,7 +36,7 @@ struct pt_regs;
 
 typedef union mips_instruction kprobe_opcode_t;
 
-#define MAX_INSN_SIZE 			2
+#define MAX_INSN_SIZE 2
 
 #define flush_insn_slot(p)						\
 do {									\
@@ -45,7 +46,7 @@ do {									\
 } while (0)
 
 
-#define kretprobe_blacklist_size	0
+#define kretprobe_blacklist_size 0
 
 void arch_remove_kprobe(struct kprobe *p);
 
@@ -73,6 +74,8 @@ struct prev_kprobe {
 		: MAX_JPROBES_STACK_SIZE)
 
 
+#define SKIP_DELAYSLOT 0x0001
+
 /* per-cpu kprobe control block */
 struct kprobe_ctlblk {
 	unsigned long kprobe_status;
@@ -81,15 +84,14 @@ struct kprobe_ctlblk {
 	unsigned long kprobe_saved_epc;
 	unsigned long jprobe_saved_sp;
 	struct pt_regs jprobe_saved_regs;
+	/* Per-thread fields, used while emulating branches */
+	unsigned long flags;
+	unsigned long target_epc;
 	u8 jprobes_stack[MAX_JPROBES_STACK_SIZE];
 	struct prev_kprobe prev_kprobe;
 };
 
 extern int kprobe_exceptions_notify(struct notifier_block *self,
 				    unsigned long val, void *data);
-
-#define regs_return_value(_regs) ((_regs)->regs[2])
-#define instruction_pointer(regs) ((regs)->cp0_epc)
-
 
 #endif				/* _ASM_KPROBES_H */

@@ -1,9 +1,9 @@
 /*
  * Kernel CAPI 2.0 Module - /proc/capi handling
- * 
+ *
  * Copyright 1999 by Carsten Paeth <calle@calle.de>
  * Copyright 2002 by Kai Germaschewski <kai@germaschewski.name>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
@@ -14,14 +14,14 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/init.h>
+#include <linux/export.h>
 
-static char *
-cardstate2str(unsigned short cardstate)
+static char *state2str(unsigned short state)
 {
-	switch (cardstate) {
-	case CARD_DETECTED:	return "detected";
-	case CARD_LOADING:	return "loading";
-	case CARD_RUNNING:	return "running";
+	switch (state) {
+	case CAPI_CTR_DETECTED:	return "detected";
+	case CAPI_CTR_LOADING:	return "loading";
+	case CAPI_CTR_RUNNING:	return "running";
 	default:	        return "???";
 	}
 }
@@ -29,16 +29,19 @@ cardstate2str(unsigned short cardstate)
 // /proc/capi
 // ===========================================================================
 
-// /proc/capi/controller: 
+// /proc/capi/controller:
 //      cnr driver cardstate name driverinfo
 // /proc/capi/contrstats:
 //      cnr nrecvctlpkt nrecvdatapkt nsentctlpkt nsentdatapkt
 // ---------------------------------------------------------------------------
 
 static void *controller_start(struct seq_file *seq, loff_t *pos)
+	__acquires(capi_controller_lock)
 {
+	mutex_lock(&capi_controller_lock);
+
 	if (*pos < CAPI_MAXCONTR)
-		return &capi_cards[*pos];
+		return &capi_controller[*pos];
 
 	return NULL;
 }
@@ -47,13 +50,15 @@ static void *controller_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	++*pos;
 	if (*pos < CAPI_MAXCONTR)
-		return &capi_cards[*pos];
+		return &capi_controller[*pos];
 
 	return NULL;
 }
 
 static void controller_stop(struct seq_file *seq, void *v)
+	__releases(capi_controller_lock)
 {
+	mutex_unlock(&capi_controller_lock);
 }
 
 static int controller_show(struct seq_file *seq, void *v)
@@ -65,7 +70,7 @@ static int controller_show(struct seq_file *seq, void *v)
 
 	seq_printf(seq, "%d %-10s %-8s %-16s %s\n",
 		   ctr->cnr, ctr->driver_name,
-		   cardstate2str(ctr->cardstate),
+		   state2str(ctr->state),
 		   ctr->name,
 		   ctr->procinfo ?  ctr->procinfo(ctr) : "");
 
@@ -80,7 +85,7 @@ static int contrstats_show(struct seq_file *seq, void *v)
 		return 0;
 
 	seq_printf(seq, "%d %lu %lu %lu %lu\n",
-		   ctr->cnr, 
+		   ctr->cnr,
 		   ctr->nrecvctlpkt,
 		   ctr->nrecvdatapkt,
 		   ctr->nsentctlpkt,
@@ -129,15 +134,17 @@ static const struct file_operations proc_contrstats_ops = {
 	.release	= seq_release,
 };
 
-// /proc/capi/applications: 
+// /proc/capi/applications:
 //      applid l3cnt dblkcnt dblklen #ncci recvqueuelen
-// /proc/capi/applstats: 
+// /proc/capi/applstats:
 //      applid nrecvctlpkt nrecvdatapkt nsentctlpkt nsentdatapkt
 // ---------------------------------------------------------------------------
 
-static void *
-applications_start(struct seq_file *seq, loff_t *pos)
+static void *applications_start(struct seq_file *seq, loff_t *pos)
+	__acquires(capi_controller_lock)
 {
+	mutex_lock(&capi_controller_lock);
+
 	if (*pos < CAPI_MAXAPPL)
 		return &capi_applications[*pos];
 
@@ -154,9 +161,10 @@ applications_next(struct seq_file *seq, void *v, loff_t *pos)
 	return NULL;
 }
 
-static void
-applications_stop(struct seq_file *seq, void *v)
+static void applications_stop(struct seq_file *seq, void *v)
+	__releases(capi_controller_lock)
 {
+	mutex_unlock(&capi_controller_lock);
 }
 
 static int
@@ -239,9 +247,9 @@ static const struct file_operations proc_applstats_ops = {
 // ---------------------------------------------------------------------------
 
 static void *capi_driver_start(struct seq_file *seq, loff_t *pos)
-	__acquires(&capi_drivers_list_lock)
+	__acquires(&capi_drivers_lock)
 {
-	read_lock(&capi_drivers_list_lock);
+	mutex_lock(&capi_drivers_lock);
 	return seq_list_start(&capi_drivers, *pos);
 }
 
@@ -251,9 +259,9 @@ static void *capi_driver_next(struct seq_file *seq, void *v, loff_t *pos)
 }
 
 static void capi_driver_stop(struct seq_file *seq, void *v)
-	__releases(&capi_drivers_list_lock)
+	__releases(&capi_drivers_lock)
 {
-	read_unlock(&capi_drivers_list_lock);
+	mutex_unlock(&capi_drivers_lock);
 }
 
 static int capi_driver_show(struct seq_file *seq, void *v)
@@ -289,7 +297,7 @@ static const struct file_operations proc_driver_ops = {
 
 // ---------------------------------------------------------------------------
 
-void __init 
+void __init
 kcapi_proc_init(void)
 {
 	proc_mkdir("capi",             NULL);

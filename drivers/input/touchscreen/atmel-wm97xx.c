@@ -19,6 +19,7 @@
 #include <linux/timer.h>
 #include <linux/gpio.h>
 #include <linux/io.h>
+#include <linux/slab.h>
 
 #define AC97C_ICA		0x10
 #define AC97C_CBRHR		0x30
@@ -59,7 +60,7 @@
 #define ATMEL_WM97XX_AC97C_IRQ		(29)
 #define ATMEL_WM97XX_GPIO_DEFAULT	(32+16) /* Pin 16 on port B. */
 #else
-#error Unkown CPU, this driver only supports AT32AP700X CPUs.
+#error Unknown CPU, this driver only supports AT32AP700X CPUs.
 #endif
 
 struct continuous {
@@ -163,7 +164,7 @@ static irqreturn_t atmel_wm97xx_channel_b_interrupt(int irq, void *dev_id)
 
 		data = ac97c_readl(atmel_wm97xx, CBRHR);
 		value = data & 0x0fff;
-		source = data & WM97XX_ADCSRC_MASK;
+		source = data & WM97XX_ADCSEL_MASK;
 		pen_down = (data & WM97XX_PEN_DOWN) >> 8;
 
 		if (source == WM97XX_ADCSEL_X)
@@ -391,9 +392,10 @@ static int __exit atmel_wm97xx_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static int atmel_wm97xx_suspend(struct platform_device *pdev, pm_message_t msg)
+#ifdef CONFIG_PM_SLEEP
+static int atmel_wm97xx_suspend(struct *dev)
 {
+	struct platform_device *pdev = to_platform_device(dev);
 	struct atmel_wm97xx *atmel_wm97xx = platform_get_drvdata(pdev);
 
 	ac97c_writel(atmel_wm97xx, IDR, AC97C_INT_CBEVT);
@@ -403,8 +405,9 @@ static int atmel_wm97xx_suspend(struct platform_device *pdev, pm_message_t msg)
 	return 0;
 }
 
-static int atmel_wm97xx_resume(struct platform_device *pdev)
+static int atmel_wm97xx_resume(struct device *dev)
 {
+	struct platform_device *pdev = to_platform_device(dev);
 	struct atmel_wm97xx *atmel_wm97xx = platform_get_drvdata(pdev);
 	struct wm97xx *wm = atmel_wm97xx->wm;
 
@@ -415,18 +418,18 @@ static int atmel_wm97xx_resume(struct platform_device *pdev)
 
 	return 0;
 }
-#else
-#define atmel_wm97xx_suspend	NULL
-#define atmel_wm97xx_resume	NULL
 #endif
+
+static SIMPLE_DEV_PM_OPS(atmel_wm97xx_pm_ops,
+			 atmel_wm97xx_suspend, atmel_wm97xx_resume);
 
 static struct platform_driver atmel_wm97xx_driver = {
 	.remove		= __exit_p(atmel_wm97xx_remove),
 	.driver		= {
-		.name = "wm97xx-touch",
+		.name	= "wm97xx-touch",
+		.owner	= THIS_MODULE,
+		.pm	= &atmel_wm97xx_pm_ops,
 	},
-	.suspend	= atmel_wm97xx_suspend,
-	.resume		= atmel_wm97xx_resume,
 };
 
 static int __init atmel_wm97xx_init(void)
@@ -441,6 +444,6 @@ static void __exit atmel_wm97xx_exit(void)
 }
 module_exit(atmel_wm97xx_exit);
 
-MODULE_AUTHOR("Hans-Christian Egtvedt <hans-christian.egtvedt@atmel.com>");
+MODULE_AUTHOR("Hans-Christian Egtvedt <egtvedt@samfundet.no>");
 MODULE_DESCRIPTION("wm97xx continuous touch driver for Atmel AT91 and AVR32");
 MODULE_LICENSE("GPL");

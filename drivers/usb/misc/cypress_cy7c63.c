@@ -32,6 +32,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/usb.h>
 
 #define DRIVER_AUTHOR		"Oliver Bock (bock@tfh-berlin.de)"
@@ -56,7 +57,7 @@
 
 
 /* table of devices that work with this driver */
-static struct usb_device_id cypress_table [] = {
+static const struct usb_device_id cypress_table[] = {
 	{ USB_DEVICE(CYPRESS_VENDOR_ID, CYPRESS_PRODUCT_ID) },
 	{ }
 };
@@ -195,11 +196,9 @@ static ssize_t get_port1_handler(struct device *dev,
 	return read_port(dev, attr, buf, 1, CYPRESS_READ_PORT_ID1);
 }
 
-static DEVICE_ATTR(port0, S_IWUGO | S_IRUGO,
-		   get_port0_handler, set_port0_handler);
+static DEVICE_ATTR(port0, S_IRUGO | S_IWUSR, get_port0_handler, set_port0_handler);
 
-static DEVICE_ATTR(port1, S_IWUGO | S_IRUGO,
-		   get_port1_handler, set_port1_handler);
+static DEVICE_ATTR(port1, S_IRUGO | S_IWUSR, get_port1_handler, set_port1_handler);
 
 
 static int cypress_probe(struct usb_interface *interface,
@@ -272,27 +271,7 @@ static struct usb_driver cypress_driver = {
 	.id_table = cypress_table,
 };
 
-static int __init cypress_init(void)
-{
-	int result;
-
-	/* register this driver with the USB subsystem */
-	result = usb_register(&cypress_driver);
-	if (result)
-		printk(KERN_ERR KBUILD_MODNAME ": usb_register failed! "
-		       "Error number: %d\n", result);
-
-	return result;
-}
-
-static void __exit cypress_exit(void)
-{
-	/* deregister this driver with the USB subsystem */
-	usb_deregister(&cypress_driver);
-}
-
-module_init(cypress_init);
-module_exit(cypress_exit);
+module_usb_driver(cypress_driver);
 
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);

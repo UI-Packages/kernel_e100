@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2008, Intel Corp.
+ * Copyright (C) 2000 - 2012, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -220,7 +220,8 @@ acpi_ds_get_field_names(struct acpi_create_field_info *info,
 			union acpi_parse_object *arg)
 {
 	acpi_status status;
-	acpi_integer position;
+	u64 position;
+	union acpi_parse_object *child;
 
 	ACPI_FUNCTION_TRACE_PTR(ds_get_field_names, info);
 
@@ -232,16 +233,17 @@ acpi_ds_get_field_names(struct acpi_create_field_info *info,
 
 	while (arg) {
 		/*
-		 * Three types of field elements are handled:
-		 * 1) Offset - specifies a bit offset
-		 * 2) access_as - changes the access mode
-		 * 3) Name - Enters a new named field into the namespace
+		 * Four types of field elements are handled:
+		 * 1) Name - Enters a new named field into the namespace
+		 * 2) Offset - specifies a bit offset
+		 * 3) access_as - changes the access mode/attributes
+		 * 4) Connection - Associate a resource template with the field
 		 */
 		switch (arg->common.aml_opcode) {
 		case AML_INT_RESERVEDFIELD_OP:
 
-			position = (acpi_integer) info->field_bit_position
-			    + (acpi_integer) arg->common.value.size;
+			position = (u64) info->field_bit_position
+			    + (u64) arg->common.value.size;
 
 			if (position > ACPI_UINT32_MAX) {
 				ACPI_ERROR((AE_INFO,
@@ -253,21 +255,70 @@ acpi_ds_get_field_names(struct acpi_create_field_info *info,
 			break;
 
 		case AML_INT_ACCESSFIELD_OP:
-
+		case AML_INT_EXTACCESSFIELD_OP:
 			/*
-			 * Get a new access_type and access_attribute -- to be used for all
-			 * field units that follow, until field end or another access_as
-			 * keyword.
+			 * Get new access_type, access_attribute, and access_length fields
+			 * -- to be used for all field units that follow, until the
+			 * end-of-field or another access_as keyword is encountered.
+			 * NOTE. These three bytes are encoded in the integer value
+			 * of the parseop for convenience.
 			 *
 			 * In field_flags, preserve the flag bits other than the
-			 * ACCESS_TYPE bits
+			 * ACCESS_TYPE bits.
 			 */
+
+			/* access_type (byte_acc, word_acc, etc.) */
+
 			info->field_flags = (u8)
 			    ((info->
 			      field_flags & ~(AML_FIELD_ACCESS_TYPE_MASK)) |
-			     ((u8) ((u32) arg->common.value.integer >> 8)));
+			     ((u8)((u32)(arg->common.value.integer & 0x07))));
 
-			info->attribute = (u8) (arg->common.value.integer);
+			/* access_attribute (attrib_quick, attrib_byte, etc.) */
+
+			info->attribute =
+			    (u8)((arg->common.value.integer >> 8) & 0xFF);
+
+			/* access_length (for serial/buffer protocols) */
+
+			info->access_length =
+			    (u8)((arg->common.value.integer >> 16) & 0xFF);
+			break;
+
+		case AML_INT_CONNECTION_OP:
+			/*
+			 * Clear any previous connection. New connection is used for all
+			 * fields that follow, similar to access_as
+			 */
+			info->resource_buffer = NULL;
+			info->connection_node = NULL;
+
+			/*
+			 * A Connection() is either an actual resource descriptor (buffer)
+			 * or a named reference to a resource template
+			 */
+			child = arg->common.value.arg;
+			if (child->common.aml_opcode == AML_INT_BYTELIST_OP) {
+				info->resource_buffer = child->named.data;
+				info->resource_length =
+				    (u16)child->named.value.integer;
+			} else {
+				/* Lookup the Connection() namepath, it should already exist */
+
+				status = acpi_ns_lookup(walk_state->scope_info,
+							child->common.value.
+							name, ACPI_TYPE_ANY,
+							ACPI_IMODE_EXECUTE,
+							ACPI_NS_DONT_OPEN_SCOPE,
+							walk_state,
+							&info->connection_node);
+				if (ACPI_FAILURE(status)) {
+					ACPI_ERROR_NAMESPACE(child->common.
+							     value.name,
+							     status);
+					return_ACPI_STATUS(status);
+				}
+			}
 			break;
 
 		case AML_INT_NAMEDFIELD_OP:
@@ -305,8 +356,8 @@ acpi_ds_get_field_names(struct acpi_create_field_info *info,
 
 			/* Keep track of bit position for the next field */
 
-			position = (acpi_integer) info->field_bit_position
-			    + (acpi_integer) arg->common.value.size;
+			position = (u64) info->field_bit_position
+			    + (u64) arg->common.value.size;
 
 			if (position > ACPI_UINT32_MAX) {
 				ACPI_ERROR((AE_INFO,
@@ -323,7 +374,7 @@ acpi_ds_get_field_names(struct acpi_create_field_info *info,
 		default:
 
 			ACPI_ERROR((AE_INFO,
-				    "Invalid opcode in field list: %X",
+				    "Invalid opcode in field list: 0x%X",
 				    arg->common.aml_opcode));
 			return_ACPI_STATUS(AE_AML_BAD_OPCODE);
 		}
@@ -374,6 +425,8 @@ acpi_ds_create_field(union acpi_parse_object *op,
 		}
 	}
 
+	ACPI_MEMSET(&info, 0, sizeof(struct acpi_create_field_info));
+
 	/* Second arg is the field flags */
 
 	arg = arg->common.next;
@@ -386,7 +439,6 @@ acpi_ds_create_field(union acpi_parse_object *op,
 	info.region_node = region_node;
 
 	status = acpi_ds_get_field_names(&info, walk_state, arg->common.next);
-
 	return_ACPI_STATUS(status);
 }
 
@@ -474,8 +526,8 @@ acpi_ds_init_field_objects(union acpi_parse_object *op,
 	 */
 	while (arg) {
 		/*
-		 * Ignore OFFSET and ACCESSAS terms here; we are only interested in the
-		 * field names in order to enter them into the namespace.
+		 * Ignore OFFSET/ACCESSAS/CONNECTION terms here; we are only interested
+		 * in the field names in order to enter them into the namespace.
 		 */
 		if (arg->common.aml_opcode == AML_INT_NAMEDFIELD_OP) {
 			status = acpi_ns_lookup(walk_state->scope_info,
@@ -651,6 +703,5 @@ acpi_ds_create_index_field(union acpi_parse_object *op,
 	info.region_node = region_node;
 
 	status = acpi_ds_get_field_names(&info, walk_state, arg->common.next);
-
 	return_ACPI_STATUS(status);
 }

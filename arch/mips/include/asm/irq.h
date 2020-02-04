@@ -11,8 +11,10 @@
 
 #include <linux/linkage.h>
 #include <linux/smp.h>
+#include <linux/irqdomain.h>
 
 #include <asm/mipsmtregs.h>
+#include <asm/ptrace.h>
 
 #include <irq.h>
 
@@ -50,9 +52,9 @@ static inline void smtc_im_ack_irq(unsigned int irq)
 #ifdef CONFIG_MIPS_MT_SMTC_IRQAFF
 #include <linux/cpumask.h>
 
-extern int plat_set_irq_affinity(unsigned int irq,
-				  const struct cpumask *affinity);
-extern void smtc_forward_irq(unsigned int irq);
+extern int plat_set_irq_affinity(struct irq_data *d,
+				 const struct cpumask *affinity, bool force);
+extern void smtc_forward_irq(struct irq_data *d);
 
 /*
  * IRQ affinity hook invoked at the beginning of interrupt dispatch
@@ -65,22 +67,30 @@ extern void smtc_forward_irq(unsigned int irq);
  * cpumask implementations, this version is optimistically assuming
  * that cpumask.h macro overhead is reasonable during interrupt dispatch.
  */
-#define IRQ_AFFINITY_HOOK(irq)						\
-do {									\
-    if (!cpumask_test_cpu(smp_processor_id(), irq_desc[irq].affinity)) {\
-	smtc_forward_irq(irq);						\
-	irq_exit();							\
-	return;								\
-    }									\
-} while (0)
+static inline int handle_on_other_cpu(unsigned int irq)
+{
+	struct irq_data *d = irq_get_irq_data(irq);
+
+	if (cpumask_test_cpu(smp_processor_id(), d->affinity))
+		return 0;
+	smtc_forward_irq(d);
+	return 1;
+}
 
 #else /* Not doing SMTC affinity */
 
-#define IRQ_AFFINITY_HOOK(irq) do { } while (0)
+static inline int handle_on_other_cpu(unsigned int irq) { return 0; }
 
 #endif /* CONFIG_MIPS_MT_SMTC_IRQAFF */
 
 #ifdef CONFIG_MIPS_MT_SMTC_IM_BACKSTOP
+
+static inline void smtc_im_backstop(unsigned int irq)
+{
+	if (irq_hwmask[irq] & 0x0000ff00)
+		write_c0_tccontext(read_c0_tccontext() &
+				   ~(irq_hwmask[irq] & 0x0000ff00));
+}
 
 /*
  * Clear interrupt mask handling "backstop" if irq_hwmask
@@ -88,30 +98,64 @@ do {									\
  * functions will take over re-enabling the low-level mask.
  * Otherwise it will be done on return from exception.
  */
-#define __DO_IRQ_SMTC_HOOK(irq)						\
-do {									\
-	IRQ_AFFINITY_HOOK(irq);						\
-	if (irq_hwmask[irq] & 0x0000ff00)				\
-		write_c0_tccontext(read_c0_tccontext() &		\
-				   ~(irq_hwmask[irq] & 0x0000ff00));	\
-} while (0)
+static inline int smtc_handle_on_other_cpu(unsigned int irq)
+{
+	int ret = handle_on_other_cpu(irq);
 
-#define __NO_AFFINITY_IRQ_SMTC_HOOK(irq)				\
-do {									\
-	if (irq_hwmask[irq] & 0x0000ff00)                               \
-		write_c0_tccontext(read_c0_tccontext() &		\
-				   ~(irq_hwmask[irq] & 0x0000ff00));	\
-} while (0)
+	if (!ret)
+		smtc_im_backstop(irq);
+	return ret;
+}
 
 #else
 
-#define __DO_IRQ_SMTC_HOOK(irq)						\
-do {									\
-	IRQ_AFFINITY_HOOK(irq);						\
-} while (0)
-#define __NO_AFFINITY_IRQ_SMTC_HOOK(irq) do { } while (0)
+static inline void smtc_im_backstop(unsigned int irq) { }
+static inline int smtc_handle_on_other_cpu(unsigned int irq)
+{
+	return handle_on_other_cpu(irq);
+}
 
 #endif
+
+/*
+ * This struct defines the way the registers are stored on the stack during a
+ * system call/exception. As usual the registers k0/k1 aren't being saved.
+ */
+static __always_inline bool msa_get_reg(void)
+{
+	struct pt_regs regs;
+
+#ifndef CONFIG_KALLSYMS
+	/*
+	 * Remove any garbage that may be in regs (specially func
+	 * addresses) to avoid show_raw_backtrace() to report them
+	 */
+	memset((void *) &regs, 0, sizeof(regs));
+#endif
+	__asm__ __volatile__(
+		".set push\n\t"
+		".set noat\n\t"
+#ifdef CONFIG_64BIT
+		"1: dla $1, 1b\n\t"
+		"sd $1, %0\n\t"
+		"sd $29, %1\n\t"
+		"sd $31, %2\n\t"
+#else
+		"1: la $1, 1b\n\t"
+		"sw $1, %0\n\t"
+		"sw $29, %1\n\t"
+		"sw $31, %2\n\t"
+#endif
+		".set pop\n\t"
+		: "=m" (regs.cp0_epc),
+		"=m" (regs.regs[29]), "=m" (regs.regs[31])
+		: : "memory");
+
+	if ((regs.cp0_status & ST0_KSU) == KSU_USER)
+		return true;
+	else
+		return false;
+}
 
 extern void do_IRQ(unsigned int irq);
 
@@ -135,6 +179,7 @@ extern void free_irqno(unsigned int irq);
 #define CP0_LEGACY_COMPARE_IRQ 7
 
 extern int cp0_compare_irq;
+extern int cp0_compare_irq_shift;
 extern int cp0_perfcount_irq;
 
 #endif /* _ASM_IRQ_H */

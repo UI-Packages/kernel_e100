@@ -33,22 +33,11 @@ static int cmp_ex(const void *a, const void *b)
 	return 0;
 }
 
-static void swap_ex(void *a, void *b, int size)
-{
-	struct exception_table_entry t;
-	struct exception_table_entry *ea = a;
-	struct exception_table_entry *eb = b;
-
-	t = *ea;
-	*ea = *eb;
-	*eb = t;
-}
-
 void sort_extable(struct exception_table_entry *start,
 		  struct exception_table_entry *finish)
 {
 	sort(start, finish - start, sizeof(struct exception_table_entry),
-	     cmp_ex, swap_ex);
+	     cmp_ex, NULL);
 }
 
 #ifdef CONFIG_MODULES

@@ -277,6 +277,8 @@ static int pcf8583_probe(struct i2c_client *client,
 	if (!pcf8583)
 		return -ENOMEM;
 
+	i2c_set_clientdata(client, pcf8583);
+
 	pcf8583->rtc = rtc_device_register(pcf8583_driver.driver.name,
 			&client->dev, &pcf8583_rtc_ops, THIS_MODULE);
 
@@ -285,7 +287,6 @@ static int pcf8583_probe(struct i2c_client *client,
 		goto exit_kfree;
 	}
 
-	i2c_set_clientdata(client, pcf8583);
 	return 0;
 
 exit_kfree:
@@ -319,18 +320,7 @@ static struct i2c_driver pcf8583_driver = {
 	.id_table	= pcf8583_id,
 };
 
-static __init int pcf8583_init(void)
-{
-	return i2c_add_driver(&pcf8583_driver);
-}
-
-static __exit void pcf8583_exit(void)
-{
-	i2c_del_driver(&pcf8583_driver);
-}
-
-module_init(pcf8583_init);
-module_exit(pcf8583_exit);
+module_i2c_driver(pcf8583_driver);
 
 MODULE_AUTHOR("Russell King");
 MODULE_DESCRIPTION("PCF8583 I2C RTC driver");

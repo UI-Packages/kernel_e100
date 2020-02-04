@@ -11,6 +11,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  */
+#include <linux/export.h>
 #include "udp_impl.h"
 
 static int udplitev6_rcv(struct sk_buff *skb)
@@ -55,6 +56,7 @@ struct proto udplitev6_prot = {
 	.compat_setsockopt = compat_udpv6_setsockopt,
 	.compat_getsockopt = compat_udpv6_getsockopt,
 #endif
+	.clear_sk	   = sk_prot_clear_portaddr_nulls,
 };
 
 static struct inet_protosw udplite6_protosw = {
@@ -62,7 +64,6 @@ static struct inet_protosw udplite6_protosw = {
 	.protocol	= IPPROTO_UDPLITE,
 	.prot		= &udplitev6_prot,
 	.ops		= &inet6_dgram_ops,
-	.capability	= -1,
 	.no_check	= 0,
 	.flags		= INET_PROTOSW_PERMANENT,
 };
@@ -93,24 +94,31 @@ void udplitev6_exit(void)
 }
 
 #ifdef CONFIG_PROC_FS
+
+static const struct file_operations udplite6_afinfo_seq_fops = {
+	.owner    = THIS_MODULE,
+	.open     = udp_seq_open,
+	.read     = seq_read,
+	.llseek   = seq_lseek,
+	.release  = seq_release_net
+};
+
 static struct udp_seq_afinfo udplite6_seq_afinfo = {
 	.name		= "udplite6",
 	.family		= AF_INET6,
 	.udp_table	= &udplite_table,
-	.seq_fops	= {
-		.owner	=	THIS_MODULE,
-	},
+	.seq_fops	= &udplite6_afinfo_seq_fops,
 	.seq_ops	= {
 		.show		= udp6_seq_show,
 	},
 };
 
-static int udplite6_proc_init_net(struct net *net)
+static int __net_init udplite6_proc_init_net(struct net *net)
 {
 	return udp_proc_register(net, &udplite6_seq_afinfo);
 }
 
-static void udplite6_proc_exit_net(struct net *net)
+static void __net_exit udplite6_proc_exit_net(struct net *net)
 {
 	udp_proc_unregister(net, &udplite6_seq_afinfo);
 }

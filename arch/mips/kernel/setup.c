@@ -12,8 +12,9 @@
  */
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/screen_info.h>
+#include <linux/memblock.h>
 #include <linux/bootmem.h>
 #include <linux/initrd.h>
 #include <linux/root_dev.h>
@@ -21,6 +22,7 @@
 #include <linux/console.h>
 #include <linux/pfn.h>
 #include <linux/debugfs.h>
+#include <linux/kexec.h>
 
 #include <asm/addrspace.h>
 #include <asm/bootinfo.h>
@@ -30,7 +32,7 @@
 #include <asm/sections.h>
 #include <asm/setup.h>
 #include <asm/smp-ops.h>
-#include <asm/system.h>
+#include <asm/prom.h>
 
 struct cpuinfo_mips cpu_data[NR_CPUS] __read_mostly;
 
@@ -57,16 +59,20 @@ unsigned long mips_machtype __read_mostly = MACH_UNKNOWN;
 EXPORT_SYMBOL(mips_machtype);
 
 struct boot_mem_map boot_mem_map;
-int initrd_in_reserved;
+bool initrd_in_reserved;
 
-static char command_line[CL_SIZE];
-       char arcs_cmdline[CL_SIZE]=CONFIG_CMDLINE;
+static char __initdata command_line[COMMAND_LINE_SIZE];
+char __initdata arcs_cmdline[COMMAND_LINE_SIZE];
+
+#ifdef CONFIG_CMDLINE_BOOL
+static char __initdata builtin_cmdline[COMMAND_LINE_SIZE] = CONFIG_CMDLINE;
+#endif
 
 /*
  * mips_io_port_base is the begin of the address space to which x86 style
  * I/O ports are mapped.
  */
-const unsigned long mips_io_port_base __read_mostly = -1;
+const unsigned long mips_io_port_base = -1;
 EXPORT_SYMBOL(mips_io_port_base);
 
 static struct resource code_resource = { .name = "Kernel code", };
@@ -118,7 +124,7 @@ static void __init print_memory_map(void)
 			printk(KERN_CONT "(usable)\n");
 			break;
 		case BOOT_MEM_INIT_RAM:
-			printk("(usable after init)\n");
+			printk(KERN_CONT "(usable after init)\n");
 			break;
 		case BOOT_MEM_ROM_DATA:
 			printk(KERN_CONT "(ROM data)\n");
@@ -170,26 +176,8 @@ static unsigned long __init init_initrd(void)
 	 * already set up initrd_start and initrd_end. In these cases
 	 * perfom sanity checks and use them if all looks good.
 	 */
-	if (!initrd_start || initrd_end <= initrd_start) {
-#ifdef CONFIG_PROBE_INITRD_HEADER
-		u32 *initrd_header;
-
-		/*
-		 * See if initrd has been added to the kernel image by
-		 * arch/mips/boot/addinitrd.c. In that case a header is
-		 * prepended to initrd and is made up by 8 bytes. The first
-		 * word is a magic number and the second one is the size of
-		 * initrd.  Initrd start must be page aligned in any cases.
-		 */
-		initrd_header = __va(PAGE_ALIGN(__pa_symbol(&_end) + 8)) - 8;
-		if (initrd_header[0] != 0x494E5244)
-			goto disable;
-		initrd_start = (unsigned long)(initrd_header + 2);
-		initrd_end = initrd_start + initrd_header[1];
-#else
+	if (!initrd_start || initrd_end <= initrd_start)
 		goto disable;
-#endif
-	}
 
 	if (initrd_start & ~PAGE_MASK) {
 		pr_err("initrd start must be page aligned\n");
@@ -284,9 +272,9 @@ static void __init bootmem_init(void)
 	if (initrd_in_reserved) {
 		init_initrd();
 		reserved_end = PFN_UP(__pa_symbol(&_end));
-	} else {	
-		reserved_end = max(init_initrd(), 
-				(unsigned long) PFN_UP(__pa_symbol(&_end)));
+	} else {
+		reserved_end = max_t(unsigned long, init_initrd(),
+				     PFN_UP(__pa_symbol(&_end)));
 	}
 
 	/*
@@ -380,7 +368,7 @@ static void __init bootmem_init(void)
 			continue;
 #endif
 
-		add_active_range(0, start, end);
+		memblock_add_node(PFN_PHYS(start), PFN_PHYS(end - start), 0);
 	}
 
 	/*
@@ -389,15 +377,24 @@ static void __init bootmem_init(void)
 	for (i = 0; i < boot_mem_map.nr_map; i++) {
 		unsigned long start, end, size;
 
-		/*
-		 * Reserve usable memory.
-		 */
-		if (boot_mem_map.map[i].type != BOOT_MEM_RAM)
-			continue;
-
 		start = PFN_UP(boot_mem_map.map[i].addr);
 		end   = PFN_DOWN(boot_mem_map.map[i].addr
 				    + boot_mem_map.map[i].size);
+
+		/*
+		 * Reserve usable memory.
+		 */
+		switch (boot_mem_map.map[i].type) {
+		case BOOT_MEM_RAM:
+			break;
+		case BOOT_MEM_INIT_RAM:
+			memory_present(0, start, end);
+			continue;
+		default:
+			/* Not usable memory */
+			continue;
+		}
+
 		/*
 		 * We are rounding up the start address of usable memory
 		 * and at the end of the usable range downwards.
@@ -483,16 +480,50 @@ early_param("mem", early_parse_mem);
 
 static void __init arch_mem_init(char **cmdline_p)
 {
+	phys_t init_mem, init_end, init_size;
+
 	extern void plat_mem_setup(void);
 
 	/* call board setup routine */
 	plat_mem_setup();
 
+	init_mem = PFN_UP(__pa_symbol(&__init_begin)) << PAGE_SHIFT;
+	init_end = PFN_DOWN(__pa_symbol(&__init_end)) << PAGE_SHIFT;
+	init_size = init_end - init_mem;
+	if (init_size) {
+		/* Make sure it is in the boot_mem_map */
+		int i, found;
+		found = 0;
+		for (i = 0; i < boot_mem_map.nr_map; i++) {
+			if (init_mem >= boot_mem_map.map[i].addr &&
+			    init_mem < (boot_mem_map.map[i].addr +
+					boot_mem_map.map[i].size)) {
+				found = 1;
+				break;
+			}
+		}
+		if (!found)
+			add_memory_region(init_mem, init_size,
+					  BOOT_MEM_INIT_RAM);
+	}
+
 	pr_info("Determined physical RAM map:\n");
 	print_memory_map();
 
-	strlcpy(command_line, arcs_cmdline, sizeof(command_line));
-	strlcpy(boot_command_line, command_line, COMMAND_LINE_SIZE);
+#ifdef CONFIG_CMDLINE_BOOL
+#ifdef CONFIG_CMDLINE_OVERRIDE
+	strlcpy(boot_command_line, builtin_cmdline, COMMAND_LINE_SIZE);
+#else
+	if (builtin_cmdline[0]) {
+		strlcat(arcs_cmdline, " ", COMMAND_LINE_SIZE);
+		strlcat(arcs_cmdline, builtin_cmdline, COMMAND_LINE_SIZE);
+	}
+	strlcpy(boot_command_line, arcs_cmdline, COMMAND_LINE_SIZE);
+#endif
+#else
+	strlcpy(boot_command_line, arcs_cmdline, COMMAND_LINE_SIZE);
+#endif
+	strlcpy(command_line, boot_command_line, COMMAND_LINE_SIZE);
 
 	*cmdline_p = command_line;
 
@@ -504,9 +535,63 @@ static void __init arch_mem_init(char **cmdline_p)
 	}
 
 	bootmem_init();
+#ifdef CONFIG_KEXEC
+	if (crashk_res.start != crashk_res.end)
+		reserve_bootmem(crashk_res.start,
+				crashk_res.end - crashk_res.start + 1,
+				BOOTMEM_DEFAULT);
+#endif
+	device_tree_init();
 	sparse_init();
+	plat_swiotlb_setup();
 	paging_init();
 }
+
+#ifdef CONFIG_KEXEC
+static inline unsigned long long get_total_mem(void)
+{
+	unsigned long long total;
+
+	total = max_pfn - min_low_pfn;
+	return total << PAGE_SHIFT;
+}
+
+static void __init mips_parse_crashkernel(void)
+{
+	unsigned long long total_mem;
+	unsigned long long crash_size, crash_base;
+	int ret;
+
+	total_mem = get_total_mem();
+	ret = parse_crashkernel(boot_command_line, total_mem,
+				&crash_size, &crash_base);
+	if (ret != 0 || crash_size <= 0)
+		return;
+
+	crashk_res.start = crash_base;
+	crashk_res.end   = crash_base + crash_size - 1;
+}
+
+static void __init request_crashkernel(struct resource *res)
+{
+	int ret;
+
+	ret = request_resource(res, &crashk_res);
+	if (!ret)
+		pr_info("Reserving %ldMB of memory at %ldMB for crashkernel\n",
+			(unsigned long)((crashk_res.end -
+				crashk_res.start + 1) >> 20),
+			(unsigned long)(crashk_res.start  >> 20));
+}
+#else /* !defined(CONFIG_KEXEC)  */
+static void __init mips_parse_crashkernel(void)
+{
+}
+
+static void __init request_crashkernel(struct resource *res)
+{
+}
+#endif /* !defined(CONFIG_KEXEC)  */
 
 static void __init resource_init(void)
 {
@@ -523,6 +608,8 @@ static void __init resource_init(void)
 	/*
 	 * Request address space for all standard RAM.
 	 */
+	mips_parse_crashkernel();
+
 	for (i = 0; i < boot_mem_map.nr_map; i++) {
 		struct resource *res;
 		unsigned long start, end;
@@ -559,6 +646,7 @@ static void __init resource_init(void)
 		 */
 		request_resource(res, &code_resource);
 		request_resource(res, &data_resource);
+		request_crashkernel(res);
 	}
 }
 
@@ -585,28 +673,9 @@ void __init setup_arch(char **cmdline_p)
 
 	resource_init();
 	plat_smp_setup();
+
+	cpu_cache_init();
 }
-
-static int __init fpu_disable(char *s)
-{
-	int i;
-
-	for (i = 0; i < NR_CPUS; i++)
-		cpu_data[i].options &= ~MIPS_CPU_FPU;
-
-	return 1;
-}
-
-__setup("nofpu", fpu_disable);
-
-static int __init dsp_disable(char *s)
-{
-	cpu_data[0].ases &= ~MIPS_ASE_DSP;
-
-	return 1;
-}
-
-__setup("nodsp", dsp_disable);
 
 unsigned long kernelsp[NR_CPUS];
 unsigned long fw_arg0, fw_arg1, fw_arg2, fw_arg3;

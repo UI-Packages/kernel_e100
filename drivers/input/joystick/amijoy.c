@@ -35,7 +35,6 @@
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
 
-#include <asm/system.h>
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
 
@@ -108,6 +107,9 @@ static int __init amijoy_init(void)
 	int i, j;
 	int err;
 
+	if (!MACH_IS_AMIGA)
+		return -ENODEV;
+
 	for (i = 0; i < 2; i++) {
 		if (!amijoy[i])
 			continue;
@@ -139,8 +141,8 @@ static int __init amijoy_init(void)
 		amijoy_dev[i]->keybit[BIT_WORD(BTN_LEFT)] = BIT_MASK(BTN_LEFT) |
 			BIT_MASK(BTN_MIDDLE) | BIT_MASK(BTN_RIGHT);
 		for (j = 0; j < 2; j++) {
-			amijoy_dev[i]->absmin[ABS_X + j] = -1;
-			amijoy_dev[i]->absmax[ABS_X + j] = 1;
+			input_set_abs_params(amijoy_dev[i], ABS_X + j,
+					     -1, 1, 0, 0);
 		}
 
 		err = input_register_device(amijoy_dev[i]);

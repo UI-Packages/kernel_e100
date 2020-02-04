@@ -1,5 +1,18 @@
 #include <asm/asm-offsets.h>
 #include <asm/page.h>
+#include <asm/thread_info.h>
+
+#ifdef PHYSADDR
+phys_entry = kernel_entry - VMLINUX_LOAD_ADDRESS + PHYSADDR;
+#define LOAD_OFFSET (VMLINUX_LOAD_ADDRESS - PHYSADDR)
+#endif
+
+/*
+ * Put .bss..swapper_pg_dir as the first thing in .bss. This will
+ * ensure that it has .bss alignment (64K).
+ */
+#define BSS_FIRST_SECTIONS *(.bss..swapper_pg_dir)
+
 #include <asm-generic/vmlinux.lds.h>
 
 #undef mips
@@ -18,9 +31,7 @@ PHDRS {
 	note PT_NOTE FLAGS(4);	/* R__ */
 #endif
 }
-#ifdef PHYSADDR
-phys_entry = kernel_entry - VMLINUX_LOAD_ADDRESS + PHYSADDR;
-#endif
+
 #ifdef CONFIG_32BIT
 	#ifdef CONFIG_CPU_LITTLE_ENDIAN
 		jiffies  = jiffies_64;
@@ -51,7 +62,7 @@ SECTIONS
 	. = VMLINUX_LOAD_ADDRESS;
 	/* read-only */
 	_text = .;	/* Text and read-only data */
-	.text : {
+	.text : AT_LOCATION {
 		TEXT_TEXT
 		SCHED_TEXT
 		LOCK_TEXT
@@ -79,15 +90,17 @@ SECTIONS
 	NOTES :text NOTES_HEADER
 	.dummy : { *(.dummy) } :text
 
+	_sdata = .;			/* Start of data section */
 	RODATA
 
 	/* writeable */
 	.data : {	/* Data */
 		. = . + DATAOFFSET;		/* for CONFIG_MAPPED_KERNEL */
 
-		INIT_TASK_DATA(PAGE_SIZE)
+		INIT_TASK_DATA(THREAD_SIZE)
 		NOSAVE_DATA
 		CACHELINE_ALIGNED_DATA(1 << CONFIG_MIPS_L1_CACHE_SHIFT)
+		READ_MOSTLY_DATA(1 << CONFIG_MIPS_L1_CACHE_SHIFT)
 		DATA_DATA
 		CONSTRUCTORS
 	}
@@ -112,6 +125,13 @@ SECTIONS
 	INIT_TEXT_SECTION(PAGE_SIZE)
 	INIT_DATA_SECTION(16)
 
+	. = ALIGN(4);
+	.mips.machines.init : AT(ADDR(.mips.machines.init) - LOAD_OFFSET) {
+		__mips_machines_start = .;
+		*(.mips.machines.init)
+		__mips_machines_end = .;
+	}
+
 	/* .exit.text is discarded at runtime, not link time, to deal with
 	 * references from .rodata
 	 */
@@ -122,14 +142,22 @@ SECTIONS
 		EXIT_DATA
 	}
 
-	PERCPU(PAGE_SIZE)
+	PERCPU_SECTION(1 << CONFIG_MIPS_L1_CACHE_SHIFT)
+	/*
+	 * Align to 64K in attempt to eliminate holes before the
+	 * .bss..swapper_pg_dir section at the start of .bss.  This
+	 * also satisfies PAGE_SIZE alignment as the largest page size
+	 * allowed is 64K.
+	 */
 	. = ALIGN(0x10000);
 	__init_end = .;
 	/* freed after init ends here */
-	VMLINUX_SYMBOL(__bss_start) = .;
-	BSS(0x10000)
-	SBSS(0)
-	VMLINUX_SYMBOL(__bss_stop) = .;
+
+	/*
+	 * Force .bss to 64K alignment so that .bss..swapper_pg_dir
+	 * gets that alignment.  .sbss should be empty, so there will be
+	 * no holes after __init_end. */
+	BSS_SECTION(0, 0x10000, 0)
 
 	_end = . ;
 

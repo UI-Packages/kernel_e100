@@ -16,6 +16,7 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/sched.h>
+#include <linux/of.h>
 
 #include <linux/spi/spi.h>
 #include <linux/spi/eeprom.h>
@@ -126,7 +127,8 @@ at25_ee_read(
 }
 
 static ssize_t
-at25_bin_read(struct kobject *kobj, struct bin_attribute *bin_attr,
+at25_bin_read(struct file *filp, struct kobject *kobj,
+	      struct bin_attribute *bin_attr,
 	      char *buf, loff_t off, size_t count)
 {
 	struct device		*dev;
@@ -253,7 +255,8 @@ at25_ee_write(struct at25_data *at25, const char *buf, loff_t off,
 }
 
 static ssize_t
-at25_bin_write(struct kobject *kobj, struct bin_attribute *bin_attr,
+at25_bin_write(struct file *filp, struct kobject *kobj,
+	       struct bin_attribute *bin_attr,
 	       char *buf, loff_t off, size_t count)
 {
 	struct device		*dev;
@@ -291,6 +294,9 @@ static int at25_probe(struct spi_device *spi)
 {
 	struct at25_data	*at25 = NULL;
 	const struct spi_eeprom *chip;
+#ifdef CONFIG_OF
+	struct spi_eeprom of_chip;
+#endif
 	int			err;
 	int			sr;
 	int			addrlen;
@@ -298,9 +304,51 @@ static int at25_probe(struct spi_device *spi)
 	/* Chip description */
 	chip = spi->dev.platform_data;
 	if (!chip) {
-		dev_dbg(&spi->dev, "no chip description\n");
-		err = -ENODEV;
-		goto fail;
+#ifdef CONFIG_OF
+		if (spi->dev.of_node) {
+			u32 val;
+			memset(&of_chip, 0, sizeof(of_chip));
+			if (of_property_read_u32(spi->dev.of_node, "pagesize", &val)) {
+				dev_dbg(&spi->dev, "no \"pagesize\" property\n");
+				err = -ENODEV;
+				goto fail;
+			}
+			of_chip.page_size = val;
+			if (of_property_read_u32(spi->dev.of_node, "size", &val)) {
+				dev_dbg(&spi->dev, "no \"size\" property\n");
+				err = -ENODEV;
+				goto fail;
+			}
+			of_chip.byte_len = val;
+			if (of_property_read_u32(spi->dev.of_node, "address-width", &val)) {
+				dev_dbg(&spi->dev, "no \"address-width\" property\n");
+				err = -ENODEV;
+				goto fail;
+			}
+			switch (val) {
+			case 8:
+				of_chip.flags |= EE_ADDR1;
+				break;
+			case 16:
+				of_chip.flags |= EE_ADDR2;
+				break;
+			case 24:
+				of_chip.flags |= EE_ADDR3;
+				break;
+			default:
+				dev_dbg(&spi->dev, "bad \"address-width\" property: %u\n", val);
+				err = -EINVAL;
+				goto fail;
+			}
+			strlcpy(of_chip.name, spi->dev.of_node->name, sizeof(of_chip.name));
+			chip = &of_chip;
+		} else
+#endif
+		{
+			dev_dbg(&spi->dev, "no chip description\n");
+			err = -ENODEV;
+			goto fail;
+		}
 	}
 
 	/* For now we only support 8/16/24 bit addressing */
@@ -347,6 +395,7 @@ static int at25_probe(struct spi_device *spi)
 	 * that's sensitive for read and/or write, like ethernet addresses,
 	 * security codes, board-specific manufacturing calibrations, etc.
 	 */
+	sysfs_bin_attr_init(&at25->bin);
 	at25->bin.attr.name = "eeprom";
 	at25->bin.attr.mode = S_IRUSR;
 	at25->bin.read = at25_bin_read;
@@ -393,28 +442,25 @@ static int __devexit at25_remove(struct spi_device *spi)
 
 /*-------------------------------------------------------------------------*/
 
+static const struct spi_device_id at25_id[] = {
+	{"at25", 0},
+	{"m95256", 0},
+	{ }
+};
+MODULE_DEVICE_TABLE(spi, at25_id);
+
 static struct spi_driver at25_driver = {
 	.driver = {
 		.name		= "at25",
 		.owner		= THIS_MODULE,
 	},
+	.id_table	= at25_id,
 	.probe		= at25_probe,
 	.remove		= __devexit_p(at25_remove),
 };
 
-static int __init at25_init(void)
-{
-	return spi_register_driver(&at25_driver);
-}
-module_init(at25_init);
-
-static void __exit at25_exit(void)
-{
-	spi_unregister_driver(&at25_driver);
-}
-module_exit(at25_exit);
+module_spi_driver(at25_driver);
 
 MODULE_DESCRIPTION("Driver for most SPI EEPROMs");
 MODULE_AUTHOR("David Brownell");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("spi:at25");

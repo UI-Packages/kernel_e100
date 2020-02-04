@@ -33,7 +33,6 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <linux/smp_lock.h>
 #include <linux/statfs.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
@@ -47,8 +46,7 @@
 #include <linux/mman.h>
 #include <linux/backing-dev.h>
 #include <linux/splice.h>
-
-#include <asm/system.h>
+#include <linux/sched.h>
 
 #include <linux/union_fs.h>
 
@@ -190,7 +188,7 @@ struct filldir_node {
 	int whiteout;
 
 	/* Inline name, so we don't need to separately kmalloc small ones */
-	char iname[DNAME_INLINE_LEN_MIN];
+	char iname[DNAME_INLINE_LEN];
 };
 
 /* Directory hash table. */
@@ -416,7 +414,7 @@ extern int unionfs_file_release(struct inode *inode, struct file *file);
 extern int unionfs_flush(struct file *file, fl_owner_t id);
 extern long unionfs_ioctl(struct file *file, unsigned int cmd,
 			  unsigned long arg);
-extern int unionfs_fsync(struct file *file, struct dentry *dentry,
+extern int unionfs_fsync(struct file *file, loff_t start, loff_t end,
 			 int datasync);
 extern int unionfs_fasync(int fd, struct file *file, int flag);
 
@@ -538,7 +536,7 @@ static inline int is_robranch(const struct dentry *dentry)
 /*
  * EXTERNALS:
  */
-extern int check_branch(struct nameidata *nd);
+extern int check_branch(const struct path *path);
 extern int parse_branch_mode(const char *name, int *perms);
 
 /* locking helpers */
@@ -567,9 +565,19 @@ static inline struct dentry *lookup_lck_len(const char *name,
 					    struct dentry *base, int len)
 {
 	struct dentry *d;
+	struct nameidata lower_nd;
+	int err;
+
+	err = init_lower_nd(&lower_nd, LOOKUP_OPEN);
+	if (unlikely(err < 0)) {
+		d = ERR_PTR(err);
+		goto out;
+	}
 	mutex_lock(&base->d_inode->i_mutex);
-	d = lookup_one_len(name, base, len);
+	d = lookup_one_len_nd(name, base, len, &lower_nd);
+	release_lower_nd(&lower_nd, err);
 	mutex_unlock(&base->d_inode->i_mutex);
+out:
 	return d;
 }
 

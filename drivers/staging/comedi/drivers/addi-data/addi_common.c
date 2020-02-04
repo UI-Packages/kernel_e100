@@ -8,7 +8,7 @@ Copyright (C) 2004,2005  ADDI-DATA GmbH for the source code of this module.
 	D-77833 Ottersweier
 	Tel: +19(0)7223/9493-0
 	Fax: +49(0)7223/9493-92
-	http://www.addi-data-com
+	http://www.addi-data.com
 	info@addi-data.com
 
 This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.
@@ -17,7 +17,7 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 
 You should have received a copy of the GNU General Public License along with this program; if not, write to the Free Software Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 
-You shoud also find the complete GPL in the COPYING file accompanying this source code.
+You should also find the complete GPL in the COPYING file accompanying this source code.
 
 @endverbatim
 */
@@ -50,7 +50,6 @@ You shoud also find the complete GPL in the COPYING file accompanying this sourc
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
@@ -58,8 +57,9 @@ You shoud also find the complete GPL in the COPYING file accompanying this sourc
 #include <linux/timex.h>
 #include <linux/timer.h>
 #include <linux/pci.h>
+#include <linux/gfp.h>
+#include <linux/io.h>
 #include "../../comedidev.h"
-#include <asm/io.h>
 #if defined(CONFIG_APCI_1710) || defined(CONFIG_APCI_3200) || defined(CONFIG_APCI_3300)
 #include <asm/i387.h>
 #endif
@@ -68,12 +68,16 @@ You shoud also find the complete GPL in the COPYING file accompanying this sourc
 #include "addi_common.h"
 #include "addi_amcc_s5933.h"
 
+#ifndef ADDIDATA_DRIVER_NAME
+#define ADDIDATA_DRIVER_NAME	"addi_common"
+#endif
+
 /* Update-0.7.57->0.7.68MODULE_AUTHOR("ADDI-DATA GmbH <info@addi-data.com>"); */
 /* Update-0.7.57->0.7.68MODULE_DESCRIPTION("Comedi ADDI-DATA module"); */
 /* Update-0.7.57->0.7.68MODULE_LICENSE("GPL"); */
 
 #define devpriv ((struct addi_private *)dev->private)
-#define this_board ((struct addi_board *)dev->board_ptr)
+#define this_board ((const struct addi_board *)dev->board_ptr)
 
 #if defined(CONFIG_APCI_1710) || defined(CONFIG_APCI_3200) || defined(CONFIG_APCI_3300)
 /* BYTE b_SaveFPUReg [94]; */
@@ -141,78 +145,77 @@ void fpu_end(void)
 
 static DEFINE_PCI_DEVICE_TABLE(addi_apci_tbl) = {
 #ifdef CONFIG_APCI_3120
-	{APCI3120_BOARD_VENDOR_ID, 0x818D, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI3120_BOARD_VENDOR_ID, 0x818D)},
 #endif
 #ifdef CONFIG_APCI_1032
-	{APCI1032_BOARD_VENDOR_ID, 0x1003, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI1032_BOARD_VENDOR_ID, 0x1003)},
 #endif
 #ifdef CONFIG_APCI_1516
-	{APCI1516_BOARD_VENDOR_ID, 0x1001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI1516_BOARD_VENDOR_ID, 0x1001)},
 #endif
 #ifdef CONFIG_APCI_2016
-	{APCI2016_BOARD_VENDOR_ID, 0x1002, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI2016_BOARD_VENDOR_ID, 0x1002)},
 #endif
 #ifdef CONFIG_APCI_2032
-	{APCI2032_BOARD_VENDOR_ID, 0x1004, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI2032_BOARD_VENDOR_ID, 0x1004)},
 #endif
 #ifdef CONFIG_APCI_2200
-	{APCI2200_BOARD_VENDOR_ID, 0x1005, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI2200_BOARD_VENDOR_ID, 0x1005)},
 #endif
 #ifdef CONFIG_APCI_1564
-	{APCI1564_BOARD_VENDOR_ID, 0x1006, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI1564_BOARD_VENDOR_ID, 0x1006)},
 #endif
 #ifdef CONFIG_APCI_1500
-	{APCI1500_BOARD_VENDOR_ID, 0x80fc, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI1500_BOARD_VENDOR_ID, 0x80fc)},
 #endif
 #ifdef CONFIG_APCI_3001
-	{APCI3120_BOARD_VENDOR_ID, 0x828D, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI3120_BOARD_VENDOR_ID, 0x828D)},
 #endif
 #ifdef CONFIG_APCI_3501
-	{APCI3501_BOARD_VENDOR_ID, 0x3001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI3501_BOARD_VENDOR_ID, 0x3001)},
 #endif
 #ifdef CONFIG_APCI_035
-	{APCI035_BOARD_VENDOR_ID, 0x0300, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI035_BOARD_VENDOR_ID,  0x0300)},
 #endif
 #ifdef CONFIG_APCI_3200
-	{APCI3200_BOARD_VENDOR_ID, 0x3000, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI3200_BOARD_VENDOR_ID, 0x3000)},
 #endif
 #ifdef CONFIG_APCI_3300
-	{APCI3200_BOARD_VENDOR_ID, 0x3007, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI3200_BOARD_VENDOR_ID, 0x3007)},
 #endif
 #ifdef CONFIG_APCI_1710
-	{APCI1710_BOARD_VENDOR_ID, APCI1710_BOARD_DEVICE_ID,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(APCI1710_BOARD_VENDOR_ID, APCI1710_BOARD_DEVICE_ID)},
 #endif
 #ifdef CONFIG_APCI_16XX
-	{0x15B8, 0x1009, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x100A, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x1009)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x100A)},
 #endif
 #ifdef CONFIG_APCI_3XXX
-	{0x15B8, 0x3010, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x300F, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x300E, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3013, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3014, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3015, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3016, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3017, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3018, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3019, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x301A, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x301B, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x301C, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x301D, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x301E, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x301F, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3020, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3021, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3022, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3023, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x300B, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3002, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3003, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3004, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0x15B8, 0x3024, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3010)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x300F)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x300E)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3013)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3014)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3015)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3016)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3017)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3018)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3019)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x301A)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x301B)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x301C)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x301D)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x301E)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x301F)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3020)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3021)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3022)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3023)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x300B)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3002)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3003)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3004)},
+	{PCI_DEVICE(PCI_VENDOR_ID_ADDIDATA, 0x3024)},
 #endif
 	{0}
 };
@@ -293,8 +296,8 @@ static const struct addi_board boardtypes[] = {
 			0,
 			0,
 			0,
-			0,
-			0,
+			NULL,
+			NULL,
 			32,
 			0,
 			0,
@@ -1015,7 +1018,7 @@ static const struct addi_board boardtypes[] = {
 #endif
 #ifdef CONFIG_APCI_16XX
 	{"apci1648",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x1009,
 			128,
 			0,
@@ -1071,7 +1074,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI16XX_InsnBitsWriteTTLIO},
 
 	{"apci1696",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x100A,
 			128,
 			0,
@@ -1128,7 +1131,7 @@ static const struct addi_board boardtypes[] = {
 #endif
 #ifdef CONFIG_APCI_3XXX
 	{"apci3000-16",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3010,
 			256,
 			256,
@@ -1184,7 +1187,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3000-8",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x300F,
 			256,
 			256,
@@ -1240,7 +1243,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3000-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x300E,
 			256,
 			256,
@@ -1296,7 +1299,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3006-16",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3013,
 			256,
 			256,
@@ -1352,7 +1355,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3006-8",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3014,
 			256,
 			256,
@@ -1408,7 +1411,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3006-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3015,
 			256,
 			256,
@@ -1464,7 +1467,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3010-16",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3016,
 			256,
 			256,
@@ -1520,7 +1523,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3010-8",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3017,
 			256,
 			256,
@@ -1576,7 +1579,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3010-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3018,
 			256,
 			256,
@@ -1632,7 +1635,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3016-16",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3019,
 			256,
 			256,
@@ -1688,7 +1691,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3016-8",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x301A,
 			256,
 			256,
@@ -1744,7 +1747,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3016-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x301B,
 			256,
 			256,
@@ -1800,7 +1803,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3100-16-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x301C,
 			256,
 			256,
@@ -1856,7 +1859,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3100-8-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x301D,
 			256,
 			256,
@@ -1912,7 +1915,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3106-16-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x301E,
 			256,
 			256,
@@ -1968,7 +1971,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3106-8-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x301F,
 			256,
 			256,
@@ -2024,7 +2027,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3110-16-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3020,
 			256,
 			256,
@@ -2080,7 +2083,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3110-8-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3021,
 			256,
 			256,
@@ -2136,7 +2139,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3116-16-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3022,
 			256,
 			256,
@@ -2192,7 +2195,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3116-8-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3023,
 			256,
 			256,
@@ -2248,7 +2251,7 @@ static const struct addi_board boardtypes[] = {
 		i_APCI3XXX_InsnWriteTTLIO},
 
 	{"apci3003",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x300B,
 			256,
 			256,
@@ -2303,7 +2306,7 @@ static const struct addi_board boardtypes[] = {
 		NULL},
 
 	{"apci3002-16",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3002,
 			256,
 			256,
@@ -2358,7 +2361,7 @@ static const struct addi_board boardtypes[] = {
 		NULL},
 
 	{"apci3002-8",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3003,
 			256,
 			256,
@@ -2413,7 +2416,7 @@ static const struct addi_board boardtypes[] = {
 		NULL},
 
 	{"apci3002-4",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3004,
 			256,
 			256,
@@ -2468,7 +2471,7 @@ static const struct addi_board boardtypes[] = {
 		NULL},
 
 	{"apci3500",
-			0x15B8,
+			PCI_VENDOR_ID_ADDIDATA,
 			0x3024,
 			256,
 			256,
@@ -2527,8 +2530,8 @@ static const struct addi_board boardtypes[] = {
 
 #define n_boardtypes (sizeof(boardtypes)/sizeof(struct addi_board))
 
-struct comedi_driver driver_addi = {
-	.driver_name = "addi_common",
+static struct comedi_driver driver_addi = {
+	.driver_name = ADDIDATA_DRIVER_NAME,
 	.module = THIS_MODULE,
 	.attach = i_ADDI_Attach,
 	.detach = i_ADDI_Detach,
@@ -2537,7 +2540,43 @@ struct comedi_driver driver_addi = {
 	.offset = sizeof(struct addi_board),
 };
 
-COMEDI_PCI_INITCLEANUP(driver_addi, addi_apci_tbl);
+static int __devinit driver_addi_pci_probe(struct pci_dev *dev,
+					   const struct pci_device_id *ent)
+{
+	return comedi_pci_auto_config(dev, driver_addi.driver_name);
+}
+
+static void __devexit driver_addi_pci_remove(struct pci_dev *dev)
+{
+	comedi_pci_auto_unconfig(dev);
+}
+
+static struct pci_driver driver_addi_pci_driver = {
+	.id_table = addi_apci_tbl,
+	.probe = &driver_addi_pci_probe,
+	.remove = __devexit_p(&driver_addi_pci_remove)
+};
+
+static int __init driver_addi_init_module(void)
+{
+	int retval;
+
+	retval = comedi_driver_register(&driver_addi);
+	if (retval < 0)
+		return retval;
+
+	driver_addi_pci_driver.name = (char *)driver_addi.driver_name;
+	return pci_register_driver(&driver_addi_pci_driver);
+}
+
+static void __exit driver_addi_cleanup_module(void)
+{
+	pci_unregister_driver(&driver_addi_pci_driver);
+	comedi_driver_unregister(&driver_addi);
+}
+
+module_init(driver_addi_init_module);
+module_exit(driver_addi_cleanup_module);
 
 /*
 +----------------------------------------------------------------------------+
@@ -2570,10 +2609,6 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 	struct pcilst_struct *card = NULL;
 	unsigned char pci_bus, pci_slot, pci_func;
 	int i_Dma = 0;
-	static char c_Identifier[150];
-
-	sprintf(c_Identifier, "Addi-Data GmbH Comedi %s",
-		this_board->pc_DriverName);
 
 	ret = alloc_private(dev, sizeof(struct addi_private));
 	if (ret < 0)
@@ -2583,7 +2618,7 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 		v_pci_card_list_init(this_board->i_VendorId, 1);	/* 1 for displaying the list.. */
 		pci_list_builded = 1;
 	}
-	/* printk("comedi%d: addi_common: board=%s",dev->minor,this_board->pc_DriverName); */
+	/* printk("comedi%d: "ADDIDATA_DRIVER_NAME": board=%s",dev->minor,this_board->pc_DriverName); */
 
 	if ((this_board->i_Dma) && (it->options[2] == 0)) {
 		i_Dma = 1;
@@ -2630,26 +2665,38 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 		devpriv->i_IobaseAmcc = (int) iobase_a;	/* AMCC base address... */
 		devpriv->i_IobaseAddon = (int) iobase_addon;	/* ADD ON base address.... */
 		devpriv->i_IobaseReserved = (int) iobase_reserved;
-		devpriv->ps_BoardInfo = this_board;
 	} else {
 		dev->board_name = this_board->pc_DriverName;
 		dev->iobase = (unsigned long)io_addr[2];
 		devpriv->amcc = card;
 		devpriv->iobase = (int) io_addr[2];
-		devpriv->ps_BoardInfo = this_board;
 		devpriv->i_IobaseReserved = (int) io_addr[3];
 		printk("\nioremap begin");
-		devpriv->dw_AiBase =
-			(unsigned long) ioremap(io_addr[3],
-			this_board->i_IorangeBase3);
+		devpriv->dw_AiBase = ioremap(io_addr[3],
+					     this_board->i_IorangeBase3);
 		printk("\nioremap end");
 	}
+
+	/* Initialize parameters that can be overridden in EEPROM */
+	devpriv->s_EeParameters.i_NbrAiChannel = this_board->i_NbrAiChannel;
+	devpriv->s_EeParameters.i_NbrAoChannel = this_board->i_NbrAoChannel;
+	devpriv->s_EeParameters.i_AiMaxdata = this_board->i_AiMaxdata;
+	devpriv->s_EeParameters.i_AoMaxdata = this_board->i_AoMaxdata;
+	devpriv->s_EeParameters.i_NbrDiChannel = this_board->i_NbrDiChannel;
+	devpriv->s_EeParameters.i_NbrDoChannel = this_board->i_NbrDoChannel;
+	devpriv->s_EeParameters.i_DoMaxdata = this_board->i_DoMaxdata;
+	devpriv->s_EeParameters.i_Dma = this_board->i_Dma;
+	devpriv->s_EeParameters.i_Timer = this_board->i_Timer;
+	devpriv->s_EeParameters.ui_MinAcquisitiontimeNs =
+		this_board->ui_MinAcquisitiontimeNs;
+	devpriv->s_EeParameters.ui_MinDelaytimeNs =
+		this_board->ui_MinDelaytimeNs;
 
 	/* ## */
 
 	if (irq > 0) {
 		if (request_irq(irq, v_ADDI_Interrupt, IRQF_SHARED,
-				c_Identifier, dev) < 0) {
+				this_board->pc_DriverName, dev) < 0) {
 			printk(", unable to allocate IRQ %u, DISABLING IT",
 				irq);
 			irq = 0;	/* Can't use IRQ */
@@ -2675,10 +2722,10 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 			} else {
 				outl(0x83838383, devpriv->i_IobaseAmcc + 0x60);
 			}
-			/*  Enable the interrupt for the controler */
+			/*  Enable the interrupt for the controller */
 			dw_Dummy = inl(devpriv->i_IobaseAmcc + 0x38);
 			outl(dw_Dummy | 0x2000, devpriv->i_IobaseAmcc + 0x38);
-			printk("\nEnable the interrupt for the controler");
+			printk("\nEnable the interrupt for the controller");
 		}
 		printk("\nRead Eeprom");
 		i_EepromReadMainHeader(io_addr[0], this_board->pc_EepromChip,
@@ -2693,7 +2740,7 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 		devpriv->us_UseDma = ADDI_ENABLE;
 	}
 
-	if (this_board->i_Dma) {
+	if (devpriv->s_EeParameters.i_Dma) {
 		printk("\nDMA used");
 		if (devpriv->us_UseDma == ADDI_ENABLE) {
 			/*  alloc DMA buffers */
@@ -2752,21 +2799,22 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 
 		/*  Allocate and Initialise AI Subdevice Structures */
 		s = dev->subdevices + 0;
-		if ((this_board->i_NbrAiChannel)
+		if ((devpriv->s_EeParameters.i_NbrAiChannel)
 			|| (this_board->i_NbrAiChannelDiff)) {
 			dev->read_subdev = s;
 			s->type = COMEDI_SUBD_AI;
 			s->subdev_flags =
 				SDF_READABLE | SDF_COMMON | SDF_GROUND
 				| SDF_DIFF;
-			if (this_board->i_NbrAiChannel) {
-				s->n_chan = this_board->i_NbrAiChannel;
+			if (devpriv->s_EeParameters.i_NbrAiChannel) {
+				s->n_chan =
+					devpriv->s_EeParameters.i_NbrAiChannel;
 				devpriv->b_SingelDiff = 0;
 			} else {
 				s->n_chan = this_board->i_NbrAiChannelDiff;
 				devpriv->b_SingelDiff = 1;
 			}
-			s->maxdata = this_board->i_AiMaxdata;
+			s->maxdata = devpriv->s_EeParameters.i_AiMaxdata;
 			s->len_chanlist = this_board->i_AiChannelList;
 			s->range_table = this_board->pr_AiRangelist;
 
@@ -2790,12 +2838,13 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 
 		/*  Allocate and Initialise AO Subdevice Structures */
 		s = dev->subdevices + 1;
-		if (this_board->i_NbrAoChannel) {
+		if (devpriv->s_EeParameters.i_NbrAoChannel) {
 			s->type = COMEDI_SUBD_AO;
 			s->subdev_flags = SDF_WRITEABLE | SDF_GROUND | SDF_COMMON;
-			s->n_chan = this_board->i_NbrAoChannel;
-			s->maxdata = this_board->i_AoMaxdata;
-			s->len_chanlist = this_board->i_NbrAoChannel;
+			s->n_chan = devpriv->s_EeParameters.i_NbrAoChannel;
+			s->maxdata = devpriv->s_EeParameters.i_AoMaxdata;
+			s->len_chanlist =
+				devpriv->s_EeParameters.i_NbrAoChannel;
 			s->range_table = this_board->pr_AoRangelist;
 			s->insn_config =
 				this_board->i_hwdrv_InsnConfigAnalogOutput;
@@ -2806,12 +2855,13 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 		}
 		/*  Allocate and Initialise DI Subdevice Structures */
 		s = dev->subdevices + 2;
-		if (this_board->i_NbrDiChannel) {
+		if (devpriv->s_EeParameters.i_NbrDiChannel) {
 			s->type = COMEDI_SUBD_DI;
 			s->subdev_flags = SDF_READABLE | SDF_GROUND | SDF_COMMON;
-			s->n_chan = this_board->i_NbrDiChannel;
+			s->n_chan = devpriv->s_EeParameters.i_NbrDiChannel;
 			s->maxdata = 1;
-			s->len_chanlist = this_board->i_NbrDiChannel;
+			s->len_chanlist =
+				devpriv->s_EeParameters.i_NbrDiChannel;
 			s->range_table = &range_digital;
 			s->io_bits = 0;	/* all bits input */
 			s->insn_config =
@@ -2825,13 +2875,14 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 		}
 		/*  Allocate and Initialise DO Subdevice Structures */
 		s = dev->subdevices + 3;
-		if (this_board->i_NbrDoChannel) {
+		if (devpriv->s_EeParameters.i_NbrDoChannel) {
 			s->type = COMEDI_SUBD_DO;
 			s->subdev_flags =
 				SDF_READABLE | SDF_WRITEABLE | SDF_GROUND | SDF_COMMON;
-			s->n_chan = this_board->i_NbrDoChannel;
-			s->maxdata = this_board->i_DoMaxdata;
-			s->len_chanlist = this_board->i_NbrDoChannel;
+			s->n_chan = devpriv->s_EeParameters.i_NbrDoChannel;
+			s->maxdata = devpriv->s_EeParameters.i_DoMaxdata;
+			s->len_chanlist =
+				devpriv->s_EeParameters.i_NbrDoChannel;
 			s->range_table = &range_digital;
 			s->io_bits = 0xf;	/* all bits output */
 
@@ -2848,7 +2899,7 @@ static int i_ADDI_Attach(struct comedi_device *dev, struct comedi_devconfig *it)
 
 		/*  Allocate and Initialise Timer Subdevice Structures */
 		s = dev->subdevices + 4;
-		if (this_board->i_Timer) {
+		if (devpriv->s_EeParameters.i_Timer) {
 			s->type = COMEDI_SUBD_TIMER;
 			s->subdev_flags = SDF_WRITEABLE | SDF_GROUND | SDF_COMMON;
 			s->n_chan = 1;
@@ -2933,8 +2984,8 @@ static int i_ADDI_Detach(struct comedi_device *dev)
 			free_irq(dev->irq, dev);
 		}
 
-		if ((devpriv->ps_BoardInfo->pc_EepromChip == NULL)
-			|| (strcmp(devpriv->ps_BoardInfo->pc_EepromChip,
+		if ((this_board->pc_EepromChip == NULL)
+			|| (strcmp(this_board->pc_EepromChip,
 					ADDIDATA_9054) != 0)) {
 			if (devpriv->allocated) {
 				i_pci_card_free(devpriv->amcc);
@@ -2952,7 +3003,7 @@ static int i_ADDI_Detach(struct comedi_device *dev)
 					devpriv->ui_DmaBufferPages[1]);
 			}
 		} else {
-			iounmap((void *)devpriv->dw_AiBase);
+			iounmap(devpriv->dw_AiBase);
 
 			if (devpriv->allocated) {
 				i_pci_card_free(devpriv->amcc);

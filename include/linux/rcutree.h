@@ -30,34 +30,26 @@
 #ifndef __LINUX_RCUTREE_H
 #define __LINUX_RCUTREE_H
 
-struct notifier_block;
-
-extern void rcu_sched_qs(int cpu);
-extern void rcu_bh_qs(int cpu);
-extern int rcu_cpu_notify(struct notifier_block *self,
-			  unsigned long action, void *hcpu);
+extern void rcu_init(void);
+extern void rcu_note_context_switch(int cpu);
 extern int rcu_needs_cpu(int cpu);
-extern int rcu_expedited_torture_stats(char *page);
+extern void rcu_cpu_stall_reset(void);
+
+/*
+ * Note a virtualization-based context switch.  This is simply a
+ * wrapper around rcu_note_context_switch(), which allows TINY_RCU
+ * to save a few bytes.
+ */
+static inline void rcu_virt_note_context_switch(int cpu)
+{
+	rcu_note_context_switch(cpu);
+}
 
 #ifdef CONFIG_TREE_PREEMPT_RCU
 
-extern void __rcu_read_lock(void);
-extern void __rcu_read_unlock(void);
 extern void exit_rcu(void);
 
 #else /* #ifdef CONFIG_TREE_PREEMPT_RCU */
-
-static inline void __rcu_read_lock(void)
-{
-	preempt_disable();
-}
-
-static inline void __rcu_read_unlock(void)
-{
-	preempt_enable();
-}
-
-#define __synchronize_sched() synchronize_rcu()
 
 static inline void exit_rcu(void)
 {
@@ -65,47 +57,69 @@ static inline void exit_rcu(void)
 
 #endif /* #else #ifdef CONFIG_TREE_PREEMPT_RCU */
 
-static inline void __rcu_read_lock_bh(void)
-{
-	local_bh_disable();
-}
-static inline void __rcu_read_unlock_bh(void)
-{
-	local_bh_enable();
-}
-
-extern void call_rcu_sched(struct rcu_head *head,
-			   void (*func)(struct rcu_head *rcu));
+#ifndef CONFIG_PREEMPT_RT_FULL
+extern void synchronize_rcu_bh(void);
+#else
+# define synchronize_rcu_bh	synchronize_rcu
+#endif
+extern void synchronize_sched_expedited(void);
 extern void synchronize_rcu_expedited(void);
 
+void kfree_call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *rcu));
+
+/**
+ * synchronize_rcu_bh_expedited - Brute-force RCU-bh grace period
+ *
+ * Wait for an RCU-bh grace period to elapse, but use a "big hammer"
+ * approach to force the grace period to end quickly.  This consumes
+ * significant time on all CPUs and is unfriendly to real-time workloads,
+ * so is thus not recommended for any sort of common-case code.  In fact,
+ * if you are using synchronize_rcu_bh_expedited() in a loop, please
+ * restructure your code to batch your updates, and then use a single
+ * synchronize_rcu_bh() instead.
+ *
+ * Note that it is illegal to call this function while holding any lock
+ * that is acquired by a CPU-hotplug notifier.  And yes, it is also illegal
+ * to call this function from a CPU-hotplug notifier.  Failing to observe
+ * these restriction will result in deadlock.
+ */
 static inline void synchronize_rcu_bh_expedited(void)
 {
 	synchronize_sched_expedited();
 }
 
-extern void __rcu_init(void);
-extern void rcu_check_callbacks(int cpu, int user);
+extern void rcu_barrier(void);
+#ifdef CONFIG_PREEMPT_RT_FULL
+# define rcu_barrier_bh		rcu_barrier
+#else
+extern void rcu_barrier_bh(void);
+#endif
+extern void rcu_barrier_sched(void);
 
+extern unsigned long rcutorture_testseq;
+extern unsigned long rcutorture_vernum;
 extern long rcu_batches_completed(void);
-extern long rcu_batches_completed_bh(void);
 extern long rcu_batches_completed_sched(void);
 
-#ifdef CONFIG_NO_HZ
-void rcu_enter_nohz(void);
-void rcu_exit_nohz(void);
-#else /* CONFIG_NO_HZ */
-static inline void rcu_enter_nohz(void)
-{
-}
-static inline void rcu_exit_nohz(void)
-{
-}
-#endif /* CONFIG_NO_HZ */
+extern void rcu_force_quiescent_state(void);
+extern void rcu_sched_force_quiescent_state(void);
+
+#ifndef CONFIG_PREEMPT_RT_FULL
+extern void rcu_bh_force_quiescent_state(void);
+extern long rcu_batches_completed_bh(void);
+#else
+# define rcu_bh_force_quiescent_state	rcu_force_quiescent_state
+# define rcu_batches_completed_bh	rcu_batches_completed
+#endif
 
 /* A context switch is a grace period for RCU-sched and RCU-bh. */
 static inline int rcu_blocking_is_gp(void)
 {
+	might_sleep();  /* Check for RCU read-side critical section. */
 	return num_online_cpus() == 1;
 }
+
+extern void rcu_scheduler_starting(void);
+extern int rcu_scheduler_active __read_mostly;
 
 #endif /* __LINUX_RCUTREE_H */

@@ -14,7 +14,7 @@
 #include <linux/moduleparam.h>
 #include <linux/workqueue.h>
 #include <linux/time.h>
-#include <asm/mutex.h>
+#include <linux/mutex.h>
 
 #include "oprof.h"
 #include "event_buffer.h"
@@ -26,7 +26,6 @@ struct oprofile_operations oprofile_ops;
 
 unsigned long oprofile_started;
 unsigned long oprofile_backtrace_depth;
-static unsigned int trace_thru_syscall;
 static unsigned long is_setup;
 static DEFINE_MUTEX(start_mutex);
 
@@ -226,75 +225,53 @@ post_sync:
 	mutex_unlock(&start_mutex);
 }
 
-int oprofile_set_backtrace(unsigned long val)
+int oprofile_set_ulong(unsigned long *addr, unsigned long val)
 {
-	int err = 0;
+	int err = -EBUSY;
 
 	mutex_lock(&start_mutex);
-
-	if (oprofile_started) {
-		err = -EBUSY;
-		goto out;
+	if (!oprofile_started) {
+		*addr = val;
+		err = 0;
 	}
-
-	if (!oprofile_ops.backtrace) {
-		err = -EINVAL;
-		goto out;
-	}
-
-	oprofile_backtrace_depth = val;
-
-out:
 	mutex_unlock(&start_mutex);
+
 	return err;
 }
 
-int oprofile_set_trace_thru_syscall(unsigned int val)
-{
-	int err = 0;
-
-	mutex_lock(&start_mutex);
-
-	if (oprofile_started) {
-		err = -EBUSY;
-	goto out;
-	}
-
-	trace_thru_syscall = val;
-
-out:
-	mutex_unlock(&start_mutex);
-	return err;
-}
-
-int oprofile_get_trace_thru_syscall(void)
-{
-	return trace_thru_syscall;
-}
+static int timer_mode;
 
 static int __init oprofile_init(void)
 {
 	int err;
 
+	/* always init architecture to setup backtrace support */
+	timer_mode = 0;
 	err = oprofile_arch_init(&oprofile_ops);
-
-	if (err < 0 || timer) {
-		printk(KERN_INFO "oprofile: using timer interrupt.\n");
-		oprofile_timer_init(&oprofile_ops);
+	if (!err) {
+		if (!timer && !oprofilefs_register())
+			return 0;
+		oprofile_arch_exit();
 	}
 
-	err = oprofilefs_register();
-	if (err)
-		oprofile_arch_exit();
+	/* setup timer mode: */
+	timer_mode = 1;
+	/* no nmi timer mode if oprofile.timer is set */
+	if (timer || op_nmi_timer_init(&oprofile_ops)) {
+		err = oprofile_timer_init(&oprofile_ops);
+		if (err)
+			return err;
+	}
 
-	return err;
+	return oprofilefs_register();
 }
 
 
 static void __exit oprofile_exit(void)
 {
 	oprofilefs_unregister();
-	oprofile_arch_exit();
+	if (!timer_mode)
+		oprofile_arch_exit();
 }
 
 

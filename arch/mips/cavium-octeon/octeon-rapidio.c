@@ -1,12 +1,11 @@
 /**
  * Driver for the Octeon Serial Rapid IO interfaces introduced in CN63XX.
  *
- * LICENSE:
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2009 Cavium Networks
+ * Copyright (C) 2009-2012 Cavium, Inc.
  */
 
 #include <linux/rio.h>
@@ -14,8 +13,9 @@
 #include <linux/interrupt.h>
 #include <linux/netdevice.h>
 #include <linux/sched.h>
+#include <linux/module.h>
 
-#include <asm/octeon/cvmx.h>
+#include <asm/octeon/octeon.h>
 #include <asm/octeon/cvmx-srio.h>
 #include <asm/octeon/cvmx-sriox-defs.h>
 #include <asm/octeon/cvmx-sli-defs.h>
@@ -24,9 +24,11 @@
 #include <asm/octeon/cvmx-dma-engine.h>
 #include <asm/octeon/cvmx-fpa.h>
 #include <asm/octeon/cvmx-config.h>
+#include <asm/octeon/cvmx-helper.h>
+#include <asm/octeon/cvmx-qlm.h>
 
 #define RIO_PRINTK(mport, fmt, ...) \
-	printk(KERN_INFO "SRIO%d: " fmt, (mport)->id, ##__VA_ARGS__)
+	pr_info("SRIO%d: " fmt, (mport)->id, ##__VA_ARGS__)
 #define DEBUG_MBOX(mport, dir, mbox, fmt, ...) \
 	RIO_PRINTK(mport, "%s MBOX %d " fmt, dir, mbox, ##__VA_ARGS__)
 #define DEBUG_PACKET(mport, dir, fmt, ...) \
@@ -43,50 +45,21 @@ struct octeon_rio_port {
 	spinlock_t lock;
 };
 
-/**
- * Private function for locking. SRIO MAINT registers require
- * multiple transactions to read/write. This means that a lock
- * is needed as each transaction is not atomic.
- *
- * @param mport  Port to lock
- *
- * @return IRQ flags. Must be passed to unlock.
- */
-static unsigned long octeon_rio_lock(struct rio_mport *mport)
+static struct octeon_rio_port * mport2oct(struct rio_mport *mport)
 {
-	struct octeon_rio_port *my_port = container_of(mport,
-		struct octeon_rio_port, mport);
-	unsigned long flags;
-
-	spin_lock_irqsave(&my_port->lock, flags);
-	return flags;
-}
-
-/**
- * Private function for unlocking. SRIO MAINT registers require
- * multiple transactions to read/write. This means that a lock
- * is needed as each transaction is not atomic.
- *
- * @param mport  Port to lock
- * @param flags  IRQ Flags from the lock call
- */
-static void octeon_rio_unlock(struct rio_mport *mport, unsigned long flags)
-{
-	struct octeon_rio_port *my_port = container_of(mport,
-		struct octeon_rio_port, mport);
-	spin_unlock_irqrestore(&my_port->lock, flags);
+	return container_of(mport, struct octeon_rio_port, mport);
 }
 
 /**
  * Local config read
  *
- * @param mport    RapidIO Master port info
- * @param mport_id Always the same as mport->id
- * @param offset   Config space register
- * @param len      Length of the read (1,2, or 4 bytes)
- * @param data     Resulting data
+ * @mport:    RapidIO Master port info
+ * @mport_id: Always the same as mport->id
+ * @offset:   Config space register
+ * @len:      Length of the read (1,2, or 4 bytes)
+ * @data:     Resulting data
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
 static int octeon_rio_lcread(struct rio_mport *mport, int mport_id, u32 offset,
 			     int len, u32 *data)
@@ -95,33 +68,36 @@ static int octeon_rio_lcread(struct rio_mport *mport, int mport_id, u32 offset,
 	unsigned long flags;
 
 	if (len != 4) {
-		/* The kernel's RapidIO system defines 8 and 16 bit accesses,
-			but the RapidIO spec says these are illegal */
-		RIO_PRINTK(mport, "ERROR: local config read with illegal"
-			     " length (offset=0x%x, len=%d)\n", offset, len);
+		/*
+		 * The kernel's RapidIO system defines 8 and 16 bit
+		 * accesses, but the RapidIO spec says these are
+		 * illegal.
+		 */
+		RIO_PRINTK(mport,
+			   "ERROR: local config read with illegal length (offset=0x%x, len=%d)\n",
+			   offset, len);
 		return -EINVAL;
 	}
-
-	flags = octeon_rio_lock(mport);
+	spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 	if (cvmx_srio_config_read32(mport_id, OCTEON_RIO_ID, -1, 0, 0,
 		offset, data))
 		return_code = -EIO;
 	else
 		return_code = 0;
-	octeon_rio_unlock(mport, flags);
+	spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 	return return_code;
 }
 
 /**
  * Local config write
  *
- * @param mport    RapidIO Master port info
- * @param mport_id Always the same as mport->id
- * @param offset   Config space register
- * @param len      Length of the write (1,2, or 4 bytes)
- * @param data     Data to write
+ * @mport:    RapidIO Master port info
+ * @mport_id: Always the same as mport->id
+ * @offset:   Config space register
+ * @len:      Length of the write (1,2, or 4 bytes)
+ * @data:     Data to write
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
 static int octeon_rio_lcwrite(struct rio_mport *mport, int mport_id, u32 offset,
 			      int len, u32 data)
@@ -130,35 +106,39 @@ static int octeon_rio_lcwrite(struct rio_mport *mport, int mport_id, u32 offset,
 	unsigned long flags;
 
 	if (len != 4) {
-		/* The kernel's RapidIO system defines 8 and 16 bit accesses,
-			but the RapidIO spec says these are illegal */
-		RIO_PRINTK(mport, "ERROR: local config write with illegal"
-			     " length (offset=0x%x, len=%d)\n", offset, len);
+		/*
+		 * The kernel's RapidIO system defines 8 and 16 bit
+		 * accesses, but the RapidIO spec says these are
+		 * illegal.
+		 */
+		RIO_PRINTK(mport,
+			   "ERROR: local config write with illegal length (offset=0x%x, len=%d)\n",
+			   offset, len);
 		return -EINVAL;
 	}
 
-	flags = octeon_rio_lock(mport);
+	spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 	if (cvmx_srio_config_write32(mport_id, OCTEON_RIO_ID, -1, 0, 0, offset,
 		data))
 		return_code = -EIO;
 	else
 		return_code = 0;
-	octeon_rio_unlock(mport, flags);
+	spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 	return return_code;
 }
 
 /**
  * Remote config read
  *
- * @param mport    RapidIO Master port info
- * @param mport_id Always the same as mport->id
- * @param destid   Remote destination ID
- * @param hopcount Number of hops to the device
- * @param offset   Config space register
- * @param len      Length of the read (1,2, or 4 bytes)
- * @param data     Resulting data
+ * @mport:    RapidIO Master port info
+ * @mport_id: Always the same as mport->id
+ * @destid:   Remote destination ID
+ * @hopcount: Number of hops to the device
+ * @offset:   Config space register
+ * @len:      Length of the read (1,2, or 4 bytes)
+ * @data:     Resulting data
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
 static int octeon_rio_cread(struct rio_mport *mport, int mport_id, u16 destid,
 			    u8 hopcount, u32 offset, int len, u32 *data)
@@ -167,38 +147,39 @@ static int octeon_rio_cread(struct rio_mport *mport, int mport_id, u16 destid,
 	unsigned long flags;
 
 	if (len != 4) {
-		/* The kernel's RapidIO system defines 8 and 16 bit accesses,
-			but the RapidIO spec says these are illegal */
+		/*
+		 * The kernel's RapidIO system defines 8 and 16 bit
+		 * accesses, but the RapidIO spec says these are
+		 * illegal.
+		 */
 		RIO_PRINTK(mport,
-			     "ERROR: config read with illegal length"
-			     " (destid=0x%x, hopcount=%d, "
-			     "offset=0x%x, len=%d)\n",
-			     0xffff & destid, 0xff & hopcount, offset, len);
+			   "ERROR: config read with illegal length (destid=0x%x, hopcount=%d, offset=0x%x, len=%d)\n",
+			   0xffff & destid, 0xff & hopcount, offset, len);
 		return -EINVAL;
 	}
 
-	flags = octeon_rio_lock(mport);
+	spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 	if (cvmx_srio_config_read32(mport_id, OCTEON_RIO_ID, destid,
 		mport->sys_size, hopcount, offset, data))
 		return_code = -EIO;
 	else
 		return_code = 0;
-	octeon_rio_unlock(mport, flags);
+	spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 	return return_code;
 }
 
 /**
  * Remote config write
  *
- * @param mport    RapidIO Master port info
- * @param mport_id Always the same as mport->id
- * @param destid   Remote destination ID
- * @param hopcount Number of hops to the device
- * @param offset   Config space register
- * @param len      Length of the write (1,2, or 4 bytes)
- * @param data     Write data
+ * @mport:    RapidIO Master port info
+ * @mport_id: Always the same as mport->id
+ * @destid:   Remote destination ID
+ * @hopcount: Number of hops to the device
+ * @offset:   Config space register
+ * @len:      Length of the write (1,2, or 4 bytes)
+ * @data:     Write data
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
 static int octeon_rio_cwrite(struct rio_mport *mport, int mport_id, u16 destid,
 			     u8 hopcount, u32 offset, int len, u32 data)
@@ -207,33 +188,36 @@ static int octeon_rio_cwrite(struct rio_mport *mport, int mport_id, u16 destid,
 	unsigned long flags;
 
 	if (len != 4) {
-		/* The kernel's RapidIO system defines 8 and 16 bit accesses,
-			but the RapidIO spec says these are illegal */
-		RIO_PRINTK(mport, "ERROR: config write with illegal length("
-			     "destid=0x%x, hopcount=%d, offset=0x%x, len=%d)\n",
-			     0xffff & destid, 0xff & hopcount, offset, len);
+		/*
+		 * The kernel's RapidIO system defines 8 and 16 bit
+		 * accesses, but the RapidIO spec says these are
+		 * illegal.
+		 */
+		RIO_PRINTK(mport,
+			   "ERROR: config write with illegal length(destid=0x%x, hopcount=%d, offset=0x%x, len=%d)\n",
+			   0xffff & destid, 0xff & hopcount, offset, len);
 		return -EINVAL;
 	}
 
-	flags = octeon_rio_lock(mport);
+	spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 	if (cvmx_srio_config_write32(mport_id, OCTEON_RIO_ID, destid,
 		mport->sys_size, hopcount, offset, data))
 		return_code = -EIO;
 	else
 		return_code = 0;
-	octeon_rio_unlock(mport, flags);
+	spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 	return return_code;
 }
 
 /**
  * Remote doorbell send
  *
- * @param mport    RapidIO Master port info
- * @param mport_id Always the same as mport->id
- * @param destid   Remote destination ID
- * @param data     Data for doorbell
+ * @mport:    RapidIO Master port info
+ * @mport_id: Always the same as mport->id
+ * @destid:   Remote destination ID
+ * @data:     Data for doorbell
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
 static int octeon_rio_dsend(struct rio_mport *mport, int mport_id, u16 destid,
 			    u16 data)
@@ -241,10 +225,10 @@ static int octeon_rio_dsend(struct rio_mport *mport, int mport_id, u16 destid,
 	int return_code;
 	unsigned long flags;
 
-	flags = octeon_rio_lock(mport);
+	spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 	return_code = cvmx_srio_send_doorbell(mport_id, OCTEON_RIO_ID, destid,
 		mport->sys_size, OCTEON_RIO_DOORBELL_PRIORITY, data);
-	octeon_rio_unlock(mport, flags);
+	spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 	return return_code;
 }
 
@@ -252,72 +236,72 @@ static int octeon_rio_dsend(struct rio_mport *mport, int mport_id, u16 destid,
  * Map a remote SRIO device's memory resource into the local
  * physical space.
  *
- * @param mport  RapidIO Master port info
- * @param rdev   Remote RapidIO device
- * @param offset Offset into the remote device's memory space
- * @param length Length of window to map
+ * @mport:  RapidIO Master port info
+ * @rdev:   Remote RapidIO device
+ * @offset: Offset into the remote device's memory space
+ * @length: Length of window to map
  *
- * @return Local physical address to use for resource access, or 0 on
+ * Returns Local physical address to use for resource access, or 0 on
  *         failure.
  */
 static phys_t octeon_rio_mem_map(struct rio_mport *mport, struct rio_dev *rdev,
-	u64 offset, u64 length)
+				 u64 offset, u64 length)
 {
 	int priority = 0;
 	phys_t return_code;
 	unsigned long flags;
 
-	flags = octeon_rio_lock(mport);
+	spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 	return_code = cvmx_srio_physical_map(mport->id, CVMX_SRIO_WRITE_MODE_AUTO,
 		priority, CVMX_SRIO_READ_MODE_NORMAL, priority,
 		OCTEON_RIO_ID, rdev->destid, mport->sys_size, offset, length);
-	octeon_rio_unlock(mport, flags);
+	spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 	return return_code;
 }
 
 /**
  * Unmap a remote resource mapped using octeon_rio_mem_map()
  *
- * @param mport  RapidIO Master port info
- * @param rdev   Remote RapidIO device
- * @param offset Offset into the remote device's memory space
- * @param length Length of window to map
- * @param physical_map
+ * @mport:  RapidIO Master port info
+ * @rdev:   Remote RapidIO device
+ * @offset: Offset into the remote device's memory space
+ * @length: Length of window to map
+ * @physical_map:
  *               Physical address the resource was mapped at
  */
 static void octeon_rio_mem_unmap(struct rio_mport *mport, struct rio_dev *rdev,
-	u64 offset, u64 length, phys_t physical_map)
+				 u64 offset, u64 length, phys_t physical_map)
 {
 	unsigned long flags;
 
-	flags = octeon_rio_lock(mport);
+	spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 	cvmx_srio_physical_unmap(physical_map, length);
-	octeon_rio_unlock(mport, flags);
+	spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 }
 
 /**
  * DMA to/from a SRIO device using Octeon's internal DMA engines
  *
- * @param rdev       Device to DMA to/from
- * @param local_addr Local memory physical address to DMA to
- * @param remote_addr
+ * @rdev:       Device to DMA to/from
+ * @local_addr: Local memory physical address to DMA to
+ * @remote_addr:
  *                   SRIO device memory address
- * @param size       Size ofthe DMA in bytes
- * @param is_outbound
+ * @size:       Size ofthe DMA in bytes
+ * @is_outbound:
  *                   Non zero of the DMA is from Octoen to the device
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
-int octeon_rio_dma_mem(struct rio_dev *rdev, uint64_t local_addr,
-	uint64_t remote_addr, int size, int is_outbound)
+int octeon_rio_dma_mem(struct rio_dev *rdev, u64 local_addr,
+		       u64 remote_addr, int size, int is_outbound)
 {
 	int result;
-	volatile uint8_t dma_busy = 1;
+	volatile u8 dma_busy = 1;
 	cvmx_dma_engine_header_t header;
 	phys_t memmap;
 	int subdid;
-	cvmx_sli_mem_access_subidx_t sli_mem_access;
-	uint64_t sli_address;
+	union cvmx_sli_mem_access_subidx sli_mem_access;
+	u64 sli_address;
 
 	/* Setup the SLI memmory mappings to access the SRIO device */
 	memmap = octeon_rio_mem_map(rdev->net->hport, rdev, remote_addr, size);
@@ -327,7 +311,7 @@ int octeon_rio_dma_mem(struct rio_dev *rdev, uint64_t local_addr,
 	/* Extract the SLI address from the core physical address */
 	subdid = (((memmap >> 40) & 7) << 2) | ((memmap >> 34) & 3);
 	sli_mem_access.u64 = cvmx_read_csr(CVMX_PEXP_SLI_MEM_ACCESS_SUBIDX(subdid));
-	sli_address = (uint64_t)sli_mem_access.s.ba << 34;
+	sli_address = (u64)sli_mem_access.cn63xx.ba << 34;
 	sli_address += memmap & 0x3ffffffffull;
 
 	/* Create the DMA header */
@@ -339,7 +323,8 @@ int octeon_rio_dma_mem(struct rio_dev *rdev, uint64_t local_addr,
 	header.s.addr = virt_to_phys(&dma_busy);
 
 	/* Do the DMA */
-	result = cvmx_dma_engine_transfer(0, header, local_addr, sli_address, size);
+	result = cvmx_dma_engine_transfer(0, header, local_addr,
+					  sli_address, size);
 	if (result == 0) {
 		/* Wait for the DMA to complete */
 		while (dma_busy)
@@ -355,13 +340,13 @@ int octeon_rio_dma_mem(struct rio_dev *rdev, uint64_t local_addr,
 /**
  * Add message to outbound mailbox
  *
- * @param mport  RapidIO Master port info
- * @param rdev   RIO device the message is be sent to
- * @param mbox   The outbound mailbox queue
- * @param buffer Pointer to the message buffer
- * @param length Length of the message buffer
+ * @mport:  RapidIO Master port info
+ * @rdev:   RIO device the message is be sent to
+ * @mbox:   The outbound mailbox queue
+ * @buffer: Pointer to the message buffer
+ * @length: Length of the message buffer
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
 int rio_hw_add_outb_message(struct rio_mport *mport, struct rio_dev *rdev,
 			    int mbox, void *buffer, size_t length)
@@ -369,60 +354,67 @@ int rio_hw_add_outb_message(struct rio_mport *mport, struct rio_dev *rdev,
 	DEBUG_MBOX(mport, "OUT", mbox,
 		   "send message(rdev=%p, buffer=%p, length=%lu)\n", rdev,
 		   buffer, length);
-	/* The current implementation of the rionet network driver assumes
-		that outbound buffers must be freed in the callback routine
-		for message complete. This means we can't use the PKO free
-		to FPA pool function. We also need to add an Octeon specific
-		SRIO header, so we might need a gather list */
+	/*
+	 * The current implementation of the rionet network driver
+	 * assumes that outbound buffers must be freed in the callback
+	 * routine for message complete. This means we can't use the
+	 * PKO free to FPA pool function. We also need to add an
+	 * Octeon specific SRIO header, so we might need a gather
+	 * list.
+	 */
 	return -EINVAL;
 }
 
 /**
  * Add empty buffer to inbound mailbox
  *
- * @param mport  RapidIO Master port info
- * @param mbox   The inbound mailbox number
- * @param buffer Pointer to the message buffer
+ * @mport:  RapidIO Master port info
+ * @mbox:   The inbound mailbox number
+ * @buffer: Pointer to the message buffer
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
 int rio_hw_add_inb_buffer(struct rio_mport *mport, int mbox, void *buffer)
 {
 	DEBUG_MBOX(mport, "IN", mbox, "add buffer %p\n", buffer);
-	/* The current implementation of the rionet network driver assumes
-		that the buffers are used in FIFO order and will always be
-		returned in that same order. This doesn't play well with
-		Octeon's FPA pools */
+	/*
+	 * The current implementation of the rionet network driver
+	 * assumes that the buffers are used in FIFO order and will
+	 * always be returned in that same order. This doesn't play
+	 * well with Octeon's FPA pools.
+	 */
 	return -EINVAL;
 }
 
 /**
  * Get the next pending inbound message from a mailbox
  *
- * @param mport  RapidIO Master port info
- * @param mbox   The inbound mailbox number
+ * @mport:  RapidIO Master port info
+ * @mbox:   The inbound mailbox number
  *
- * @return Mailbox message pointer, or NULL.
+ * Returns Mailbox message pointer, or NULL.
  */
 void *rio_hw_get_inb_message(struct rio_mport *mport, int mbox)
 {
 	DEBUG_MBOX(mport, "IN", mbox, "receive message\n");
-	/* The current implementation of the rionet network driver assumes
-		that the buffers are used in FIFO order and will always be
-		returned in that same order. This doesn't play well with
-		Octeon's FPA pools */
+	/*
+	 * The current implementation of the rionet network driver
+	 * assumes that the buffers are used in FIFO order and will
+	 * always be returned in that same order. This doesn't play
+	 * well with Octeon's FPA pools.
+	 */
 	return NULL;
 }
 
 /**
  * Open an inbound mailbox
  *
- * @param mport   RapidIO Master port info
- * @param dev_id  Device specific pointer to pass on event
- * @param mbox    The inbound mailbox number
- * @param entries Number of entries allowed in the incomming queue
+ * @mport:   RapidIO Master port info
+ * @dev_id:  Device specific pointer to pass on event
+ * @mbox:    The inbound mailbox number
+ * @entries: Number of entries allowed in the incomming queue
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
 int rio_open_inb_mbox(struct rio_mport *mport, void *dev_id, int mbox,
 		      int entries)
@@ -435,8 +427,8 @@ int rio_open_inb_mbox(struct rio_mport *mport, void *dev_id, int mbox,
 /**
  * Close an inbound mailbox
  *
- * @param mport  RapidIO Master port info
- * @param mbox   The inbound mailbox number
+ * @mport:  RapidIO Master port info
+ * @mbox:   The inbound mailbox number
  */
 void rio_close_inb_mbox(struct rio_mport *mport, int mbox)
 {
@@ -446,12 +438,12 @@ void rio_close_inb_mbox(struct rio_mport *mport, int mbox)
 /**
  * Open an outbound mailbox
  *
- * @param mport   RapidIO Master port info
- * @param dev_id  Device specific pointer to pass on event
- * @param mbox    The outbound mailbox number
- * @param entries Number of entries allowed in the outgoing queue
+ * @mport:   RapidIO Master port info
+ * @dev_id:  Device specific pointer to pass on event
+ * @mbox:    The outbound mailbox number
+ * @entries: Number of entries allowed in the outgoing queue
  *
- * @return Zero on success, negative on failure
+ * Returns Zero on success, negative on failure
  */
 int rio_open_outb_mbox(struct rio_mport *mport, void *dev_id, int mbox,
 		       int entries)
@@ -464,8 +456,8 @@ int rio_open_outb_mbox(struct rio_mport *mport, void *dev_id, int mbox,
 /**
  * Close an outbound mailbox
  *
- * @param mport  RapidIO Master port info
- * @param mbox   The outbound mailbox number
+ * @mport:  RapidIO Master port info
+ * @mbox:   The outbound mailbox number
  */
 void rio_close_outb_mbox(struct rio_mport *mport, int mbox)
 {
@@ -475,30 +467,30 @@ void rio_close_outb_mbox(struct rio_mport *mport, int mbox)
 /**
  * Function to process incomming doorbells
  *
- * @param mport  SRIO port to check
+ * @mport:  SRIO port to check
  */
 static void octeon_rio_rx_doorbell(struct rio_mport *mport)
 {
-	cvmx_srio_doorbell_status_t status;
+	enum cvmx_srio_doorbell_status status;
 	int destid_index;
-	uint32_t sequence_num;
+	u32 sequence_num;
 	int srcid;
 	int priority;
 	int is16bit;
-	uint16_t data;
+	u16 data;
 	struct rio_dbell *dbell;
 	unsigned long flags;
 
 	while (1) {
-		flags = octeon_rio_lock(mport);
+		spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 		status = cvmx_srio_receive_doorbell(mport->id, &destid_index,
 			&sequence_num, &srcid, &priority, &is16bit, &data);
-		octeon_rio_unlock(mport, flags);
+		spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 		if (status != CVMX_SRIO_DOORBELL_DONE)
 			break;
 		list_for_each_entry(dbell, &mport->dbells, node) {
-			if ((dbell->res->start >= data) &&
-			    (dbell->res->end <= data))
+			if ((dbell->res->start <= data) &&
+			    (dbell->res->end >= data))
 				dbell->dinb(mport, dbell->dev_id, srcid, data,
 					data);
 		}
@@ -508,7 +500,7 @@ static void octeon_rio_rx_doorbell(struct rio_mport *mport)
 /**
  * Function to handle receiving a packet through the soft fifo
  *
- * @param mport  SRIO port to check
+ * @mport:  SRIO port to check
  */
 static void octeon_rio_rx_soft_fifo(struct rio_mport *mport)
 {
@@ -522,9 +514,9 @@ static void octeon_rio_rx_soft_fifo(struct rio_mport *mport)
 		return;
 	}
 
-	flags = octeon_rio_lock(mport);
+	spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 	length = cvmx_srio_receive_spf(mport->id, skb->data, length);
-	octeon_rio_unlock(mport, flags);
+	spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 
 	if (length > 0) {
 		int ftype;
@@ -532,13 +524,17 @@ static void octeon_rio_rx_soft_fifo(struct rio_mport *mport)
 		int tt;
 		/* Update the SKB to match the length of data in it */
 		__skb_put(skb, length);
-		/* Figure out if this packet is a port write. The contents
-		    of the skb is the raw SRIO packet without the first ackID
-		    and CRF byte */
+		/*
+		 * Figure out if this packet is a port write. The
+		 * contents of the skb is the raw SRIO packet without
+		 * the first ackID and CRF byte.
+		 */
 		tt = (skb->data[0]>>4) & 3; /* 0=8bit, 1=16bit IDs */
 		ftype = skb->data[0] & 0xf; /* Port write is type 8 */
-		/* The transaction type is after the IDs, so it moves based
-		    on their size */
+		/*
+		 * The transaction type is after the IDs, so it moves
+		 * based on their size.
+		 */
 		transaction = skb->data[(tt) ? 5 : 3] >> 4;
 		/* Call the port write handler if this is a port write */
 		if ((ftype == 0x8) && (transaction == 0x4)) {
@@ -546,8 +542,7 @@ static void octeon_rio_rx_soft_fifo(struct rio_mport *mport)
 				skb->len);
 			rio_inb_pwrite_handler((union rio_pw_msg *)
 				(skb->data + ((tt) ? 11 : 9)));
-		}
-		else
+		} else
 			DEBUG_PACKET(mport, "RX", "%d byte unknown packet\n",
 				skb->len);
 	}
@@ -557,16 +552,16 @@ static void octeon_rio_rx_soft_fifo(struct rio_mport *mport)
 /**
  * Function to handle completion status of TX doorbells
  *
- * @param mport  SRIO port to check
+ * @mport:  SRIO port to check
  */
 static void octeon_rio_tx_doorbell(struct rio_mport *mport)
 {
 	unsigned long flags;
-	cvmx_srio_doorbell_status_t status;
+	enum cvmx_srio_doorbell_status status;
 
-	flags = octeon_rio_lock(mport);
+	spin_lock_irqsave(&mport2oct(mport)->lock, flags);
 	status = cvmx_srio_send_doorbell_status(mport->id);
-	octeon_rio_unlock(mport, flags);
+	spin_unlock_irqrestore(&mport2oct(mport)->lock, flags);
 
 	switch (status) {
 	case CVMX_SRIO_DOORBELL_DONE:
@@ -583,10 +578,13 @@ static void octeon_rio_tx_doorbell(struct rio_mport *mport)
 	case CVMX_SRIO_DOORBELL_ERROR:
 		DEBUG_IRQ(mport, "TX doorbell error\n");
 		break;
+	case CVMX_SRIO_DOORBELL_TMOUT:
+		DEBUG_IRQ(mport, "TX doorbell timeout\n");
+		break;
 	}
 }
 
-/**
+/*
  * Since SRIO interrupts also propagate to CIU_INTX_SUM0[RML] without
  * any mask bits, we need to manually enable and disable SRIO interrupts
  * as a set. This macro sets the bits we care about in the enable and
@@ -603,12 +601,12 @@ static void octeon_rio_tx_doorbell(struct rio_mport *mport)
 /**
  * Enable or disable SRIO interrupts this driver cares about.
  *
- * @param mport  SRIO master port to enable/disable is for
- * @param enable
+ * @mport:  SRIO master port to enable/disable is for
+ * @enable:
  */
 static void octeon_rio_irq_set_enable(struct rio_mport *mport, int enable)
 {
-	cvmx_sriox_int_enable_t int_enable;
+	union cvmx_sriox_int_enable int_enable;
 	/* Enable the interrupts we care about */
 	int_enable.u64 = cvmx_read_csr(CVMX_SRIOX_INT_ENABLE(mport->id));
 	SET_IRQ_FIELD_BITS(int_enable, enable);
@@ -616,27 +614,49 @@ static void octeon_rio_irq_set_enable(struct rio_mport *mport, int enable)
 }
 
 /**
+ * Translate an SRIO master port ID to Octeon IRQ number.
+ *
+ * @mport:  SRIO master port
+ *
+ * Returns IRQ number. -1 if mismatch.
+ */
+static int octeon_rio_mport2irq(struct rio_mport *mport)
+{
+	switch (mport->id) {
+	case 0: return OCTEON_IRQ_SRIO0;
+	case 1: return OCTEON_IRQ_SRIO1;
+	case 2: return OCTEON_IRQ_SRIO2;
+	case 3: return OCTEON_IRQ_SRIO3;
+	default: return -1;
+	}
+}
+
+/**
  * Delayed work handler for SRIO.
  *
- * @param work   Work to process
+ * @work:   Work to process
  */
 static void octeon_rio_work(struct work_struct *work)
 {
-	struct octeon_rio_port *my_port = container_of(work, struct octeon_rio_port, work);
+	struct octeon_rio_port *my_port = container_of(work,
+						       struct octeon_rio_port,
+						       work);
 	struct rio_mport *mport = &my_port->mport;
-	cvmx_sriox_int_reg_t int_reg;
-	cvmx_sriox_int_reg_t int_reg_clear;
+	union cvmx_sriox_int_reg int_reg;
+	union cvmx_sriox_int_reg int_reg_clear;
 
 	/* Get which interrupt fired */
 	int_reg.u64 = cvmx_read_csr(CVMX_SRIOX_INT_REG(mport->id));
 
-	/* Clear the interrupts before we start processing them. SRIO
-	    interrupts also propagate to CIU_INTX_SUM0[RML] without
-	    any masks. This handler cares about some of these interrupts,
-	    but not others. It must be careful to clear enables and status
-	    for the bits it cares about to stop a possble interrupt lockup
-	    where other SRIO error handlers off of CIU_INTX_SUM0[RML] run
-	    at interrupt context */
+	/*
+	 * Clear the interrupts before we start processing them. SRIO
+	 * interrupts also propagate to CIU_INTX_SUM0[RML] without any
+	 * masks. This handler cares about some of these interrupts,
+	 * but not others. It must be careful to clear enables and
+	 * status for the bits it cares about to stop a possble
+	 * interrupt lockup where other SRIO error handlers off of
+	 * CIU_INTX_SUM0[RML] run at interrupt context.
+	 */
 	int_reg_clear.u64 = 0;
 	SET_IRQ_FIELD_BITS(int_reg_clear, 1);
 	int_reg_clear.u64 &= int_reg.u64;
@@ -662,22 +682,24 @@ static void octeon_rio_work(struct work_struct *work)
 	if (int_reg.s.bell_err || int_reg.s.txbell)
 		octeon_rio_tx_doorbell(mport);
 
-	enable_irq(OCTEON_IRQ_SRIO0 + mport->id);
+	enable_irq(octeon_rio_mport2irq(mport));
 	octeon_rio_irq_set_enable(mport, 1);
 }
 
 /**
  * Interrupt handler for SRIO.
  *
- * @param irq     IRQ number
- * @param irq_arg Rapid IO port structure
+ * @irq:     IRQ number
+ * @irq_arg: Rapid IO port structure
  *
- * @return IRQ_HANDLED
+ * Returns IRQ_HANDLED
  */
 static irqreturn_t octeon_rio_irq(int irq, void *irq_arg)
 {
 	struct rio_mport *mport = (struct rio_mport *)irq_arg;
-	struct octeon_rio_port *my_port = container_of(mport, struct octeon_rio_port, mport);
+	struct octeon_rio_port *my_port = container_of(mport,
+						       struct octeon_rio_port,
+						       mport);
 
 	octeon_rio_irq_set_enable(mport, 0);
 	disable_irq_nosync(irq);
@@ -685,77 +707,79 @@ static irqreturn_t octeon_rio_irq(int irq, void *irq_arg)
 	return IRQ_HANDLED;
 }
 
-static int cvm_oct_fill_hw_memory(int pool, int size, int elements)
-{
-	char *memory;
-	char *fpa;
-	int freed = elements;
+extern int cvm_oct_mem_fill_fpa(int pool, int elements);
+extern int cvm_oct_alloc_fpa_pool(int pool, int size);
 
-	while (freed) {
-		/*
-		 * FPA memory must be 128 byte aligned.  Since we are
-		 * aligning we need to save the original pointer so we
-		 * can feed it to kfree when the memory is returned to
-		 * the kernel.
-		 *
-		 * We allocate an extra 256 bytes to allow for
-		 * alignment and space for the original pointer saved
-		 * just before the block.
-		 */
-		memory = kmalloc(size + 256, GFP_ATOMIC);
-		if (unlikely(memory == NULL)) {
-			pr_warning("Unable to allocate %u bytes for FPA pool %d\n",
-				   elements * size, pool);
-			break;
-		}
-		fpa = (char *)(((unsigned long)memory + 256) & ~0x7fUL);
-		*((char **)fpa - 1) = memory;
-		cvmx_fpa_free(fpa, pool, 0);
-		freed--;
-	}
-	return elements - freed;
-}
+static struct rio_ops octeon_rio_ops = {
+	.lcread = octeon_rio_lcread,
+	.lcwrite = octeon_rio_lcwrite,
+	.cread = octeon_rio_cread,
+	.cwrite = octeon_rio_cwrite,
+	.dsend = octeon_rio_dsend,
+};
+
+static struct octeon_rio_port srio_ports[4];
 
 /**
  * Initialize the RapidIO system
  *
- * @return Zero on success, negative on failure.
+ * Returns Zero on success, negative on failure.
  */
 static int __init octeon_rio_init(void)
 {
-	static struct octeon_rio_port srio_ports[2];
-	static struct rio_ops srio_ops;
 	int count = 0;
-
+	int port_index = (OCTEON_IS_MODEL(OCTEON_CN66XX) ? 4 : 2);
+	union cvmx_mio_rst_ctlx mio_rst_ctl;
 	int srio_port;
+
+	if (octeon_is_simulation())
+		return 0;
+
 	if (!octeon_has_feature(OCTEON_FEATURE_SRIO))
 		return 0;
 
-	memset(&srio_ops, 0, sizeof(srio_ops));
-	srio_ops.lcread = octeon_rio_lcread;
-	srio_ops.lcwrite = octeon_rio_lcwrite;
-	srio_ops.cread = octeon_rio_cread;
-	srio_ops.cwrite = octeon_rio_cwrite;
-	srio_ops.dsend = octeon_rio_dsend;
-	srio_ops.map = octeon_rio_mem_map;
-	srio_ops.unmap = octeon_rio_mem_unmap;
+	for (srio_port = 0; srio_port < port_index; srio_port++) {
+		if (OCTEON_IS_MODEL(OCTEON_CN66XX)) {
+			enum cvmx_qlm_mode mode = cvmx_qlm_get_mode(0);
 
-	memset(srio_ports, 0, sizeof(srio_ports));
-	for (srio_port = 0; srio_port < 2; srio_port++) {
-		cvmx_sriox_status_reg_t sriox_status_reg;
-		cvmx_mio_rst_ctlx_t mio_rst_ctl;
-		sriox_status_reg.u64 =
-			cvmx_read_csr(CVMX_SRIOX_STATUS_REG(srio_port));
-		if (!sriox_status_reg.s.srio)
-			continue;
+			switch (srio_port) {
+			case 0:  /* 1x4 lane */
+				if (mode != CVMX_QLM_MODE_SRIO_1X4 &&
+				    mode != CVMX_QLM_MODE_SRIO_2X2 &&
+				    mode != CVMX_QLM_MODE_SRIO_4X1)
+					continue;
+				break;
+
+			case 2:  /* 2x2 lane */
+				if (mode != CVMX_QLM_MODE_SRIO_2X2 &&
+				    mode != CVMX_QLM_MODE_SRIO_4X1)
+					continue;
+				break;
+
+			case 3:
+				if (mode != CVMX_QLM_MODE_SRIO_4X1)
+					continue;
+				break;
+
+			default:
+				continue;
+			}
+			mio_rst_ctl.u64 = cvmx_read_csr(CVMX_MIO_RST_CNTLX(0));
+		} else {
+			union cvmx_sriox_status_reg sriox_status_reg;
+			sriox_status_reg.u64 =
+				cvmx_read_csr(CVMX_SRIOX_STATUS_REG(srio_port));
+			if (!sriox_status_reg.s.srio)
+				continue;
+			mio_rst_ctl.u64 = cvmx_read_csr(CVMX_MIO_RST_CTLX(srio_port));
+		}
 		INIT_WORK(&srio_ports[srio_port].work, octeon_rio_work);
 		/* Only host mode ports enumerate. Endpoint does discovery */
-		mio_rst_ctl.u64 = cvmx_read_csr(CVMX_MIO_RST_CTLX(srio_port));
 		if (mio_rst_ctl.s.prtmode)
 			srio_ports[srio_port].mport.host_deviceid = srio_port;
 		else
 			srio_ports[srio_port].mport.host_deviceid = -1;
-		srio_ports[srio_port].mport.ops = &srio_ops;
+		srio_ports[srio_port].mport.ops = &octeon_rio_ops;
 		srio_ports[srio_port].mport.id = srio_port;
 		srio_ports[srio_port].mport.index = 0;
 		srio_ports[srio_port].mport.sys_size = 0;
@@ -778,8 +802,10 @@ static int __init octeon_rio_init(void)
 		if (cvmx_srio_initialize(srio_port, 0) == 0) {
 			count++;
 			rio_register_mport(&srio_ports[srio_port].mport);
-			if (request_irq(OCTEON_IRQ_SRIO0 + srio_port,
-				octeon_rio_irq, IRQF_SHARED, "SRIO",
+			if (request_irq(octeon_rio_mport2irq(
+				&srio_ports[srio_port].mport),
+				octeon_rio_irq, IRQF_SHARED,
+				srio_ports[srio_port].mport.name,
 				&srio_ports[srio_port].mport)) {
 				RIO_PRINTK(&srio_ports[srio_port].mport,
 					"Failed to register IRQ handler\n");
@@ -788,19 +814,27 @@ static int __init octeon_rio_init(void)
 		}
 	}
 	if (count) {
+		int r;
 		cvmx_fpa_enable();
-		cvm_oct_fill_hw_memory(CVMX_FPA_OUTPUT_BUFFER_POOL, CVMX_FPA_OUTPUT_BUFFER_POOL_SIZE, 128);
+		r = cvm_oct_alloc_fpa_pool(CVMX_FPA_OUTPUT_BUFFER_POOL,
+					   CVMX_FPA_OUTPUT_BUFFER_POOL_SIZE);
+		if (r < 0)
+			panic("cvm_oct_alloc_fpa_pool() failed.");
+		cvm_oct_mem_fill_fpa(CVMX_FPA_OUTPUT_BUFFER_POOL, 128);
 		cvmx_dma_engine_initialize();
 	}
 
-	/* The links sometimes take a little bit to come up. Delay a half
-	    second. Linux currently doesn't ever try to enumerate if the
-	    links come up after this call */
+	/*
+	 * The links sometimes take a little bit to come up. Delay a
+	 * half second. Linux currently doesn't ever try to enumerate
+	 * if the links come up after this call.
+	 */
 	msleep(500);
-	return rio_init_mports();
+	/* rio_init_mports(); is now called by the core in device_initcall_sync() */
+	return 0;
 }
+device_initcall(octeon_rio_init);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Cavium Networks <support@caviumnetworks.com>");
-MODULE_DESCRIPTION("Cavium Networks Rapid IO driver.");
-late_initcall(octeon_rio_init);
+MODULE_AUTHOR("Cavium Inc. <support@cavium.com>");
+MODULE_DESCRIPTION("Cavium Inc. Rapid IO driver.");

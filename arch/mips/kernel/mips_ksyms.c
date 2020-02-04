@@ -9,9 +9,9 @@
  * Copyright (C) 1999, 2000, 01 Silicon Graphics, Inc.
  */
 #include <linux/interrupt.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <asm/checksum.h>
-#include <asm/pgtable.h>
+#include <linux/mm.h>
 #include <asm/uaccess.h>
 #include <asm/ftrace.h>
 

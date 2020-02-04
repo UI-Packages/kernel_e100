@@ -8,7 +8,7 @@
  *  Copyright:	MontaVista Software, Inc.
  *
  * Spliting done by: Marek Vasut <marek.vasut@gmail.com>
- * If something doesnt work and it worked before spliting, e-mail me,
+ * If something doesn't work and it worked before spliting, e-mail me,
  * dont bother Nicolas please ;-)
  *
  * This program is free software; you can redistribute it and/or modify
@@ -96,18 +96,20 @@ struct ucb1400_gpio {
 
 struct ucb1400_ts {
 	struct input_dev	*ts_idev;
-	struct task_struct	*ts_task;
 	int			id;
-	wait_queue_head_t	ts_wait;
-	unsigned int		ts_restart:1;
 	int			irq;
-	unsigned int		irq_pending;	/* not bit field shared */
 	struct snd_ac97		*ac97;
+	wait_queue_head_t	ts_wait;
+	bool			stopped;
 };
 
 struct ucb1400 {
 	struct platform_device	*ucb1400_ts;
 	struct platform_device	*ucb1400_gpio;
+};
+
+struct ucb1400_pdata {
+	int	irq;
 };
 
 static inline u16 ucb1400_reg_read(struct snd_ac97 *ac97, u16 reg)

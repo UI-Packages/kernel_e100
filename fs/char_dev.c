@@ -20,6 +20,7 @@
 #include <linux/cdev.h>
 #include <linux/mutex.h>
 #include <linux/backing-dev.h>
+#include <linux/tty.h>
 
 #include "internal.h"
 
@@ -39,7 +40,9 @@ struct backing_dev_info directly_mappable_cdev_bdi = {
 #endif
 		/* permit direct mmap, for read, write or exec */
 		BDI_CAP_MAP_DIRECT |
-		BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP),
+		BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP |
+		/* no writeback happens */
+		BDI_CAP_NO_ACCT_AND_WRITEBACK),
 };
 
 static struct kobj_map *cdev_map;
@@ -56,7 +59,7 @@ static struct char_device_struct {
 } *chrdevs[CHRDEV_MAJOR_HASH_SIZE];
 
 /* index in the above */
-static inline int major_to_index(int major)
+static inline int major_to_index(unsigned major)
 {
 	return major % CHRDEV_MAJOR_HASH_SIZE;
 }
@@ -269,7 +272,7 @@ int __register_chrdev(unsigned int major, unsigned int baseminor,
 	cd = __register_chrdev_region(major, baseminor, count, name);
 	if (IS_ERR(cd))
 		return PTR_ERR(cd);
-	
+
 	cdev = cdev_alloc();
 	if (!cdev)
 		goto out2;
@@ -277,7 +280,7 @@ int __register_chrdev(unsigned int major, unsigned int baseminor,
 	cdev->owner = fops->owner;
 	cdev->ops = fops;
 	kobject_set_name(&cdev->kobj, "%s", name);
-		
+
 	err = cdev_add(cdev, MKDEV(cd->major, baseminor), count);
 	if (err)
 		goto out;
@@ -402,7 +405,7 @@ static int chrdev_open(struct inode *inode, struct file *filp)
 		goto out_cdev_put;
 
 	if (filp->f_op->open) {
-		ret = filp->f_op->open(inode,filp);
+		ret = filp->f_op->open(inode, filp);
 		if (ret)
 			goto out_cdev_put;
 	}
@@ -412,18 +415,6 @@ static int chrdev_open(struct inode *inode, struct file *filp)
  out_cdev_put:
 	cdev_put(p);
 	return ret;
-}
-
-int cdev_index(struct inode *inode)
-{
-	int idx;
-	struct kobject *kobj;
-
-	kobj = kobj_lookup(cdev_map, inode->i_rdev, &idx);
-	if (!kobj)
-		return -1;
-	kobject_put(kobj);
-	return idx;
 }
 
 void cd_forget(struct inode *inode)
@@ -453,6 +444,7 @@ static void cdev_purge(struct cdev *cdev)
  */
 const struct file_operations def_chr_fops = {
 	.open = chrdev_open,
+	.llseek = noop_llseek,
 };
 
 static struct kobject *exact_match(dev_t dev, int *part, void *data)
@@ -578,7 +570,6 @@ EXPORT_SYMBOL(cdev_init);
 EXPORT_SYMBOL(cdev_alloc);
 EXPORT_SYMBOL(cdev_del);
 EXPORT_SYMBOL(cdev_add);
-EXPORT_SYMBOL(cdev_index);
 EXPORT_SYMBOL(__register_chrdev);
 EXPORT_SYMBOL(__unregister_chrdev);
 EXPORT_SYMBOL(directly_mappable_cdev_bdi);

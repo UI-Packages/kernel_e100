@@ -22,11 +22,11 @@
 
 #include <asm/asm-offsets.h>
 
-/* return adress at 0 */
+/* return address at 0 */
 
 #define in_blk    12  /* input byte array address parameter*/
 #define out_blk   8  /* output byte array address parameter*/
-#define tfm       4  /* Twofish context structure */
+#define ctx       4  /* Twofish context structure */
 
 #define a_offset	0
 #define b_offset	4
@@ -229,9 +229,9 @@ twofish_enc_blk:
 	push    %esi
 	push    %edi
 
-	mov	tfm + 16(%esp),	%ebp	/* abuse the base pointer: set new base bointer to the crypto tfm */
-	add	$crypto_tfm_ctx_offset, %ebp	/* ctx adress */
-	mov     in_blk+16(%esp),%edi	/* input adress in edi */
+	mov	ctx + 16(%esp),	%ebp	/* abuse the base pointer: set new base
+					 * pointer to the ctx address */
+	mov     in_blk+16(%esp),%edi	/* input address in edi */
 
 	mov	(%edi),		%eax
 	mov	b_offset(%edi),	%ebx
@@ -285,9 +285,9 @@ twofish_dec_blk:
 	push    %edi
 
 
-	mov	tfm + 16(%esp),	%ebp	/* abuse the base pointer: set new base bointer to the crypto tfm */
-	add	$crypto_tfm_ctx_offset, %ebp	/* ctx adress */
-	mov     in_blk+16(%esp),%edi	/* input adress in edi */
+	mov	ctx + 16(%esp),	%ebp	/* abuse the base pointer: set new base
+					 * pointer to the ctx address */
+	mov     in_blk+16(%esp),%edi	/* input address in edi */
 
 	mov	(%edi),		%eax
 	mov	b_offset(%edi),	%ebx

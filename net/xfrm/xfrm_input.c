@@ -15,7 +15,6 @@
 #include <net/xfrm.h>
 
 #if defined(CONFIG_CAVIUM_OCTEON_IPSEC) && defined(CONFIG_NET_KEY)
-//#if 1
 extern int (*cavium_ipsec_process)(void *, struct sk_buff *, int, int);
 #endif
 
@@ -112,21 +111,22 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 	struct net *net = dev_net(skb->dev);
 	int err;
 	__be32 seq;
+	__be32 seq_hi;
 	struct xfrm_state *x;
 	xfrm_address_t *daddr;
 	struct xfrm_mode *inner_mode;
 	unsigned int family;
 	int decaps = 0;
 	int async = 0;
+
 #if defined(CONFIG_CAVIUM_OCTEON_IPSEC) && defined(CONFIG_NET_KEY)
     	int offset = 0;
 #endif
-
 	/* A negative encap_type indicates async resumption. */
 	if (encap_type < 0) {
 		async = 1;
 		x = xfrm_input_state(skb);
-		seq = XFRM_SKB_CB(skb)->seq.input;
+		seq = XFRM_SKB_CB(skb)->seq.input.low;
 		goto resume;
 	}
 
@@ -160,7 +160,7 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 			goto drop;
 		}
 
-		x = xfrm_state_lookup(net, daddr, spi, nexthdr, family);
+		x = xfrm_state_lookup(net, skb->mark, daddr, spi, nexthdr, family);
 		if (x == NULL) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINNOSTATES);
 			xfrm_audit_state_notfound(skb, family, spi, seq);
@@ -180,13 +180,17 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 			goto drop_unlock;
 		}
 
+		if (x->repl->check(x, skb, seq)) {
+			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATESEQERROR);
+			goto drop_unlock;
+		}
 #if defined(CONFIG_CAVIUM_OCTEON_IPSEC) && defined(CONFIG_NET_KEY)
         /*
  *      * If Octeon IPSEC Acceleration module has been loaded
  *      * call it, otherwise, follow the software path
  *      */
         if (cavium_ipsec_process) {
-		if (x->props.replay_window && xfrm_replay_check(x, skb, seq)) {
+		if (x->props.replay_window && x->repl->check(x, skb, seq) ) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATESEQERROR);
 			goto drop_unlock;
 		}
@@ -197,8 +201,12 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
             	}
 
             	spin_unlock(&x->lock);
-		XFRM_SKB_CB(skb)->seq.input = seq;
+		seq_hi = htonl(xfrm_replay_seqhi(x, seq));
 
+		XFRM_SKB_CB(skb)->seq.input.low = seq;
+		XFRM_SKB_CB(skb)->seq.input.hi = seq_hi;
+
+		skb_dst_force(skb);
             	switch (nexthdr) {
                 case IPPROTO_AH:
                     offset = offsetof(struct ip_auth_hdr, spi);
@@ -223,10 +231,8 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
             	nexthdr = cavium_ipsec_process(x, skb, offset, 0 /*DECRYPT*/);
         } else  {  /* if (cavium_ipsec_process == NULL) */
 #endif
-		if (x->props.replay_window && xfrm_replay_check(x, skb, seq)) {
-			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATESEQERROR);
-			goto drop_unlock;
-		}
+
+
 
 		if (xfrm_state_check_expire(x)) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATEEXPIRED);
@@ -235,7 +241,12 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
 
 		spin_unlock(&x->lock);
 
-		XFRM_SKB_CB(skb)->seq.input = seq;
+		seq_hi = htonl(xfrm_replay_seqhi(x, seq));
+
+		XFRM_SKB_CB(skb)->seq.input.low = seq;
+		XFRM_SKB_CB(skb)->seq.input.hi = seq_hi;
+
+		skb_dst_force(skb);
 
 		nexthdr = x->type->input(x, skb);
 #if defined(CONFIG_CAVIUM_OCTEON_IPSEC) && defined(CONFIG_NET_KEY)
@@ -260,8 +271,12 @@ resume:
 		/* only the first xfrm gets the encap type */
 		encap_type = 0;
 
-		if (x->props.replay_window)
-			xfrm_replay_advance(x, seq);
+		if (async && x->repl->recheck(x, skb, seq)) {
+			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATESEQERROR);
+			goto drop_unlock;
+		}
+
+		x->repl->advance(x, seq);
 
 		x->curlft.bytes += skb->len;
 		x->curlft.packets++;

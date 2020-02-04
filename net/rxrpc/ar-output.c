@@ -10,8 +10,10 @@
  */
 
 #include <linux/net.h>
+#include <linux/gfp.h>
 #include <linux/skbuff.h>
 #include <linux/circ_buf.h>
+#include <linux/export.h>
 #include <net/sock.h>
 #include <net/af_rxrpc.h>
 #include "ar-internal.h"
@@ -484,7 +486,7 @@ static void rxrpc_queue_packet(struct rxrpc_call *call, struct sk_buff *skb,
 	_proto("Tx DATA %%%u { #%u }",
 	       ntohl(sp->hdr.serial), ntohl(sp->hdr.seq));
 
-	sp->need_resend = 0;
+	sp->need_resend = false;
 	sp->resend_at = jiffies + rxrpc_resend_timeout * HZ;
 	if (!test_and_set_bit(RXRPC_CALL_RUN_RTIMER, &call->flags)) {
 		_debug("run timer");
@@ -506,7 +508,7 @@ static void rxrpc_queue_packet(struct rxrpc_call *call, struct sk_buff *skb,
 
 	if (ret < 0) {
 		_debug("need instant resend %d", ret);
-		sp->need_resend = 1;
+		sp->need_resend = true;
 		rxrpc_instant_resend(call);
 	}
 

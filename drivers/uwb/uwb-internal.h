@@ -28,7 +28,6 @@
 #ifndef __UWB_INTERNAL_H__
 #define __UWB_INTERNAL_H__
 
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/uwb.h>
@@ -366,12 +365,12 @@ struct dentry *uwb_dbg_create_pal_dir(struct uwb_pal *pal);
 
 static inline void uwb_dev_lock(struct uwb_dev *uwb_dev)
 {
-	down(&uwb_dev->dev.sem);
+	device_lock(&uwb_dev->dev);
 }
 
 static inline void uwb_dev_unlock(struct uwb_dev *uwb_dev)
 {
-	up(&uwb_dev->dev.sem);
+	device_unlock(&uwb_dev->dev);
 }
 
 #endif /* #ifndef __UWB_INTERNAL_H__ */

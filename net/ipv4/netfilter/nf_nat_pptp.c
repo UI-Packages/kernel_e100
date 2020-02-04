@@ -25,6 +25,7 @@
 #include <net/netfilter/nf_nat_rule.h>
 #include <net/netfilter/nf_conntrack_helper.h>
 #include <net/netfilter/nf_conntrack_expect.h>
+#include <net/netfilter/nf_conntrack_zones.h>
 #include <linux/netfilter/nf_conntrack_proto_gre.h>
 #include <linux/netfilter/nf_conntrack_pptp.h>
 
@@ -46,7 +47,7 @@ static void pptp_nat_expected(struct nf_conn *ct,
 	struct nf_conntrack_tuple t;
 	const struct nf_ct_pptp_master *ct_pptp_info;
 	const struct nf_nat_pptp *nat_pptp_info;
-	struct nf_nat_range range;
+	struct nf_nat_ipv4_range range;
 
 	ct_pptp_info = &nfct_help(master)->help.ct_pptp_info;
 	nat_pptp_info = &nfct_nat(master)->help.nat_pptp_info;
@@ -74,7 +75,7 @@ static void pptp_nat_expected(struct nf_conn *ct,
 
 	pr_debug("trying to unexpect other dir: ");
 	nf_ct_dump_tuple_ip(&t);
-	other_exp = nf_ct_expect_find_get(net, &t);
+	other_exp = nf_ct_expect_find_get(net, nf_ct_zone(ct), &t);
 	if (other_exp) {
 		nf_ct_unexpect_related(other_exp);
 		nf_ct_expect_put(other_exp);
@@ -87,24 +88,24 @@ static void pptp_nat_expected(struct nf_conn *ct,
 	BUG_ON(ct->status & IPS_NAT_DONE_MASK);
 
 	/* Change src to where master sends to */
-	range.flags = IP_NAT_RANGE_MAP_IPS;
+	range.flags = NF_NAT_RANGE_MAP_IPS;
 	range.min_ip = range.max_ip
 		= ct->master->tuplehash[!exp->dir].tuple.dst.u3.ip;
 	if (exp->dir == IP_CT_DIR_ORIGINAL) {
-		range.flags |= IP_NAT_RANGE_PROTO_SPECIFIED;
+		range.flags |= NF_NAT_RANGE_PROTO_SPECIFIED;
 		range.min = range.max = exp->saved_proto;
 	}
-	nf_nat_setup_info(ct, &range, IP_NAT_MANIP_SRC);
+	nf_nat_setup_info(ct, &range, NF_NAT_MANIP_SRC);
 
 	/* For DST manip, map port here to where it's expected. */
-	range.flags = IP_NAT_RANGE_MAP_IPS;
+	range.flags = NF_NAT_RANGE_MAP_IPS;
 	range.min_ip = range.max_ip
 		= ct->master->tuplehash[!exp->dir].tuple.src.u3.ip;
 	if (exp->dir == IP_CT_DIR_REPLY) {
-		range.flags |= IP_NAT_RANGE_PROTO_SPECIFIED;
+		range.flags |= NF_NAT_RANGE_PROTO_SPECIFIED;
 		range.min = range.max = exp->saved_proto;
 	}
-	nf_nat_setup_info(ct, &range, IP_NAT_MANIP_DST);
+	nf_nat_setup_info(ct, &range, NF_NAT_MANIP_DST);
 }
 
 /* outbound packets == from PNS to PAC */
@@ -281,25 +282,25 @@ static int __init nf_nat_helper_pptp_init(void)
 	nf_nat_need_gre();
 
 	BUG_ON(nf_nat_pptp_hook_outbound != NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_outbound, pptp_outbound_pkt);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_outbound, pptp_outbound_pkt);
 
 	BUG_ON(nf_nat_pptp_hook_inbound != NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_inbound, pptp_inbound_pkt);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_inbound, pptp_inbound_pkt);
 
 	BUG_ON(nf_nat_pptp_hook_exp_gre != NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_exp_gre, pptp_exp_gre);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_exp_gre, pptp_exp_gre);
 
 	BUG_ON(nf_nat_pptp_hook_expectfn != NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_expectfn, pptp_nat_expected);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_expectfn, pptp_nat_expected);
 	return 0;
 }
 
 static void __exit nf_nat_helper_pptp_fini(void)
 {
-	rcu_assign_pointer(nf_nat_pptp_hook_expectfn, NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_exp_gre, NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_inbound, NULL);
-	rcu_assign_pointer(nf_nat_pptp_hook_outbound, NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_expectfn, NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_exp_gre, NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_inbound, NULL);
+	RCU_INIT_POINTER(nf_nat_pptp_hook_outbound, NULL);
 	synchronize_rcu();
 }
 

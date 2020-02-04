@@ -26,7 +26,6 @@
 #include <linux/capability.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/poll.h>
 #include <linux/fcntl.h>
 #include <linux/skbuff.h>
@@ -35,6 +34,7 @@
 #include <linux/file.h>
 #include <linux/init.h>
 #include <linux/compat.h>
+#include <linux/gfp.h>
 #include <net/sock.h>
 
 #include "hidp.h"
@@ -85,7 +85,8 @@ static int hidp_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long 
 			return err;
 		}
 
-		if (csock->sk->sk_state != BT_CONNECTED || isock->sk->sk_state != BT_CONNECTED) {
+		if (csock->sk->sk_state != BT_CONNECTED ||
+				isock->sk->sk_state != BT_CONNECTED) {
 			sockfd_put(csock);
 			sockfd_put(isock);
 			return -EBADFD;
@@ -140,8 +141,8 @@ static int hidp_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long 
 
 #ifdef CONFIG_COMPAT
 struct compat_hidp_connadd_req {
-	int   ctrl_sock;	// Connected control socket
-	int   intr_sock;	// Connteted interrupt socket
+	int   ctrl_sock;	/* Connected control socket */
+	int   intr_sock;	/* Connected interrupt socket */
 	__u16 parser;
 	__u16 rd_size;
 	compat_uptr_t rd_data;
@@ -159,10 +160,10 @@ static int hidp_sock_compat_ioctl(struct socket *sock, unsigned int cmd, unsigne
 {
 	if (cmd == HIDPGETCONNLIST) {
 		struct hidp_connlist_req cl;
-		uint32_t uci;
+		u32 uci;
 		int err;
 
-		if (get_user(cl.cnum, (uint32_t __user *) arg) ||
+		if (get_user(cl.cnum, (u32 __user *) arg) ||
 				get_user(uci, (u32 __user *) (arg + 4)))
 			return -EFAULT;
 
@@ -173,7 +174,7 @@ static int hidp_sock_compat_ioctl(struct socket *sock, unsigned int cmd, unsigne
 
 		err = hidp_get_connlist(&cl);
 
-		if (!err && put_user(cl.cnum, (uint32_t __user *) arg))
+		if (!err && put_user(cl.cnum, (u32 __user *) arg))
 			err = -EFAULT;
 
 		return err;
@@ -241,7 +242,8 @@ static struct proto hidp_proto = {
 	.obj_size	= sizeof(struct bt_sock)
 };
 
-static int hidp_sock_create(struct net *net, struct socket *sock, int protocol)
+static int hidp_sock_create(struct net *net, struct socket *sock, int protocol,
+			    int kern)
 {
 	struct sock *sk;
 
@@ -268,7 +270,7 @@ static int hidp_sock_create(struct net *net, struct socket *sock, int protocol)
 	return 0;
 }
 
-static struct net_proto_family hidp_sock_family_ops = {
+static const struct net_proto_family hidp_sock_family_ops = {
 	.family	= PF_BLUETOOTH,
 	.owner	= THIS_MODULE,
 	.create	= hidp_sock_create

@@ -18,19 +18,30 @@
 #include <linux/gpio.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/nand.h>
+#include <linux/mtd/onenand.h>
 #include <linux/mtd/partitions.h>
 #include <linux/io.h>
+#include <asm/hardware/vic.h>
 #include <asm/sizes.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/flash.h>
-#include <mach/setup.h>
+#include <asm/mach/time.h>
+
+#include <plat/gpio-nomadik.h>
+#include <plat/mtu.h>
+
 #include <mach/nand.h>
 #include <mach/fsmc.h>
-#include "clock.h"
 
-/* These adresses span 16MB, so use three individual pages */
+#include "cpu-8815.h"
+
+/* Initial value for SRC control register: all timers use MXTAL/8 source */
+#define SRC_CR_INIT_MASK	0x00007fff
+#define SRC_CR_INIT_VAL		0x2aaa8000
+
+/* These addresses span 16MB, so use three individual pages */
 static struct resource nhk8815_nand_resources[] = {
 	{
 		.name = "nand_addr",
@@ -142,7 +153,7 @@ static struct mtd_partition nhk8815_onenand_partitions[] = {
 	}
 };
 
-static struct flash_platform_data nhk8815_onenand_data = {
+static struct onenand_platform_data nhk8815_onenand_data = {
 	.parts		= nhk8815_onenand_partitions,
 	.nr_parts	= ARRAY_SIZE(nhk8815_onenand_partitions),
 };
@@ -156,7 +167,7 @@ static struct resource nhk8815_onenand_resource[] = {
 };
 
 static struct platform_device nhk8815_onenand_device = {
-	.name		= "onenand",
+	.name		= "onenand-flash",
 	.id		= -1,
 	.dev		= {
 		.platform_data	= &nhk8815_onenand_data,
@@ -167,36 +178,22 @@ static struct platform_device nhk8815_onenand_device = {
 
 static void __init nhk8815_onenand_init(void)
 {
-#ifdef CONFIG_ONENAND
+#ifdef CONFIG_MTD_ONENAND
        /* Set up SMCS0 for OneNand */
-       writel(0x000030db, FSMC_BCR0);
-       writel(0x02100551, FSMC_BTR0);
+	writel(0x000030db, FSMC_BCR(0));
+	writel(0x02100551, FSMC_BTR(0));
 #endif
 }
 
-#define __MEM_4K_RESOURCE(x) \
-	.res = {.start = (x), .end = (x) + SZ_4K - 1, .flags = IORESOURCE_MEM}
+static AMBA_APB_DEVICE(uart0, "uart0", 0, NOMADIK_UART0_BASE,
+	{ IRQ_UART0 }, NULL);
 
-static struct amba_device uart0_device = {
-	.dev = { .init_name = "uart0" },
-	__MEM_4K_RESOURCE(NOMADIK_UART0_BASE),
-	.irq = {IRQ_UART0, NO_IRQ},
-};
-
-static struct amba_device uart1_device = {
-	.dev = { .init_name = "uart1" },
-	__MEM_4K_RESOURCE(NOMADIK_UART1_BASE),
-	.irq = {IRQ_UART1, NO_IRQ},
-};
+static AMBA_APB_DEVICE(uart1, "uart1", 0, NOMADIK_UART1_BASE,
+	{ IRQ_UART1 }, NULL);
 
 static struct amba_device *amba_devs[] __initdata = {
 	&uart0_device,
 	&uart1_device,
-};
-
-/* We have a fixed clock alone, by now */
-static struct clk nhk8815_clk_48 = {
-	.rate = 48*1000*1000,
 };
 
 static struct resource nhk8815_eth_resources[] = {
@@ -239,6 +236,23 @@ static struct platform_device *nhk8815_platform_devices[] __initdata = {
 	/* will add more devices */
 };
 
+static void __init nomadik_timer_init(void)
+{
+	u32 src_cr;
+
+	/* Configure timer sources in "system reset controller" ctrl reg */
+	src_cr = readl(io_p2v(NOMADIK_SRC_BASE));
+	src_cr &= SRC_CR_INIT_MASK;
+	src_cr |= SRC_CR_INIT_VAL;
+	writel(src_cr, io_p2v(NOMADIK_SRC_BASE));
+
+	nmdk_timer_init(io_p2v(NOMADIK_MTU0_BASE));
+}
+
+static struct sys_timer nomadik_timer = {
+	.init	= nomadik_timer_init,
+};
+
 static void __init nhk8815_platform_init(void)
 {
 	int i;
@@ -248,19 +262,17 @@ static void __init nhk8815_platform_init(void)
 	platform_add_devices(nhk8815_platform_devices,
 			     ARRAY_SIZE(nhk8815_platform_devices));
 
-	for (i = 0; i < ARRAY_SIZE(amba_devs); i++) {
-		nmdk_clk_create(&nhk8815_clk_48, amba_devs[i]->dev.init_name);
+	for (i = 0; i < ARRAY_SIZE(amba_devs); i++)
 		amba_device_register(amba_devs[i], &iomem_resource);
-	}
 }
 
 MACHINE_START(NOMADIK, "NHK8815")
 	/* Maintainer: ST MicroElectronics */
-	.phys_io	= NOMADIK_UART0_BASE,
-	.io_pg_offst	= (IO_ADDRESS(NOMADIK_UART0_BASE) >> 18) & 0xfffc,
-	.boot_params	= 0x100,
+	.atag_offset	= 0x100,
 	.map_io		= cpu8815_map_io,
 	.init_irq	= cpu8815_init_irq,
+	.handle_irq	= vic_handle_irq,
 	.timer		= &nomadik_timer,
 	.init_machine	= nhk8815_platform_init,
+	.restart	= cpu8815_restart,
 MACHINE_END

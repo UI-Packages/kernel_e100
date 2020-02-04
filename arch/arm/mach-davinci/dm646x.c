@@ -8,17 +8,14 @@
  * is licensed "as is" without any warranty of any kind, whether express
  * or implied.
  */
-#include <linux/kernel.h>
+#include <linux/dma-mapping.h>
 #include <linux/init.h>
 #include <linux/clk.h>
 #include <linux/serial_8250.h>
 #include <linux/platform_device.h>
-#include <linux/gpio.h>
 
 #include <asm/mach/map.h>
 
-#include <mach/dm646x.h>
-#include <mach/clock.h>
 #include <mach/cputype.h>
 #include <mach/edma.h>
 #include <mach/irqs.h>
@@ -28,13 +25,13 @@
 #include <mach/serial.h>
 #include <mach/common.h>
 #include <mach/asp.h>
+#include <mach/gpio-davinci.h>
 
+#include "davinci.h"
 #include "clock.h"
 #include "mux.h"
 
 #define DAVINCI_VPIF_BASE       (0x01C12000)
-#define VDD3P3V_PWDN_OFFSET	(0x48)
-#define VSCLKDIS_OFFSET		(0x6C)
 
 #define VDD3P3V_VID_MASK	(BIT_MASK(3) | BIT_MASK(2) | BIT_MASK(1) |\
 					BIT_MASK(0))
@@ -46,6 +43,13 @@
  */
 #define DM646X_REF_FREQ		27000000
 #define DM646X_AUX_FREQ		24000000
+
+#define DM646X_EMAC_BASE		0x01c80000
+#define DM646X_EMAC_MDIO_BASE		(DM646X_EMAC_BASE + 0x4000)
+#define DM646X_EMAC_CNTRL_OFFSET	0x0000
+#define DM646X_EMAC_CNTRL_MOD_OFFSET	0x1000
+#define DM646X_EMAC_CNTRL_RAM_OFFSET	0x2000
+#define DM646X_EMAC_CNTRL_RAM_SIZE	0x2000
 
 static struct pll_data pll1_data = {
 	.num       = 1,
@@ -60,6 +64,7 @@ static struct pll_data pll2_data = {
 static struct clk ref_clk = {
 	.name = "ref_clk",
 	.rate = DM646X_REF_FREQ,
+	.set_rate = davinci_simple_set_rate,
 };
 
 static struct clk aux_clkin = {
@@ -161,7 +166,6 @@ static struct clk dsp_clk = {
 	.name = "dsp",
 	.parent = &pll1_sysclk1,
 	.lpsc = DM646X_LPSC_C64X_CPU,
-	.flags = PSC_DSP,
 	.usecount = 1,			/* REVISIT how to disable? */
 };
 
@@ -315,7 +319,7 @@ static struct clk vpif1_clk = {
 	.flags = ALWAYS_ENABLED,
 };
 
-struct davinci_clk dm646x_clks[] = {
+static struct clk_lookup dm646x_clks[] = {
 	CLK(NULL, "ref", &ref_clk),
 	CLK(NULL, "aux", &aux_clkin),
 	CLK(NULL, "pll1", &pll1_clk),
@@ -362,7 +366,6 @@ static struct emac_platform_data dm646x_emac_pdata = {
 	.ctrl_reg_offset	= DM646X_EMAC_CNTRL_OFFSET,
 	.ctrl_mod_reg_offset	= DM646X_EMAC_CNTRL_MOD_OFFSET,
 	.ctrl_ram_offset	= DM646X_EMAC_CNTRL_RAM_OFFSET,
-	.mdio_reg_offset	= DM646X_EMAC_MDIO_OFFSET,
 	.ctrl_ram_size		= DM646X_EMAC_CNTRL_RAM_SIZE,
 	.version		= EMAC_VERSION_2,
 };
@@ -370,7 +373,7 @@ static struct emac_platform_data dm646x_emac_pdata = {
 static struct resource dm646x_emac_resources[] = {
 	{
 		.start	= DM646X_EMAC_BASE,
-		.end	= DM646X_EMAC_BASE + 0x47ff,
+		.end	= DM646X_EMAC_BASE + SZ_16K - 1,
 		.flags	= IORESOURCE_MEM,
 	},
 	{
@@ -405,8 +408,20 @@ static struct platform_device dm646x_emac_device = {
 	.resource	= dm646x_emac_resources,
 };
 
-#define PINMUX0		0x00
-#define PINMUX1		0x04
+static struct resource dm646x_mdio_resources[] = {
+	{
+		.start	= DM646X_EMAC_MDIO_BASE,
+		.end	= DM646X_EMAC_MDIO_BASE + SZ_4K - 1,
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device dm646x_mdio_device = {
+	.name		= "davinci_mdio",
+	.id		= 0,
+	.num_resources	= ARRAY_SIZE(dm646x_mdio_resources),
+	.resource	= dm646x_mdio_resources,
+};
 
 /*
  * Device specific mux setup
@@ -515,14 +530,6 @@ static u8 dm646x_default_priorities[DAVINCI_N_AINTC_IRQ] = {
 
 /*----------------------------------------------------------------------*/
 
-static const s8 dma_chan_dm646x_no_event[] = {
-	 0,  1,  2,  3, 13,
-	14, 15, 24, 25, 26,
-	27, 30, 31, 54, 55,
-	56,
-	-1
-};
-
 /* Four Transfer Controllers on DM646x */
 static const s8
 dm646x_queue_tc_mapping[][2] = {
@@ -544,17 +551,19 @@ dm646x_queue_priority_mapping[][2] = {
 	{-1, -1},
 };
 
-static struct edma_soc_info dm646x_edma_info[] = {
-	{
-		.n_channel		= 64,
-		.n_region		= 6,	/* 0-1, 4-7 */
-		.n_slot			= 512,
-		.n_tc			= 4,
-		.n_cc			= 1,
-		.noevent		= dma_chan_dm646x_no_event,
-		.queue_tc_mapping	= dm646x_queue_tc_mapping,
-		.queue_priority_mapping	= dm646x_queue_priority_mapping,
-	},
+static struct edma_soc_info edma_cc0_info = {
+	.n_channel		= 64,
+	.n_region		= 6,	/* 0-1, 4-7 */
+	.n_slot			= 512,
+	.n_tc			= 4,
+	.n_cc			= 1,
+	.queue_tc_mapping	= dm646x_queue_tc_mapping,
+	.queue_priority_mapping	= dm646x_queue_priority_mapping,
+	.default_queue		= EVENTQ_1,
+};
+
+static struct edma_soc_info *dm646x_edma_info[EDMA_MAX_CC] = {
+	&edma_cc0_info,
 };
 
 static struct resource edma_resources[] = {
@@ -607,32 +616,6 @@ static struct platform_device dm646x_edma_device = {
 	.dev.platform_data	= dm646x_edma_info,
 	.num_resources		= ARRAY_SIZE(edma_resources),
 	.resource		= edma_resources,
-};
-
-static struct resource ide_resources[] = {
-	{
-		.start          = DM646X_ATA_REG_BASE,
-		.end            = DM646X_ATA_REG_BASE + 0x7ff,
-		.flags          = IORESOURCE_MEM,
-	},
-	{
-		.start          = IRQ_DM646X_IDE,
-		.end            = IRQ_DM646X_IDE,
-		.flags          = IORESOURCE_IRQ,
-	},
-};
-
-static u64 ide_dma_mask = DMA_BIT_MASK(32);
-
-static struct platform_device ide_dev = {
-	.name           = "palm_bk3710",
-	.id             = -1,
-	.resource       = ide_resources,
-	.num_resources  = ARRAY_SIZE(ide_resources),
-	.dev = {
-		.dma_mask		= &ide_dma_mask,
-		.coherent_dma_mask      = DMA_BIT_MASK(32),
-	},
 };
 
 static struct resource dm646x_mcasp0_resources[] = {
@@ -777,8 +760,7 @@ static struct map_desc dm646x_io_desc[] = {
 		.virtual	= SRAM_VIRT,
 		.pfn		= __phys_to_pfn(0x00010000),
 		.length		= SZ_32K,
-		/* MT_MEMORY_NONCACHED requires supersection alignment */
-		.type		= MT_DEVICE,
+		.type		= MT_MEMORY_NONCACHED,
 	},
 };
 
@@ -800,9 +782,7 @@ static struct davinci_id dm646x_ids[] = {
 	},
 };
 
-static void __iomem *dm646x_psc_bases[] = {
-	IO_ADDRESS(DAVINCI_PWR_SLEEP_CNTRL_BASE),
-};
+static u32 dm646x_psc_bases[] = { DAVINCI_PWR_SLEEP_CNTRL_BASE };
 
 /*
  * T0_BOT: Timer 0, bottom:  clockevent source for hrtimers
@@ -810,7 +790,7 @@ static void __iomem *dm646x_psc_bases[] = {
  * T1_BOT: Timer 1, bottom:  (used by DSP in TI DSPLink code)
  * T1_TOP: Timer 1, top   :  <unused>
  */
-struct davinci_timer_info dm646x_timer_info = {
+static struct davinci_timer_info dm646x_timer_info = {
 	.timers		= davinci_timer_instance,
 	.clockevent_id	= T0_BOT,
 	.clocksource_id	= T0_TOP,
@@ -857,21 +837,22 @@ static struct platform_device dm646x_serial_device = {
 static struct davinci_soc_info davinci_soc_info_dm646x = {
 	.io_desc		= dm646x_io_desc,
 	.io_desc_num		= ARRAY_SIZE(dm646x_io_desc),
-	.jtag_id_base		= IO_ADDRESS(0x01c40028),
+	.jtag_id_reg		= 0x01c40028,
 	.ids			= dm646x_ids,
 	.ids_num		= ARRAY_SIZE(dm646x_ids),
 	.cpu_clks		= dm646x_clks,
 	.psc_bases		= dm646x_psc_bases,
 	.psc_bases_num		= ARRAY_SIZE(dm646x_psc_bases),
-	.pinmux_base		= IO_ADDRESS(DAVINCI_SYSTEM_MODULE_BASE),
+	.pinmux_base		= DAVINCI_SYSTEM_MODULE_BASE,
 	.pinmux_pins		= dm646x_pins,
 	.pinmux_pins_num	= ARRAY_SIZE(dm646x_pins),
-	.intc_base		= IO_ADDRESS(DAVINCI_ARM_INTC_BASE),
+	.intc_base		= DAVINCI_ARM_INTC_BASE,
 	.intc_type		= DAVINCI_INTC_TYPE_AINTC,
 	.intc_irq_prios		= dm646x_default_priorities,
 	.intc_irq_num		= DAVINCI_N_AINTC_IRQ,
 	.timer_info		= &dm646x_timer_info,
-	.gpio_base		= IO_ADDRESS(DAVINCI_GPIO_BASE),
+	.gpio_type		= GPIO_TYPE_DAVINCI,
+	.gpio_base		= DAVINCI_GPIO_BASE,
 	.gpio_num		= 43, /* Only 33 usable */
 	.gpio_irq		= IRQ_DM646X_GPIOBNK0,
 	.serial_dev		= &dm646x_serial_device,
@@ -879,12 +860,6 @@ static struct davinci_soc_info davinci_soc_info_dm646x = {
 	.sram_dma		= 0x10010000,
 	.sram_len		= SZ_32K,
 };
-
-void __init dm646x_init_ide()
-{
-	davinci_cfg_reg(DM646X_ATAEN);
-	platform_device_register(&ide_dev);
-}
 
 void __init dm646x_init_mcasp0(struct snd_platform_data *pdata)
 {
@@ -903,15 +878,14 @@ void dm646x_setup_vpif(struct vpif_display_config *display_config,
 		       struct vpif_capture_config *capture_config)
 {
 	unsigned int value;
-	void __iomem *base = IO_ADDRESS(DAVINCI_SYSTEM_MODULE_BASE);
 
-	value = __raw_readl(base + VSCLKDIS_OFFSET);
+	value = __raw_readl(DAVINCI_SYSMOD_VIRT(SYSMOD_VSCLKDIS));
 	value &= ~VSCLKDIS_MASK;
-	__raw_writel(value, base + VSCLKDIS_OFFSET);
+	__raw_writel(value, DAVINCI_SYSMOD_VIRT(SYSMOD_VSCLKDIS));
 
-	value = __raw_readl(base + VDD3P3V_PWDN_OFFSET);
+	value = __raw_readl(DAVINCI_SYSMOD_VIRT(SYSMOD_VDD3P3VPWDN));
 	value &= ~VDD3P3V_VID_MASK;
-	__raw_writel(value, base + VDD3P3V_PWDN_OFFSET);
+	__raw_writel(value, DAVINCI_SYSMOD_VIRT(SYSMOD_VDD3P3VPWDN));
 
 	davinci_cfg_reg(DM646X_STSOMUX_DISABLE);
 	davinci_cfg_reg(DM646X_STSIMUX_DISABLE);
@@ -925,9 +899,17 @@ void dm646x_setup_vpif(struct vpif_display_config *display_config,
 	platform_device_register(&vpif_capture_dev);
 }
 
+int __init dm646x_init_edma(struct edma_rsv_info *rsv)
+{
+	edma_cc0_info.rsv = rsv;
+
+	return platform_device_register(&dm646x_edma_device);
+}
+
 void __init dm646x_init(void)
 {
 	davinci_common_init(&davinci_soc_info_dm646x);
+	davinci_map_sysmod();
 }
 
 static int __init dm646x_init_devices(void)
@@ -935,8 +917,11 @@ static int __init dm646x_init_devices(void)
 	if (!cpu_is_davinci_dm646x())
 		return 0;
 
-	platform_device_register(&dm646x_edma_device);
+	platform_device_register(&dm646x_mdio_device);
 	platform_device_register(&dm646x_emac_device);
+	clk_add_alias(NULL, dev_name(&dm646x_mdio_device.dev),
+		      NULL, &dm646x_emac_device.dev);
+
 	return 0;
 }
 postcore_initcall(dm646x_init_devices);

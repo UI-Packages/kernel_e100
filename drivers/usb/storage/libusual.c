@@ -173,16 +173,6 @@ static int usu_probe_thread(void *arg)
 	complete_and_exit(&usu_end_notify, 0);
 }
 
-static int _hub_probe_func(struct device *dev, void *unused)
-{
-	if (memcmp(dev->driver->name, "hub", 4) != 0) {
-		return 0;
-	}
-	printk(KERN_INFO "Probing USB hub...\n");
-	dev->driver->probe(dev);
-	return 0;
-}
-
 /*
  */
 static int __init usb_usual_init(void)
@@ -192,13 +182,6 @@ static int __init usb_usual_init(void)
 	mutex_lock(&usu_probe_mutex);
 	rc = usb_register(&usu_driver);
 	mutex_unlock(&usu_probe_mutex);
-	if (rc == 0) {
-		if (bus_for_each_dev(&usb_bus_type, NULL, NULL,
-				     _hub_probe_func) == 0) {
-			bus_rescan_devices(&usb_bus_type);
-		}
-		return 0;
-	}
 	return rc;
 }
 

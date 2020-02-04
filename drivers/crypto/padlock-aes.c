@@ -9,6 +9,7 @@
 
 #include <crypto/algapi.h>
 #include <crypto/aes.h>
+#include <crypto/padlock.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/types.h>
@@ -17,10 +18,11 @@
 #include <linux/kernel.h>
 #include <linux/percpu.h>
 #include <linux/smp.h>
+#include <linux/slab.h>
+#include <asm/cpu_device_id.h>
 #include <asm/byteorder.h>
 #include <asm/processor.h>
 #include <asm/i387.h>
-#include "padlock.h"
 
 /*
  * Number of data blocks actually fetched for each xcrypt insn.
@@ -64,7 +66,7 @@ struct aes_ctx {
 	u32 *D;
 };
 
-static DEFINE_PER_CPU(struct cword *, last_cword);
+static DEFINE_PER_CPU(struct cword *, paes_last_cword);
 
 /* Tells whether the ACE is capable to generate
    the extended key for a given key_len. */
@@ -152,9 +154,9 @@ static int aes_set_key(struct crypto_tfm *tfm, const u8 *in_key,
 
 ok:
 	for_each_online_cpu(cpu)
-		if (&ctx->cword.encrypt == per_cpu(last_cword, cpu) ||
-		    &ctx->cword.decrypt == per_cpu(last_cword, cpu))
-			per_cpu(last_cword, cpu) = NULL;
+		if (&ctx->cword.encrypt == per_cpu(paes_last_cword, cpu) ||
+		    &ctx->cword.decrypt == per_cpu(paes_last_cword, cpu))
+			per_cpu(paes_last_cword, cpu) = NULL;
 
 	return 0;
 }
@@ -166,7 +168,7 @@ static inline void padlock_reset_key(struct cword *cword)
 {
 	int cpu = raw_smp_processor_id();
 
-	if (cword != per_cpu(last_cword, cpu))
+	if (cword != per_cpu(paes_last_cword, cpu))
 #ifndef CONFIG_X86_64
 		asm volatile ("pushfl; popfl");
 #else
@@ -176,7 +178,7 @@ static inline void padlock_reset_key(struct cword *cword)
 
 static inline void padlock_store_cword(struct cword *cword)
 {
-	per_cpu(last_cword, raw_smp_processor_id()) = cword;
+	per_cpu(paes_last_cword, raw_smp_processor_id()) = cword;
 }
 
 /*
@@ -285,7 +287,7 @@ static inline u8 *padlock_xcrypt_cbc(const u8 *input, u8 *output, void *key,
 	if (initial)
 		asm volatile (".byte 0xf3,0x0f,0xa7,0xd0"	/* rep xcryptcbc */
 			      : "+S" (input), "+D" (output), "+a" (iv)
-			      : "d" (control_word), "b" (key), "c" (count));
+			      : "d" (control_word), "b" (key), "c" (initial));
 
 	asm volatile (".byte 0xf3,0x0f,0xa7,0xd0"	/* rep xcryptcbc */
 		      : "+S" (input), "+D" (output), "+a" (iv)
@@ -502,15 +504,19 @@ static struct crypto_alg cbc_aes_alg = {
 	}
 };
 
+static struct x86_cpu_id padlock_cpu_id[] = {
+	X86_FEATURE_MATCH(X86_FEATURE_XCRYPT),
+	{}
+};
+MODULE_DEVICE_TABLE(x86cpu, padlock_cpu_id);
+
 static int __init padlock_init(void)
 {
 	int ret;
 	struct cpuinfo_x86 *c = &cpu_data(0);
 
-	if (!cpu_has_xcrypt) {
-		printk(KERN_NOTICE PFX "VIA PadLock not detected.\n");
+	if (!x86_match_cpu(padlock_cpu_id))
 		return -ENODEV;
-	}
 
 	if (!cpu_has_xcrypt_enabled) {
 		printk(KERN_NOTICE PFX "VIA PadLock detected, but not enabled. Hmm, strange...\n");

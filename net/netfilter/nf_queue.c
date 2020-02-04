@@ -1,4 +1,5 @@
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
@@ -8,6 +9,7 @@
 #include <linux/rcupdate.h>
 #include <net/protocol.h>
 #include <net/netfilter/nf_queue.h>
+#include <net/dst.h>
 
 #include "nf_internals.h"
 
@@ -16,23 +18,46 @@
  * long term mutex.  The handler must provide an an outfn() to accept packets
  * for queueing and must reinject all packets it receives, no matter what.
  */
-static const struct nf_queue_handler *queue_handler[NFPROTO_NUMPROTO] __read_mostly;
+static const struct nf_queue_handler __rcu *queue_handler[NFPROTO_NUMPROTO] __read_mostly;
 
 static DEFINE_MUTEX(queue_handler_mutex);
+
+#if defined(CONFIG_IMQ) || defined(CONFIG_IMQ_MODULE)
+static const struct nf_queue_handler *queue_imq_handler;
+
+void nf_register_queue_imq_handler(const struct nf_queue_handler *qh)
+{
+	mutex_lock(&queue_handler_mutex);
+	rcu_assign_pointer(queue_imq_handler, qh);
+	mutex_unlock(&queue_handler_mutex);
+}
+EXPORT_SYMBOL_GPL(nf_register_queue_imq_handler);
+
+void nf_unregister_queue_imq_handler(void)
+{
+	mutex_lock(&queue_handler_mutex);
+	rcu_assign_pointer(queue_imq_handler, NULL);
+	mutex_unlock(&queue_handler_mutex);
+}
+EXPORT_SYMBOL_GPL(nf_unregister_queue_imq_handler);
+#endif
 
 /* return EBUSY when somebody else is registered, return EEXIST if the
  * same handler is registered, return 0 in case of success. */
 int nf_register_queue_handler(u_int8_t pf, const struct nf_queue_handler *qh)
 {
 	int ret;
+	const struct nf_queue_handler *old;
 
 	if (pf >= ARRAY_SIZE(queue_handler))
 		return -EINVAL;
 
 	mutex_lock(&queue_handler_mutex);
-	if (queue_handler[pf] == qh)
+	old = rcu_dereference_protected(queue_handler[pf],
+					lockdep_is_held(&queue_handler_mutex));
+	if (old == qh)
 		ret = -EEXIST;
-	else if (queue_handler[pf])
+	else if (old)
 		ret = -EBUSY;
 	else {
 		rcu_assign_pointer(queue_handler[pf], qh);
@@ -47,16 +72,20 @@ EXPORT_SYMBOL(nf_register_queue_handler);
 /* The caller must flush their queue before this */
 int nf_unregister_queue_handler(u_int8_t pf, const struct nf_queue_handler *qh)
 {
+	const struct nf_queue_handler *old;
+
 	if (pf >= ARRAY_SIZE(queue_handler))
 		return -EINVAL;
 
 	mutex_lock(&queue_handler_mutex);
-	if (queue_handler[pf] && queue_handler[pf] != qh) {
+	old = rcu_dereference_protected(queue_handler[pf],
+					lockdep_is_held(&queue_handler_mutex));
+	if (old && old != qh) {
 		mutex_unlock(&queue_handler_mutex);
 		return -EINVAL;
 	}
 
-	rcu_assign_pointer(queue_handler[pf], NULL);
+	RCU_INIT_POINTER(queue_handler[pf], NULL);
 	mutex_unlock(&queue_handler_mutex);
 
 	synchronize_rcu();
@@ -71,8 +100,11 @@ void nf_unregister_queue_handlers(const struct nf_queue_handler *qh)
 
 	mutex_lock(&queue_handler_mutex);
 	for (pf = 0; pf < ARRAY_SIZE(queue_handler); pf++)  {
-		if (queue_handler[pf] == qh)
-			rcu_assign_pointer(queue_handler[pf], NULL);
+		if (rcu_dereference_protected(
+				queue_handler[pf],
+				lockdep_is_held(&queue_handler_mutex)
+				) == qh)
+			RCU_INIT_POINTER(queue_handler[pf], NULL);
 	}
 	mutex_unlock(&queue_handler_mutex);
 
@@ -80,7 +112,7 @@ void nf_unregister_queue_handlers(const struct nf_queue_handler *qh)
 }
 EXPORT_SYMBOL_GPL(nf_unregister_queue_handlers);
 
-static void nf_queue_entry_release_refs(struct nf_queue_entry *entry)
+void nf_queue_entry_release_refs(struct nf_queue_entry *entry)
 {
 	/* Release those devices we held, or Alexey will kill me. */
 	if (entry->indev)
@@ -100,6 +132,7 @@ static void nf_queue_entry_release_refs(struct nf_queue_entry *entry)
 	/* Drop reference to owner of hook which queued us. */
 	module_put(entry->elem->owner);
 }
+EXPORT_SYMBOL_GPL(nf_queue_entry_release_refs);
 
 /*
  * Any packet that leaves via this function must come back
@@ -111,9 +144,10 @@ static int __nf_queue(struct sk_buff *skb,
 		      struct net_device *indev,
 		      struct net_device *outdev,
 		      int (*okfn)(struct sk_buff *),
-		      unsigned int queuenum)
+		      unsigned int queuenum,
+		      unsigned int queuetype)
 {
-	int status;
+	int status = -ENOENT;
 	struct nf_queue_entry *entry = NULL;
 #ifdef CONFIG_BRIDGE_NETFILTER
 	struct net_device *physindev;
@@ -122,20 +156,34 @@ static int __nf_queue(struct sk_buff *skb,
 	const struct nf_afinfo *afinfo;
 	const struct nf_queue_handler *qh;
 
-	/* QUEUE == DROP if noone is waiting, to be safe. */
+	/* QUEUE == DROP if no one is waiting, to be safe. */
 	rcu_read_lock();
 
-	qh = rcu_dereference(queue_handler[pf]);
-	if (!qh)
+	if (queuetype == NF_IMQ_QUEUE) {
+#if defined(CONFIG_IMQ) || defined(CONFIG_IMQ_MODULE)
+		qh = rcu_dereference(queue_imq_handler);
+#else
+		BUG();
 		goto err_unlock;
+#endif
+	} else {
+		qh = rcu_dereference(queue_handler[pf]);
+	}
+
+	if (!qh) {
+		status = -ESRCH;
+		goto err_unlock;
+	}
 
 	afinfo = nf_get_afinfo(pf);
 	if (!afinfo)
 		goto err_unlock;
 
 	entry = kmalloc(sizeof(*entry) + afinfo->route_key_size, GFP_ATOMIC);
-	if (!entry)
+	if (!entry) {
+		status = -ENOMEM;
 		goto err_unlock;
+	}
 
 	*entry = (struct nf_queue_entry) {
 		.skb	= skb,
@@ -149,11 +197,9 @@ static int __nf_queue(struct sk_buff *skb,
 
 	/* If it's going away, ignore hook. */
 	if (!try_module_get(entry->elem->owner)) {
-		rcu_read_unlock();
-		kfree(entry);
-		return 0;
+		status = -ECANCELED;
+		goto err_unlock;
 	}
-
 	/* Bump dev refs so they don't vanish while packet is out */
 	if (indev)
 		dev_hold(indev);
@@ -169,6 +215,7 @@ static int __nf_queue(struct sk_buff *skb,
 			dev_hold(physoutdev);
 	}
 #endif
+	skb_dst_force(skb);
 	afinfo->saveroute(skb, entry);
 	status = qh->outfn(entry, queuenum);
 
@@ -179,15 +226,35 @@ static int __nf_queue(struct sk_buff *skb,
 		goto err;
 	}
 
-	return 1;
+	return 0;
 
 err_unlock:
 	rcu_read_unlock();
 err:
-	kfree_skb(skb);
 	kfree(entry);
-	return 1;
+	return status;
 }
+
+#ifdef CONFIG_BRIDGE_NETFILTER
+/* When called from bridge netfilter, skb->data must point to MAC header
+ * before calling skb_gso_segment(). Else, original MAC header is lost
+ * and segmented skbs will be sent to wrong destination.
+ */
+static void nf_bridge_adjust_skb_data(struct sk_buff *skb)
+{
+	if (skb->nf_bridge)
+		__skb_push(skb, skb->network_header - skb->mac_header);
+}
+
+static void nf_bridge_adjust_segmented_data(struct sk_buff *skb)
+{
+	if (skb->nf_bridge)
+		__skb_pull(skb, skb->network_header - skb->mac_header);
+}
+#else
+#define nf_bridge_adjust_skb_data(s) do {} while (0)
+#define nf_bridge_adjust_segmented_data(s) do {} while (0)
+#endif
 
 int nf_queue(struct sk_buff *skb,
 	     struct list_head *elem,
@@ -195,13 +262,16 @@ int nf_queue(struct sk_buff *skb,
 	     struct net_device *indev,
 	     struct net_device *outdev,
 	     int (*okfn)(struct sk_buff *),
-	     unsigned int queuenum)
+	     unsigned int queuenum,
+	     unsigned int queuetype)
 {
 	struct sk_buff *segs;
+	int err = -EINVAL;
+	unsigned int queued;
 
 	if (!skb_is_gso(skb))
 		return __nf_queue(skb, elem, pf, hook, indev, outdev, okfn,
-				  queuenum);
+				  queuenum, queuetype);
 
 	switch (pf) {
 	case NFPROTO_IPV4:
@@ -212,21 +282,39 @@ int nf_queue(struct sk_buff *skb,
 		break;
 	}
 
+	nf_bridge_adjust_skb_data(skb);
 	segs = skb_gso_segment(skb, 0);
-	kfree_skb(skb);
+	/* Does not use PTR_ERR to limit the number of error codes that can be
+	 * returned by nf_queue.  For instance, callers rely on -ECANCELED to mean
+	 * 'ignore this hook'.
+	 */
 	if (IS_ERR(segs))
-		return 1;
-
+		goto out_err;
+	queued = 0;
+	err = 0;
 	do {
 		struct sk_buff *nskb = segs->next;
 
 		segs->next = NULL;
-		if (!__nf_queue(segs, elem, pf, hook, indev, outdev, okfn,
-				queuenum))
+		if (err == 0) {
+			nf_bridge_adjust_segmented_data(segs);
+			err = __nf_queue(segs, elem, pf, hook, indev,
+					   outdev, okfn, queuenum, queuetype);
+		}
+		if (err == 0)
+			queued++;
+		else
 			kfree_skb(segs);
 		segs = nskb;
 	} while (segs);
-	return 1;
+
+	if (queued) {
+		kfree_skb(skb);
+		return 0;
+	}
+  out_err:
+	nf_bridge_adjust_segmented_data(skb);
+	return err;
 }
 
 void nf_reinject(struct nf_queue_entry *entry, unsigned int verdict)
@@ -234,6 +322,7 @@ void nf_reinject(struct nf_queue_entry *entry, unsigned int verdict)
 	struct sk_buff *skb = entry->skb;
 	struct list_head *elem = &entry->elem->list;
 	const struct nf_afinfo *afinfo;
+	int err;
 
 	rcu_read_lock();
 
@@ -265,20 +354,29 @@ void nf_reinject(struct nf_queue_entry *entry, unsigned int verdict)
 		local_bh_disable();
 		entry->okfn(skb);
 		local_bh_enable();
-	case NF_STOLEN:
 		break;
 	case NF_QUEUE:
-		if (!__nf_queue(skb, elem, entry->pf, entry->hook,
-				entry->indev, entry->outdev, entry->okfn,
-				verdict >> NF_VERDICT_BITS))
-			goto next_hook;
+	case NF_IMQ_QUEUE:
+		err = __nf_queue(skb, elem, entry->pf, entry->hook,
+				 entry->indev, entry->outdev, entry->okfn,
+				 verdict >> NF_VERDICT_QBITS,
+				 verdict & NF_VERDICT_MASK);
+		if (err < 0) {
+			if (err == -ECANCELED)
+				goto next_hook;
+			if (err == -ESRCH &&
+			   (verdict & NF_VERDICT_FLAG_QUEUE_BYPASS))
+				goto next_hook;
+			kfree_skb(skb);
+		}
+		break;
+	case NF_STOLEN:
 		break;
 	default:
 		kfree_skb(skb);
 	}
 	rcu_read_unlock();
 	kfree(entry);
-	return;
 }
 EXPORT_SYMBOL(nf_reinject);
 

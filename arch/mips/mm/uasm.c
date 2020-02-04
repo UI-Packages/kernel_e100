@@ -62,13 +62,14 @@ enum opcode {
 	insn_beql, insn_bgez, insn_bgezl, insn_bltz, insn_bltzl,
 	insn_bne, insn_cache, insn_daddu, insn_daddiu, insn_dmfc0,
 	insn_dmtc0, insn_dsll, insn_dsll32, insn_dsra, insn_dsrl,
-	insn_dsrl32, insn_drotr, insn_drotr32, insn_dsubu, insn_eret, insn_j, insn_jal, insn_jr,
-	insn_ld, insn_ll, insn_lld, insn_lui, insn_lw, insn_mfc0,
-	insn_mtc0, insn_or, insn_ori, insn_pref, insn_rfe, insn_sc, insn_scd,
-	insn_sd, insn_sll, insn_sra, insn_srl, insn_rotr, insn_subu, insn_sw,
-	insn_tlbp, insn_tlbr, insn_tlbwi, insn_tlbwr, insn_xor, insn_xori,
-	insn_dins, insn_dinsm, insn_bbit0, insn_bbit1, insn_lwx, insn_ldx,
-	insn_syscall, insn_zcb, insn_zcbt
+	insn_dsrl32, insn_drotr, insn_drotr32, insn_dsubu, insn_eret,
+	insn_j, insn_jal, insn_jr, insn_ld, insn_ll, insn_lld,
+	insn_lui, insn_lw, insn_mfc0, insn_mtc0, insn_or, insn_ori,
+	insn_pref, insn_rfe, insn_sc, insn_scd, insn_sd, insn_sll,
+	insn_sra, insn_srl, insn_rotr, insn_subu, insn_sw, insn_tlbp,
+	insn_tlbr, insn_tlbwi, insn_tlbwr, insn_xor, insn_xori,
+	insn_dins, insn_dinsm, insn_syscall, insn_bbit0, insn_bbit1,
+	insn_lwx, insn_ldx, insn_zcb, insn_zcbt
 };
 
 struct insn {
@@ -143,11 +144,11 @@ static struct insn insn_table[] __uasminitdata = {
 	{ insn_xori,  M(xori_op, 0, 0, 0, 0, 0),  RS | RT | UIMM },
 	{ insn_dins, M(spec3_op, 0, 0, 0, 0, dins_op), RS | RT | RD | RE },
 	{ insn_dinsm, M(spec3_op, 0, 0, 0, 0, dinsm_op), RS | RT | RD | RE },
+	{ insn_syscall, M(spec_op, 0, 0, 0, 0, syscall_op), SCIMM},
 	{ insn_bbit0, M(lwc2_op, 0, 0, 0, 0, 0), RS | RT | BIMM },
 	{ insn_bbit1, M(swc2_op, 0, 0, 0, 0, 0), RS | RT | BIMM },
 	{ insn_lwx, M(spec3_op, 0, 0, 0, lwx_op, lx_op), RS | RT | RD },
 	{ insn_ldx, M(spec3_op, 0, 0, 0, ldx_op, lx_op), RS | RT | RD },
-	{ insn_syscall, M(spec_op, 0, 0, 0, 0, syscall_op), SCIMM},
 	{ insn_zcb,  M(spec2_op, 0, 0, 0, zcb_op, cvm_op),  RS },
 	{ insn_zcbt,  M(spec2_op, 0, 0, 0, zcbt_op, cvm_op),  RS },
 	{ insn_invalid, 0, 0 }
@@ -155,107 +156,85 @@ static struct insn insn_table[] __uasminitdata = {
 
 #undef M
 
-enum uasm_error {UASM_ERROR_FIELD_OVERFLOW, UASM_ERROR_BRANCH_TARGET};
-
-__uasminit void mips_uasm_error(enum uasm_error t)
-{
-	switch (t) {
-	case UASM_ERROR_FIELD_OVERFLOW:
-		pr_warning("Micro-assembler field overflow\n");
-		break;
-	case UASM_ERROR_BRANCH_TARGET:
-		pr_warning("Invalid micro-assembler branch target\n");
-		break;
-	}
-}
-
 static inline __uasminit u32 build_rs(u32 arg)
 {
-	if (arg & ~RS_MASK)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg & ~RS_MASK, KERN_WARNING "Micro-assembler field overflow\n");
 
 	return (arg & RS_MASK) << RS_SH;
 }
 
 static inline __uasminit u32 build_rt(u32 arg)
 {
-	if (arg & ~RT_MASK)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg & ~RT_MASK, KERN_WARNING "Micro-assembler field overflow\n");
 
 	return (arg & RT_MASK) << RT_SH;
 }
 
 static inline __uasminit u32 build_rd(u32 arg)
 {
-	if (arg & ~RD_MASK)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg & ~RD_MASK, KERN_WARNING "Micro-assembler field overflow\n");
 
 	return (arg & RD_MASK) << RD_SH;
 }
 
 static inline __uasminit u32 build_re(u32 arg)
 {
-	if (arg & ~RE_MASK)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg & ~RE_MASK, KERN_WARNING "Micro-assembler field overflow\n");
 
 	return (arg & RE_MASK) << RE_SH;
 }
 
 static inline __uasminit u32 build_simm(s32 arg)
 {
-	if (arg > 0x7fff || arg < -0x8000)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg > 0x7fff || arg < -0x8000,
+	     KERN_WARNING "Micro-assembler field overflow\n");
 
 	return arg & 0xffff;
 }
 
 static inline __uasminit u32 build_uimm(u32 arg)
 {
-	if (arg & ~IMM_MASK)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg & ~IMM_MASK, KERN_WARNING "Micro-assembler field overflow\n");
 
 	return arg & IMM_MASK;
 }
 
 static inline __uasminit u32 build_bimm(s32 arg)
 {
-	if (arg > 0x1ffff || arg < -0x20000)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg > 0x1ffff || arg < -0x20000,
+	     KERN_WARNING "Micro-assembler field overflow\n");
 
-	if (arg & 0x3)
-		mips_uasm_error(UASM_ERROR_BRANCH_TARGET);
+	WARN(arg & 0x3, KERN_WARNING "Invalid micro-assembler branch target\n");
 
 	return ((arg < 0) ? (1 << 15) : 0) | ((arg >> 2) & 0x7fff);
 }
 
 static inline __uasminit u32 build_jimm(u32 arg)
 {
-	if (arg & ~((JIMM_MASK) << 2))
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg & ~(JIMM_MASK << 2),
+	     KERN_WARNING "Micro-assembler field overflow\n");
 
 	return (arg >> 2) & JIMM_MASK;
 }
 
 static inline __uasminit u32 build_scimm(u32 arg)
 {
-	if (arg & ~SCIMM_MASK)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg & ~SCIMM_MASK,
+	     KERN_WARNING "Micro-assembler field overflow\n");
 
 	return (arg & SCIMM_MASK) << SCIMM_SH;
 }
 
 static inline __uasminit u32 build_func(u32 arg)
 {
-	if (arg & ~FUNC_MASK)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg & ~FUNC_MASK, KERN_WARNING "Micro-assembler field overflow\n");
 
 	return arg & FUNC_MASK;
 }
 
 static inline __uasminit u32 build_set(u32 arg)
 {
-	if (arg & ~SET_MASK)
-		mips_uasm_error(UASM_ERROR_FIELD_OVERFLOW);
+	WARN(arg & ~SET_MASK, KERN_WARNING "Micro-assembler field overflow\n");
 
 	return arg & SET_MASK;
 }
@@ -449,11 +428,11 @@ I_u3u1u2(_xor)
 I_u2u1u3(_xori)
 I_u2u1msbu3(_dins);
 I_u2u1msb32u3(_dinsm);
+I_u1(_syscall);
 I_u1u2s3(_bbit0);
 I_u1u2s3(_bbit1);
 I_u3u1u2(_lwx)
 I_u3u1u2(_ldx)
-I_u1(_syscall);
 I_u1(_zcb);
 I_u1(_zcbt);
 
@@ -462,7 +441,7 @@ I_u1(_zcbt);
 void __uasminit uasm_i_pref(u32 **buf, unsigned int a, signed int b,
 			    unsigned int c)
 {
-	if (OCTEON_IS_MODEL(OCTEON_CN63XX_PASS1_X) && a <= 24 && a != 5)
+	if (CAVIUM_OCTEON_DCACHE_PREFETCH_WAR && a <= 24 && a != 5)
 		/*
 		 * As per erratum Core-14449, replace prefetches 0-4,
 		 * 6-24 with 'pref 28'.

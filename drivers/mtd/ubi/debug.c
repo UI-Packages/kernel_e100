@@ -216,7 +216,7 @@ void ubi_dbg_dump_flash(struct ubi_device *ubi, int pnum, int offset, int len)
 	buf = vmalloc(len);
 	if (!buf)
 		return;
-	err = ubi->mtd->read(ubi->mtd, addr, len, &read, buf);
+	err = mtd_read(ubi->mtd, addr, len, &read, buf);
 	if (err && err != -EUCLEAN) {
 		ubi_err("error %d while reading %d bytes from PEB %d:%d, "
 			"read %zd bytes", err, len, pnum, offset, read);
@@ -386,19 +386,11 @@ out:
 	return count;
 }
 
-static int default_open(struct inode *inode, struct file *file)
-{
-	if (inode->i_private)
-		file->private_data = inode->i_private;
-
-	return 0;
-}
-
 /* File operations for all UBI debugfs files */
 static const struct file_operations dfs_fops = {
 	.read   = dfs_file_read,
 	.write  = dfs_file_write,
-	.open   = default_open,
+	.open	= simple_open,
 	.llseek = no_llseek,
 	.owner  = THIS_MODULE,
 };

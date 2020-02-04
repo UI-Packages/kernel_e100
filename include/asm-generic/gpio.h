@@ -4,6 +4,7 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/errno.h>
+#include <linux/of.h>
 
 #ifdef CONFIG_GPIOLIB
 
@@ -16,20 +17,35 @@
  * While the GPIO programming interface defines valid GPIO numbers
  * to be in the range 0..MAX_INT, this library restricts them to the
  * smaller range 0..ARCH_NR_GPIOS-1.
+ *
+ * ARCH_NR_GPIOS is somewhat arbitrary; it usually reflects the sum of
+ * builtin/SoC GPIOs plus a number of GPIOs on expanders; the latter is
+ * actually an estimate of a board-specific value.
  */
 
 #ifndef ARCH_NR_GPIOS
 #define ARCH_NR_GPIOS		256
 #endif
 
-static inline int gpio_is_valid(int number)
+/*
+ * "valid" GPIO numbers are nonnegative and may be passed to
+ * setup routines like gpio_request().  only some valid numbers
+ * can successfully be requested and used.
+ *
+ * Invalid GPIO numbers are useful for indicating no-such-GPIO in
+ * platform data and other tables.
+ */
+
+static inline bool gpio_is_valid(int number)
 {
-	/* only some non-negative numbers are valid */
-	return ((unsigned)number) < ARCH_NR_GPIOS;
+	return number >= 0 && number < ARCH_NR_GPIOS;
 }
 
+struct device;
+struct gpio;
 struct seq_file;
 struct module;
+struct device_node;
 
 /**
  * struct gpio_chip - abstract a GPIO controller
@@ -59,7 +75,9 @@ struct module;
  * @names: if set, must be an array of strings to use as alternative
  *      names for the GPIOs in this chip. Any entry in the array
  *      may be NULL if there is no alias for the GPIO, however the
- *      array must be @ngpio entries long.
+ *      array must be @ngpio entries long.  A name can include a single printk
+ *      format specifier for an unsigned int.  It is substituted by the actual
+ *      number of the gpio.
  *
  * A gpio_chip can help platforms abstract various sources of GPIOs so
  * they can all be accessed through a common programing interface.
@@ -87,6 +105,9 @@ struct gpio_chip {
 						unsigned offset);
 	int			(*direction_output)(struct gpio_chip *chip,
 						unsigned offset, int value);
+	int			(*set_debounce)(struct gpio_chip *chip,
+						unsigned offset, unsigned debounce);
+
 	void			(*set)(struct gpio_chip *chip,
 						unsigned offset, int value);
 
@@ -97,18 +118,33 @@ struct gpio_chip {
 						struct gpio_chip *chip);
 	int			base;
 	u16			ngpio;
-	char			**names;
+	const char		*const *names;
 	unsigned		can_sleep:1;
 	unsigned		exported:1;
+
+#if defined(CONFIG_OF_GPIO)
+	/*
+	 * If CONFIG_OF is enabled, then all GPIO controllers described in the
+	 * device tree automatically may have an OF translation
+	 */
+	struct device_node *of_node;
+	int of_gpio_n_cells;
+	int (*of_xlate)(struct gpio_chip *gc,
+		        const struct of_phandle_args *gpiospec, u32 *flags);
+#endif
 };
 
 extern const char *gpiochip_is_requested(struct gpio_chip *chip,
 			unsigned offset);
+extern struct gpio_chip *gpio_to_chip(unsigned gpio);
 extern int __must_check gpiochip_reserve(int start, int ngpio);
 
 /* add/remove chips */
 extern int gpiochip_add(struct gpio_chip *chip);
 extern int __must_check gpiochip_remove(struct gpio_chip *chip);
+extern struct gpio_chip *gpiochip_find(const void *data,
+					int (*match)(struct gpio_chip *chip,
+						     const void *data));
 
 
 /* Always use the library code for GPIO management calls,
@@ -119,6 +155,8 @@ extern void gpio_free(unsigned gpio);
 
 extern int gpio_direction_input(unsigned gpio);
 extern int gpio_direction_output(unsigned gpio, int value);
+
+extern int gpio_set_debounce(unsigned gpio, unsigned debounce);
 
 extern int gpio_get_value_cansleep(unsigned gpio);
 extern void gpio_set_value_cansleep(unsigned gpio, int value);
@@ -135,6 +173,14 @@ extern int __gpio_cansleep(unsigned gpio);
 
 extern int __gpio_to_irq(unsigned gpio);
 
+extern int gpio_request_one(unsigned gpio, unsigned long flags, const char *label);
+extern int gpio_request_array(const struct gpio *array, size_t num);
+extern void gpio_free_array(const struct gpio *array, size_t num);
+
+/* bindings for managed devices that want to request gpios */
+int devm_gpio_request(struct device *dev, unsigned gpio, const char *label);
+void devm_gpio_free(struct device *dev, unsigned int gpio);
+
 #ifdef CONFIG_GPIO_SYSFS
 
 /*
@@ -144,13 +190,14 @@ extern int __gpio_to_irq(unsigned gpio);
 extern int gpio_export(unsigned gpio, bool direction_may_change);
 extern int gpio_export_link(struct device *dev, const char *name,
 			unsigned gpio);
+extern int gpio_sysfs_set_active_low(unsigned gpio, int value);
 extern void gpio_unexport(unsigned gpio);
 
 #endif	/* CONFIG_GPIO_SYSFS */
 
-#else	/* !CONFIG_HAVE_GPIO_LIB */
+#else	/* !CONFIG_GPIOLIB */
 
-static inline int gpio_is_valid(int number)
+static inline bool gpio_is_valid(int number)
 {
 	/* only non-negative numbers are valid */
 	return number >= 0;
@@ -168,18 +215,20 @@ static inline int gpio_cansleep(unsigned gpio)
 static inline int gpio_get_value_cansleep(unsigned gpio)
 {
 	might_sleep();
-	return gpio_get_value(gpio);
+	return __gpio_get_value(gpio);
 }
 
 static inline void gpio_set_value_cansleep(unsigned gpio, int value)
 {
 	might_sleep();
-	gpio_set_value(gpio, value);
+	__gpio_set_value(gpio, value);
 }
 
-#endif /* !CONFIG_HAVE_GPIO_LIB */
+#endif /* !CONFIG_GPIOLIB */
 
 #ifndef CONFIG_GPIO_SYSFS
+
+struct device;
 
 /* sysfs support is only available with gpiolib, where it's optional */
 
@@ -190,6 +239,11 @@ static inline int gpio_export(unsigned gpio, bool direction_may_change)
 
 static inline int gpio_export_link(struct device *dev, const char *name,
 				unsigned gpio)
+{
+	return -ENOSYS;
+}
+
+static inline int gpio_sysfs_set_active_low(unsigned gpio, int value)
 {
 	return -ENOSYS;
 }

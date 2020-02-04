@@ -362,7 +362,7 @@ union mips_instruction {
 	struct c_format c_format;
 	struct r_format r_format;
 	struct f_format f_format;
-        struct ma_format ma_format;
+	struct ma_format ma_format;
 	struct b_format b_format;
 };
 

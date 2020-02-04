@@ -45,7 +45,7 @@ static ssize_t timeout_write(struct file *file, char const __user *buf,
 		return -EINVAL;
 
 	retval = oprofilefs_ulong_from_user(&val, buf, count);
-	if (retval)
+	if (retval <= 0)
 		return retval;
 
 	retval = oprofile_set_timeout(val);
@@ -59,6 +59,7 @@ static ssize_t timeout_write(struct file *file, char const __user *buf,
 static const struct file_operations timeout_fops = {
 	.read		= timeout_read,
 	.write		= timeout_write,
+	.llseek		= default_llseek,
 };
 
 #endif
@@ -79,21 +80,25 @@ static ssize_t depth_write(struct file *file, char const __user *buf, size_t cou
 	if (*offset)
 		return -EINVAL;
 
+	if (!oprofile_ops.backtrace)
+		return -EINVAL;
+
 	retval = oprofilefs_ulong_from_user(&val, buf, count);
+	if (retval <= 0)
+		return retval;
+
+	retval = oprofile_set_ulong(&oprofile_backtrace_depth, val);
 	if (retval)
 		return retval;
 
-	retval = oprofile_set_backtrace(val);
-
-	if (retval)
-		return retval;
 	return count;
 }
 
 
 static const struct file_operations depth_fops = {
 	.read		= depth_read,
-	.write		= depth_write
+	.write		= depth_write,
+	.llseek		= default_llseek,
 };
 
 
@@ -105,6 +110,7 @@ static ssize_t pointer_size_read(struct file *file, char __user *buf, size_t cou
 
 static const struct file_operations pointer_size_fops = {
 	.read		= pointer_size_read,
+	.llseek		= default_llseek,
 };
 
 
@@ -116,6 +122,7 @@ static ssize_t cpu_type_read(struct file *file, char __user *buf, size_t count, 
 
 static const struct file_operations cpu_type_fops = {
 	.read		= cpu_type_read,
+	.llseek		= default_llseek,
 };
 
 
@@ -134,9 +141,10 @@ static ssize_t enable_write(struct file *file, char const __user *buf, size_t co
 		return -EINVAL;
 
 	retval = oprofilefs_ulong_from_user(&val, buf, count);
-	if (retval)
+	if (retval <= 0)
 		return retval;
 
+	retval = 0;
 	if (val)
 		retval = oprofile_start();
 	else
@@ -151,6 +159,7 @@ static ssize_t enable_write(struct file *file, char const __user *buf, size_t co
 static const struct file_operations enable_fops = {
 	.read		= enable_read,
 	.write		= enable_write,
+	.llseek		= default_llseek,
 };
 
 
@@ -163,48 +172,8 @@ static ssize_t dump_write(struct file *file, char const __user *buf, size_t coun
 
 static const struct file_operations dump_fops = {
 	.write		= dump_write,
+	.llseek		= noop_llseek,
 };
-
-
-static ssize_t enhanced_backtrace_read(struct file *file,
-		char __user *buf, size_t count, loff_t *offset)
-{
-	return oprofilefs_ulong_to_user(oprofile_get_trace_thru_syscall(),
-			buf, count, offset);
-}
-
-
-static ssize_t enhanced_backtrace_write(struct file *file,
-		char const __user *buf, size_t count, loff_t *offset)
-{
-	unsigned long val;
-	int retval = 0;
-
-	if (*offset)
-		return -EINVAL;
-
-	retval = oprofilefs_ulong_from_user(&val, buf, count);
-	if (retval)
-		return retval;
-
-	/* Allow for additional backtracing features, but for now the only
-	 * additional capability is tracing across the system call boundary
-	 */
-	if (val & OPROFILE_SYSCALL_TRACE_ENABLE)
-		retval = oprofile_set_trace_thru_syscall(1);
-
-	if (retval)
-		return retval;
-
-	return count;
-}
-
-
-static const struct file_operations enhanced_backtrace_fops = {
-	.read       = enhanced_backtrace_read,
-	.write      = enhanced_backtrace_write,
-};
-
 
 void oprofile_create_files(struct super_block *sb, struct dentry *root)
 {
@@ -226,8 +195,6 @@ void oprofile_create_files(struct super_block *sb, struct dentry *root)
 #ifdef CONFIG_OPROFILE_EVENT_MULTIPLEX
 	oprofilefs_create_file(sb, root, "time_slice", &timeout_fops);
 #endif
-	oprofilefs_create_file(sb, root, "enhanced_backtrace", 
-					&enhanced_backtrace_fops);
 	oprofile_create_stats_files(sb, root);
 	if (oprofile_ops.create_files)
 		oprofile_ops.create_files(sb, root);

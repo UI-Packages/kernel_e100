@@ -1,6 +1,8 @@
 #ifndef __ASM_SH_BUG_H
 #define __ASM_SH_BUG_H
 
+#include <linux/linkage.h>
+
 #define TRAPA_BUG_OPCODE	0xc33e	/* trapa #0x3e */
 #define BUGFLAG_UNWINDER	(1 << 1)
 
@@ -48,7 +50,7 @@ do {							\
 		   "i" (sizeof(struct bug_entry)));	\
 } while (0)
 
-#define __WARN()					\
+#define __WARN_TAINT(taint)				\
 do {							\
 	__asm__ __volatile__ (				\
 		"1:\t.short %O0\n"			\
@@ -57,7 +59,7 @@ do {							\
 		 : "n" (TRAPA_BUG_OPCODE),		\
 		   "i" (__FILE__),			\
 		   "i" (__LINE__),			\
-		   "i" (BUGFLAG_WARNING),		\
+		   "i" (BUGFLAG_TAINT(taint)),		\
 		   "i" (sizeof(struct bug_entry)));	\
 } while (0)
 
@@ -106,5 +108,8 @@ do {							\
 #endif /* CONFIG_GENERIC_BUG */
 
 #include <asm-generic/bug.h>
+
+struct pt_regs;
+extern void die(const char *str, struct pt_regs *regs, long err) __attribute__ ((noreturn));
 
 #endif /* __ASM_SH_BUG_H */

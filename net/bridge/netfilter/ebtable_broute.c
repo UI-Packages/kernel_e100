@@ -71,7 +71,7 @@ static int __net_init broute_net_init(struct net *net)
 
 static void __net_exit broute_net_exit(struct net *net)
 {
-	ebt_unregister_table(net->xt.broute_table);
+	ebt_unregister_table(net, net->xt.broute_table);
 }
 
 static struct pernet_operations broute_net_ops = {
@@ -87,13 +87,14 @@ static int __init ebtable_broute_init(void)
 	if (ret < 0)
 		return ret;
 	/* see br_input.c */
-	rcu_assign_pointer(br_should_route_hook, ebt_broute);
+	RCU_INIT_POINTER(br_should_route_hook,
+			   (br_should_route_hook_t *)ebt_broute);
 	return 0;
 }
 
 static void __exit ebtable_broute_fini(void)
 {
-	rcu_assign_pointer(br_should_route_hook, NULL);
+	RCU_INIT_POINTER(br_should_route_hook, NULL);
 	synchronize_net();
 	unregister_pernet_subsys(&broute_net_ops);
 }

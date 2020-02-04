@@ -1,7 +1,7 @@
 /*
- * Cavium Networks CN6XXX support over SRIO
+ * Cavium Inc. CN6XXX support over SRIO
  *
- * Copyright 2010 Cavium Networks, Inc.
+ * Copyright 2010 Cavium, Inc.  Inc.
  *
  * This program is free software; you can redistribute  it and/or modify it
  * under  the terms of  the GNU General  Public License as published by the
@@ -9,6 +9,7 @@
  * option) any later version.
  */
 
+#include <linux/module.h>
 #include <linux/rio.h>
 #include <linux/rio_drv.h>
 #include <linux/rio_ids.h>
@@ -37,7 +38,7 @@ static uint64_t c6xxx_read_bar0(struct rio_dev *dev, int offset)
 		dev_err(&dev->dev, "Failed to map BAR0\n");
 		return 0;
 	}
-	result = *(uint64_t*)(bar0 + offset);
+	result = *(uint64_t *)(bar0 + offset);
 	rio_unmap_memory(dev, BAR0_ADDRESS, BAR0_SIZE, bar0);
 	return result;
 }
@@ -52,55 +53,55 @@ static void cn6xxx_doorbell(struct rio_mport *mport, void *dev_id, u16 src,
 static int cn6xxx_probe(struct rio_dev *dev, const struct rio_device_id *id)
 {
 	u32 data;
-	cvmx_sriomaintx_m2s_bar2_start_t sriomaintx_m2s_bar2_start;
-	cvmx_sriomaintx_lcs_ba0_t sriomaintx_lcs_ba0;
-	cvmx_sriomaintx_lcs_ba1_t sriomaintx_lcs_ba1;
-	cvmx_sriomaintx_m2s_bar1_start0_t sriomaintx_m2s_bar1_start0;
-	cvmx_sriomaintx_m2s_bar1_start1_t sriomaintx_m2s_bar1_start1;
-	cvmx_sriomaintx_m2s_bar0_start0_t sriomaintx_m2s_bar0_start0;
-	cvmx_sriomaintx_m2s_bar0_start1_t sriomaintx_m2s_bar0_start1;
-	cvmx_sriomaintx_core_enables_t sriomaintx_core_enables;
-	cvmx_sriomaintx_port_gen_ctl_t sriomaintx_port_gen_ctl;
-	cvmx_sriomaintx_port_0_ctl_t sriomaintx_port_0_ctl;
+	union cvmx_sriomaintx_m2s_bar2_start sriomaintx_m2s_bar2_start;
+	union cvmx_sriomaintx_lcs_ba0 sriomaintx_lcs_ba0;
+	union cvmx_sriomaintx_lcs_ba1 sriomaintx_lcs_ba1;
+	union cvmx_sriomaintx_m2s_bar1_start0 sriomaintx_m2s_bar1_start0;
+	union cvmx_sriomaintx_m2s_bar1_start1 sriomaintx_m2s_bar1_start1;
+	union cvmx_sriomaintx_m2s_bar0_start0 sriomaintx_m2s_bar0_start0;
+	union cvmx_sriomaintx_m2s_bar0_start1 sriomaintx_m2s_bar0_start1;
+	union cvmx_sriomaintx_core_enables sriomaintx_core_enables;
+	union cvmx_sriomaintx_port_gen_ctl sriomaintx_port_gen_ctl;
+	union cvmx_sriomaintx_port_0_ctl sriomaintx_port_0_ctl;
 	const char *state;
 	int index;
 
 	if (rio_read_config_32(dev, CVMX_SRIOMAINTX_IR_PI_PHY_STAT(0), &data))
 		return -1;
 	switch (data & 0x3ff) {
-		case 0x0:
-			state = "Silent";
-			break;
-		case 0x2:
-			state = "Seek";
-			break;
-		case 0x4:
-			state = "Discovery";
-			break;
-		case 0x8:
-			state = "1x Mode Lane 0";
-			break;
-		case 0x10:
-			state = "1x Mode Lane 1";
-			break;
-		case 0x20:
-			state = "1x Mode Lane 2";
-			break;
-		case 0x40:
-			state = "1x Recovery";
-			break;
-		case 0x80:
-			state = "2x Mode";
-			break;
-		case 0x100:
-			state = "2x Recovery";
-			break;
-		case 0x200:
-			state = "4x Mode";
-			break;
-		default:
-			state = "Reserved";
-			break;
+	case 0x0:
+		state = "Silent";
+		break;
+	case 0x2:
+		state = "Seek";
+		break;
+	case 0x4:
+		state = "Discovery";
+		break;
+	case 0x8:
+		state = "1x Mode Lane 0";
+		break;
+	case 0x10:
+		state = "1x Mode Lane 1";
+		break;
+	case 0x20:
+		state = "1x Mode Lane 2";
+		break;
+	case 0x40:
+		state = "1x Recovery";
+		break;
+	case 0x80:
+		state = "2x Mode";
+		break;
+	case 0x100:
+		state = "2x Recovery";
+		break;
+	case 0x200:
+		state = "4x Mode";
+		break;
+	default:
+		state = "Reserved";
+		break;
 	}
 	dev_info(&dev->dev, "Link state: %s\n", state);
 
@@ -110,7 +111,7 @@ static int cn6xxx_probe(struct rio_dev *dev, const struct rio_device_id *id)
 	sriomaintx_m2s_bar2_start.s.addr48 = BAR2_ADDRESS >> 41;
 	sriomaintx_m2s_bar2_start.s.esx = 0;
 	sriomaintx_m2s_bar2_start.s.cax = 0;
-	sriomaintx_m2s_bar2_start.s.addr66 = 0; // BAR2_ADDRESS >> 64;
+	sriomaintx_m2s_bar2_start.s.addr66 = 0; /* BAR2_ADDRESS >> 64; */
 	sriomaintx_m2s_bar2_start.s.enable = 1;
 	if (rio_write_config_32(dev, CVMX_SRIOMAINTX_M2S_BAR2_START(0),
 		sriomaintx_m2s_bar2_start.u32))
@@ -139,7 +140,7 @@ static int cn6xxx_probe(struct rio_dev *dev, const struct rio_device_id *id)
 	sriomaintx_m2s_bar1_start1.u32 = 0;
 	sriomaintx_m2s_bar1_start1.s.addr32 = (BAR1_ADDRESS >> 20) & 0xfff;
 	sriomaintx_m2s_bar1_start1.s.barsize = BAR1_SHIFT;
-	sriomaintx_m2s_bar1_start1.s.addr66 = 0; // BAR1_ADDRESS >> 64;
+	sriomaintx_m2s_bar1_start1.s.addr66 = 0; /* BAR1_ADDRESS >> 64; */
 	sriomaintx_m2s_bar1_start1.s.enable = 1;
 	if (rio_write_config_32(dev, CVMX_SRIOMAINTX_M2S_BAR1_START0(0),
 		sriomaintx_m2s_bar1_start0.u32))
@@ -156,7 +157,7 @@ static int cn6xxx_probe(struct rio_dev *dev, const struct rio_device_id *id)
 	sriomaintx_m2s_bar0_start0.s.addr48 = BAR0_ADDRESS >> 32;
 	sriomaintx_m2s_bar0_start1.u32 = 0;
 	sriomaintx_m2s_bar0_start1.s.addr32 = (BAR0_ADDRESS >> 14) & 0x3ffff;
-	sriomaintx_m2s_bar0_start1.s.addr66 = 0; // BAR0_ADDRESS >> 64;
+	sriomaintx_m2s_bar0_start1.s.addr66 = 0; /* BAR0_ADDRESS >> 64; */
 	sriomaintx_m2s_bar0_start1.s.enable = 1;
 	if (rio_write_config_32(dev, CVMX_SRIOMAINTX_M2S_BAR0_START0(0),
 		sriomaintx_m2s_bar0_start0.u32))
@@ -202,8 +203,8 @@ static int cn6xxx_probe(struct rio_dev *dev, const struct rio_device_id *id)
 		return -1;
 	}
 
-	for (index=0; index<16; index++) {
-		cvmx_sriomaintx_bar1_idxx_t sriomaintx_bar1_idxx;
+	for (index = 0; index < 16; index++) {
+		union cvmx_sriomaintx_bar1_idxx sriomaintx_bar1_idxx;
 		sriomaintx_bar1_idxx.u32 = 0;
 		sriomaintx_bar1_idxx.s.la = index;
 		sriomaintx_bar1_idxx.s.enable = 1;
@@ -245,6 +246,7 @@ static int cn6xxx_enable_wake(struct rio_dev *dev, u32 state, int enable)
 
 static const struct rio_device_id cn6xxx_id_table[] = {
 	{.did = 0x0090, .vid = 0x008c, .asm_did = 0x0000, .asm_vid = 0x008c },
+	{.did = 0x0092, .vid = 0x008c, .asm_did = 0x0000, .asm_vid = 0x008c },
 	{.did = 0,}
 };
 
@@ -269,7 +271,7 @@ static void __exit m_unload(void)
 }
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Cavium Networks <support@caviumnetworks.com>");
-MODULE_DESCRIPTION("Cavium Networks CN6XXX support over SRIO.");
+MODULE_AUTHOR("Cavium Inc. <support@cavium.com>");
+MODULE_DESCRIPTION("Cavium Inc. CN6XXX support over SRIO.");
 module_init(m_load);
 module_exit(m_unload);

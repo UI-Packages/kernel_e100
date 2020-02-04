@@ -111,7 +111,7 @@ struct ipmi_ipmb_addr {
  * A LAN Address.  This is an address to/from a LAN interface bridged
  * by the BMC, not an address actually out on the LAN.
  *
- * A concious decision was made here to deviate slightly from the IPMI
+ * A conscious decision was made here to deviate slightly from the IPMI
  * spec.  We do not use rqSWID and rsSWID like it shows in the
  * message.  Instead, we use remote_SWID and local_SWID.  This means
  * that any message (a request or response) from another device will
@@ -220,9 +220,10 @@ struct kernel_ipmi_msg {
  * The in-kernel interface.
  */
 #include <linux/list.h>
-#include <linux/module.h>
-#include <linux/device.h>
 #include <linux/proc_fs.h>
+
+struct module;
+struct device;
 
 /* Opaque type for a IPMI message user.  One of these is needed to
    send and receive messages. */
@@ -259,11 +260,12 @@ struct ipmi_recv_msg {
 	void (*done)(struct ipmi_recv_msg *msg);
 
 	/* Place-holder for the data, don't make any assumptions about
-	   the size or existance of this, since it may change. */
+	   the size or existence of this, since it may change. */
 	unsigned char   msg_data[IPMI_MAX_MSG_LENGTH];
 };
 
 /* Allocate and free the receive message. */
+struct ipmi_recv_msg *ipmi_alloc_recv_msg(void);
 void ipmi_free_recv_msg(struct ipmi_recv_msg *msg);
 
 struct ipmi_user_hndl {
@@ -359,6 +361,18 @@ int ipmi_request_supply_msgs(ipmi_user_t          user,
 			     int                  priority);
 
 /*
+ * Like ipmi_request, but lets you specify the slave return address.
+ */
+int ipmi_request_with_source(ipmi_user_t      user,
+			     struct ipmi_addr *addr,
+			     long             msgid,
+			     struct kernel_ipmi_msg  *msg,
+			     void             *user_msg_data,
+			     int              priority,
+			     unsigned char    source_address,
+			     unsigned char    source_lun);
+
+/*
  * Poll the IPMI interface for the user.  This causes the IPMI code to
  * do an immediate check for information from the driver and handle
  * anything that is immediately pending.  This will not block in any
@@ -366,6 +380,16 @@ int ipmi_request_supply_msgs(ipmi_user_t          user,
  * happen in the IPMI driver.
  */
 void ipmi_poll_interface(ipmi_user_t user);
+
+/*
+ * Register the given user to handle all received IPMI commands.  This
+ * will fail if anyone is registered as a command receiver or if
+ * another is already registered to receive all commands.  NOTE THAT
+ * THIS IS FOR EMULATION USERS ONLY, DO NOT USER THIS FOR NORMAL
+ * STUFF.
+ */
+int ipmi_register_all_cmd_rcvr(ipmi_user_t user);
+int ipmi_unregister_all_cmd_rcvr(ipmi_user_t user);
 
 /*
  * When commands come in to the SMS, the user can register to receive
@@ -453,6 +477,47 @@ unsigned int ipmi_addr_length(int addr_type);
 
 /* Validate that the given IPMI address is valid. */
 int ipmi_validate_addr(struct ipmi_addr *addr, int len);
+
+/* Return 1 if the given addresses are equal, 0 if not. */
+int ipmi_addr_equal(struct ipmi_addr *addr1, struct ipmi_addr *addr2);
+
+/*
+ * How did the IPMI driver find out about the device?
+ */
+enum ipmi_addr_src {
+	SI_INVALID = 0, SI_HOTMOD, SI_HARDCODED, SI_SPMI, SI_ACPI, SI_SMBIOS,
+	SI_PCI,	SI_DEVICETREE, SI_DEFAULT
+};
+
+union ipmi_smi_info_union {
+	/*
+	 * the acpi_info element is defined for the SI_ACPI
+	 * address type
+	 */
+	struct {
+		void *acpi_handle;
+	} acpi_info;
+};
+
+struct ipmi_smi_info {
+	enum ipmi_addr_src addr_src;
+
+	/*
+	 * Base device for the interface.  Don't forget to put this when
+	 * you are done.
+	 */
+	struct device *dev;
+
+	/*
+	 * The addr_info provides more detailed info for some IPMI
+	 * devices, depending on the addr_src.  Currently only SI_ACPI
+	 * info is provided.
+	 */
+	union ipmi_smi_info_union addr_info;
+};
+
+/* This is to get the private info of ipmi_smi_t */
+extern int ipmi_get_smi_info(int if_num, struct ipmi_smi_info *data);
 
 #endif /* __KERNEL__ */
 

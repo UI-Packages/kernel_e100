@@ -9,6 +9,16 @@
 
 /* Cache flush operations. */
 
+
+#define flushi(addr)	__asm__ __volatile__ ("flush %0" : : "r" (addr) : "memory")
+#define flushw_all()	__asm__ __volatile__("flushw")
+
+extern void __flushw_user(void);
+#define flushw_user() __flushw_user()
+
+#define flush_user_windows flushw_user
+#define flush_register_windows flushw_all
+
 /* These are the same regardless of whether this is an SMP kernel or not. */
 #define flush_cache_mm(__mm) \
 	do { if ((__mm) == current->mm) flushw_user(); } while(0)
@@ -37,6 +47,7 @@ extern void flush_dcache_page_all(struct mm_struct *mm, struct page *page);
 #endif
 
 extern void __flush_dcache_range(unsigned long start, unsigned long end);
+#define ARCH_IMPLEMENTS_FLUSH_DCACHE_PAGE 1
 extern void flush_dcache_page(struct page *page);
 
 #define flush_icache_page(vma, pg)	do { } while(0)

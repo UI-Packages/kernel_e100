@@ -20,6 +20,7 @@
 #include <linux/phy.h>
 #include <linux/phy_fixed.h>
 #include <linux/err.h>
+#include <linux/slab.h>
 
 #define MII_REGS_NUM 29
 
@@ -219,7 +220,7 @@ static int __init fixed_mdio_bus_init(void)
 		goto err_mdiobus_reg;
 	}
 
-	snprintf(fmb->mii_bus->id, MII_BUS_ID_SIZE, "0");
+	snprintf(fmb->mii_bus->id, MII_BUS_ID_SIZE, "fixed-0");
 	fmb->mii_bus->name = "Fixed MDIO Bus";
 	fmb->mii_bus->priv = fmb;
 	fmb->mii_bus->parent = &pdev->dev;

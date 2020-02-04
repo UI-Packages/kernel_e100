@@ -1,86 +1,29 @@
 #ifndef __CVMX_CONFIG_H__
 #define __CVMX_CONFIG_H__
 
-extern int cvmx_helper_ports_on_interface(int);
-
-static inline int octeon_pko_get_total_queues(void)
-{
-	if (OCTEON_IS_MODEL(OCTEON_CN38XX))
-		return 128;
-	else if (OCTEON_IS_MODEL(OCTEON_CN3XXX))
-		return 32;
-	else if (OCTEON_IS_MODEL(OCTEON_CN50XX))
-		return 32;
-	else
-		return 256;
-}
-
-
-static inline int octeon_pko_lockless(void)
-{
-#ifdef CONFIG_OCTEON_ETHERNET_LOCKED
-	return 0;
-#else
-	int queues = 16 * (cvmx_helper_ports_on_interface(0) + cvmx_helper_ports_on_interface(1));
-
-	/* CN3XXX require workarounds in xmit.  Disable lockless for
-	 * CN3XXX to optimize the lockless case with out the workarounds. */
-	if (OCTEON_IS_MODEL(OCTEON_CN3XXX))
-		return 0;
-
-	queues += 4; /* For PCI/PCIe */
-
-	if ((OCTEON_IS_MODEL(OCTEON_CN56XX) || OCTEON_IS_MODEL(OCTEON_CN52XX) || OCTEON_IS_MODEL(OCTEON_CN6XXX)))
-		queues += 4; /* For loopback */
-
-	if (octeon_has_feature(OCTEON_FEATURE_SRIO))
-		queues += 4; /* For SRIO */
-
-	return queues <= octeon_pko_get_total_queues();
-#endif
-}
-
 /************************* Config Specific Defines ************************/
 #define CVMX_LLM_NUM_PORTS 1
 #define CVMX_NULL_POINTER_PROTECT 1
 #define CVMX_ENABLE_DEBUG_PRINTS 1
-#if 0
 /* PKO queues per port for interface 0 (ports 0-15) */
-#define CVMX_PKO_QUEUES_PER_PORT_INTERFACE0 (octeon_pko_lockless() ? 16 : 1)
+#define CVMX_PKO_QUEUES_PER_PORT_INTERFACE0 1
 /* PKO queues per port for interface 1 (ports 16-31) */
-#define CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 (octeon_pko_lockless() ? 16 : 1)
-#else
-/* Modified as 8 to add OUTPUT_QOS support in ipfwd-offload module.
- * Modified CVMX_HELPER_PKO_MAX_PORTS_INTERFACE0 and
- * CVMX_HELPER_PKO_MAX_PORTS_INTERFACE1 as well.
- */ 
-/* PKO queues per port for interface 0 (ports 0-15) */
-#define CVMX_PKO_QUEUES_PER_PORT_INTERFACE0 (octeon_pko_lockless() ? 16 : 8)
-/* PKO queues per port for interface 1 (ports 16-31) */
-#define CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 (octeon_pko_lockless() ? 16 : 8)
-#endif
-#ifdef CONFIG_OCTEON_ETHERNET_LOCKED
-#define CVMX_PKO_MAX_PORTS_INTERFACE0 CVMX_HELPER_PKO_MAX_PORTS_INTERFACE0
-#define CVMX_PKO_MAX_PORTS_INTERFACE1 CVMX_HELPER_PKO_MAX_PORTS_INTERFACE1
-#else
+#define CVMX_PKO_QUEUES_PER_PORT_INTERFACE1 1
 /* Limit on the number of PKO ports enabled for interface 0 */
-#define CVMX_PKO_MAX_PORTS_INTERFACE0 cvmx_helper_ports_on_interface(0)
+#define CVMX_PKO_MAX_PORTS_INTERFACE0 CVMX_HELPER_PKO_MAX_PORTS_INTERFACE0
 /* Limit on the number of PKO ports enabled for interface 1 */
-#define CVMX_PKO_MAX_PORTS_INTERFACE1 cvmx_helper_ports_on_interface(1)
-#endif
+#define CVMX_PKO_MAX_PORTS_INTERFACE1 CVMX_HELPER_PKO_MAX_PORTS_INTERFACE1
 /* PKO queues per port for PCI (ports 32-35) */
 #define CVMX_PKO_QUEUES_PER_PORT_PCI 1
 /* PKO queues per port for Loop devices (ports 36-39) */
 #define CVMX_PKO_QUEUES_PER_PORT_LOOP 1
-#define CVMX_PKO_QUEUES_PER_PORT_SRIO0 2
-#define CVMX_PKO_QUEUES_PER_PORT_SRIO1 2
 
 /************************* FPA allocation *********************************/
 /* Pool sizes in bytes, must be multiple of a cache line */
 #define CVMX_FPA_POOL_0_SIZE (16 * CVMX_CACHE_LINE_SIZE)
 #define CVMX_FPA_POOL_1_SIZE (1 * CVMX_CACHE_LINE_SIZE)
 #define CVMX_FPA_POOL_2_SIZE (8 * CVMX_CACHE_LINE_SIZE)
-#define CVMX_FPA_POOL_3_SIZE (1 * CVMX_CACHE_LINE_SIZE)
+#define CVMX_FPA_POOL_3_SIZE (0 * CVMX_CACHE_LINE_SIZE)
 #define CVMX_FPA_POOL_4_SIZE (0 * CVMX_CACHE_LINE_SIZE)
 #define CVMX_FPA_POOL_5_SIZE (0 * CVMX_CACHE_LINE_SIZE)
 #define CVMX_FPA_POOL_6_SIZE (0 * CVMX_CACHE_LINE_SIZE)
@@ -96,10 +39,6 @@ static inline int octeon_pko_lockless(void)
 /* PKO queue command buffers */
 #define CVMX_FPA_OUTPUT_BUFFER_POOL         (2)
 #define CVMX_FPA_OUTPUT_BUFFER_POOL_SIZE    CVMX_FPA_POOL_2_SIZE
-/* Work queue entrys for TX side */
-#define CVMX_FPA_TX_WQE_POOL			(3)
-#define CVMX_FPA_TX_WQE_POOL_SIZE		CVMX_FPA_POOL_3_SIZE
-
 
 /*************************  FAU allocation ********************************/
 /* The fetch and add registers are allocated here.  They are arranged
@@ -197,6 +136,8 @@ typedef enum {
  */
 #define CVMX_HELPER_INPUT_TAG_TYPE CVMX_POW_TAG_TYPE_ORDERED
 
+#define CVMX_ENABLE_PARAMETER_CHECKING 0
+
 /*
  * The following select which fields are used by the PIP to generate
  * the tag on INPUT
@@ -225,4 +166,3 @@ typedef enum {
 #define CVMX_HELPER_DISABLE_RGMII_BACKPRESSURE 0
 
 #endif /* __CVMX_CONFIG_H__ */
-

@@ -33,14 +33,14 @@
 #include <linux/ctype.h>  /* isdigit, isxdigit */
 #include <linux/errno.h>
 #include <linux/init.h>
-#include <linux/slab.h>
 #include <linux/blkdev.h>
 #include <linux/blkpg.h>
 #include <linux/hdreg.h>  /* HDIO_GETGEO */
-#include <linux/sysdev.h>
+#include <linux/device.h>
 #include <linux/bio.h>
 #include <linux/suspend.h>
 #include <linux/platform_device.h>
+#include <linux/gfp.h>
 #include <asm/uaccess.h>
 
 #define XPRAM_NAME	"xpram"
@@ -62,8 +62,8 @@ static int xpram_devs;
 /*
  * Parameter parsing functions.
  */
-static int __initdata devs = XPRAM_DEVS;
-static char __initdata *sizes[XPRAM_MAX_DEVS];
+static int devs = XPRAM_DEVS;
+static char *sizes[XPRAM_MAX_DEVS];
 
 module_param(devs, int, 0);
 module_param_array(sizes, charp, NULL, 0);
@@ -181,7 +181,7 @@ static unsigned long xpram_highest_page_index(void)
 /*
  * Block device make request function.
  */
-static int xpram_make_request(struct request_queue *q, struct bio *bio)
+static void xpram_make_request(struct request_queue *q, struct bio *bio)
 {
 	xpram_device_t *xdev = bio->bi_bdev->bd_disk->private_data;
 	struct bio_vec *bvec;
@@ -221,10 +221,9 @@ static int xpram_make_request(struct request_queue *q, struct bio *bio)
 	}
 	set_bit(BIO_UPTODATE, &bio->bi_flags);
 	bio_endio(bio, 0);
-	return 0;
+	return;
 fail:
 	bio_io_error(bio);
-	return 0;
 }
 
 static int xpram_getgeo(struct block_device *bdev, struct hd_geometry *geo)
@@ -407,7 +406,7 @@ static int xpram_restore(struct device *dev)
 	return 0;
 }
 
-static struct dev_pm_ops xpram_pm_ops = {
+static const struct dev_pm_ops xpram_pm_ops = {
 	.restore	= xpram_restore,
 };
 

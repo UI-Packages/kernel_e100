@@ -32,14 +32,19 @@ void mpic_msi_reserve_hwirq(struct mpic *mpic, irq_hw_number_t hwirq)
 static int mpic_msi_reserve_u3_hwirqs(struct mpic *mpic)
 {
 	irq_hw_number_t hwirq;
-	struct irq_host_ops *ops = mpic->irqhost->ops;
+	const struct irq_domain_ops *ops = mpic->irqhost->ops;
 	struct device_node *np;
 	int flags, index, i;
 	struct of_irq oirq;
 
 	pr_debug("mpic: found U3, guessing msi allocator setup\n");
 
-	/* Reserve source numbers we know are reserved in the HW */
+	/* Reserve source numbers we know are reserved in the HW.
+	 *
+	 * This is a bit of a mix of U3 and U4 reserves but that's going
+	 * to work fine, we have plenty enugh numbers left so let's just
+	 * mark anything we don't like reserved.
+	 */
 	for (i = 0;   i < 8;   i++)
 		msi_bitmap_reserve_hwirq(&mpic->msi_bitmap, i);
 
@@ -48,6 +53,10 @@ static int mpic_msi_reserve_u3_hwirqs(struct mpic *mpic)
 
 	for (i = 100; i < 105; i++)
 		msi_bitmap_reserve_hwirq(&mpic->msi_bitmap, i);
+
+	for (i = 124; i < mpic->num_sources; i++)
+		msi_bitmap_reserve_hwirq(&mpic->msi_bitmap, i);
+
 
 	np = NULL;
 	while ((np = of_find_all_nodes(np))) {
@@ -74,7 +83,7 @@ int mpic_msi_init_allocator(struct mpic *mpic)
 {
 	int rc;
 
-	rc = msi_bitmap_alloc(&mpic->msi_bitmap, mpic->irq_count,
+	rc = msi_bitmap_alloc(&mpic->msi_bitmap, mpic->num_sources,
 			      mpic->irqhost->of_node);
 	if (rc)
 		return rc;

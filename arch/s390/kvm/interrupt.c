@@ -10,12 +10,13 @@
  *    Author(s): Carsten Otte <cotte@de.ibm.com>
  */
 
-#include <asm/lowcore.h>
-#include <asm/uaccess.h>
-#include <linux/hrtimer.h>
 #include <linux/interrupt.h>
 #include <linux/kvm_host.h>
+#include <linux/hrtimer.h>
 #include <linux/signal.h>
+#include <linux/slab.h>
+#include <asm/asm-offsets.h>
+#include <asm/uaccess.h>
 #include "kvm-s390.h"
 #include "gaccess.h"
 
@@ -37,6 +38,11 @@ static int __interrupt_is_deliverable(struct kvm_vcpu *vcpu,
 				      struct kvm_s390_interrupt_info *inti)
 {
 	switch (inti->type) {
+	case KVM_S390_INT_EXTERNAL_CALL:
+		if (psw_extint_disabled(vcpu))
+			return 0;
+		if (vcpu->arch.sie_block->gcr[0] & 0x2000ul)
+			return 1;
 	case KVM_S390_INT_EMERGENCY:
 		if (psw_extint_disabled(vcpu))
 			return 0;
@@ -97,6 +103,7 @@ static void __set_intercept_indicator(struct kvm_vcpu *vcpu,
 				      struct kvm_s390_interrupt_info *inti)
 {
 	switch (inti->type) {
+	case KVM_S390_INT_EXTERNAL_CALL:
 	case KVM_S390_INT_EMERGENCY:
 	case KVM_S390_INT_SERVICE:
 	case KVM_S390_INT_VIRTIO:
@@ -124,6 +131,32 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
 		VCPU_EVENT(vcpu, 4, "%s", "interrupt: sigp emerg");
 		vcpu->stat.deliver_emergency_signal++;
 		rc = put_guest_u16(vcpu, __LC_EXT_INT_CODE, 0x1201);
+		if (rc == -EFAULT)
+			exception = 1;
+
+		rc = put_guest_u16(vcpu, __LC_EXT_CPU_ADDR, inti->emerg.code);
+		if (rc == -EFAULT)
+			exception = 1;
+
+		rc = copy_to_guest(vcpu, __LC_EXT_OLD_PSW,
+			 &vcpu->arch.sie_block->gpsw, sizeof(psw_t));
+		if (rc == -EFAULT)
+			exception = 1;
+
+		rc = copy_from_guest(vcpu, &vcpu->arch.sie_block->gpsw,
+			__LC_EXT_NEW_PSW, sizeof(psw_t));
+		if (rc == -EFAULT)
+			exception = 1;
+		break;
+
+	case KVM_S390_INT_EXTERNAL_CALL:
+		VCPU_EVENT(vcpu, 4, "%s", "interrupt: sigp ext call");
+		vcpu->stat.deliver_external_call++;
+		rc = put_guest_u16(vcpu, __LC_EXT_INT_CODE, 0x1202);
+		if (rc == -EFAULT)
+			exception = 1;
+
+		rc = put_guest_u16(vcpu, __LC_EXT_CPU_ADDR, inti->extcall.code);
 		if (rc == -EFAULT)
 			exception = 1;
 
@@ -169,7 +202,7 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
 		if (rc == -EFAULT)
 			exception = 1;
 
-		rc = put_guest_u16(vcpu, __LC_CPU_ADDRESS, 0x0d00);
+		rc = put_guest_u16(vcpu, __LC_EXT_CPU_ADDR, 0x0d00);
 		if (rc == -EFAULT)
 			exception = 1;
 
@@ -187,8 +220,8 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
 		if (rc == -EFAULT)
 			exception = 1;
 
-		rc = put_guest_u64(vcpu, __LC_PFAULT_INTPARM,
-			inti->ext.ext_params2);
+		rc = put_guest_u64(vcpu, __LC_EXT_PARAMS2,
+				   inti->ext.ext_params2);
 		if (rc == -EFAULT)
 			exception = 1;
 		break;
@@ -203,8 +236,7 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
 		VCPU_EVENT(vcpu, 4, "interrupt: set prefix to %x",
 			   inti->prefix.address);
 		vcpu->stat.deliver_prefix_signal++;
-		vcpu->arch.sie_block->prefix = inti->prefix.address;
-		vcpu->arch.sie_block->ihcpu = 0xffff;
+		kvm_s390_set_prefix(vcpu, inti->prefix.address);
 		break;
 
 	case KVM_S390_RESTART:
@@ -219,6 +251,7 @@ static void __do_deliver_interrupt(struct kvm_vcpu *vcpu,
 			offsetof(struct _lowcore, restart_psw), sizeof(psw_t));
 		if (rc == -EFAULT)
 			exception = 1;
+		atomic_clear_mask(CPUSTAT_STOPPED, &vcpu->arch.sie_block->cpuflags);
 		break;
 
 	case KVM_S390_PROGRAM_INT:
@@ -342,7 +375,7 @@ int kvm_s390_handle_wait(struct kvm_vcpu *vcpu)
 	if (psw_interrupts_disabled(vcpu)) {
 		VCPU_EVENT(vcpu, 3, "%s", "disabled wait");
 		__unset_cpu_idle(vcpu);
-		return -ENOTSUPP; /* disabled wait */
+		return -EOPNOTSUPP; /* disabled wait */
 	}
 
 	if (psw_extint_disabled(vcpu) ||
@@ -357,7 +390,7 @@ int kvm_s390_handle_wait(struct kvm_vcpu *vcpu)
 		return 0;
 	}
 
-	sltime = ((vcpu->arch.sie_block->ckc - now)*125)>>9;
+	sltime = tod_to_ns(vcpu->arch.sie_block->ckc - now);
 
 	hrtimer_start(&vcpu->arch.ckc_timer, ktime_set (0, sltime) , HRTIMER_MODE_REL);
 	VCPU_EVENT(vcpu, 5, "enabled wait via clock comparator: %llx ns", sltime);
@@ -517,6 +550,7 @@ int kvm_s390_inject_vm(struct kvm *kvm,
 		break;
 	case KVM_S390_PROGRAM_INT:
 	case KVM_S390_SIGP_STOP:
+	case KVM_S390_INT_EXTERNAL_CALL:
 	case KVM_S390_INT_EMERGENCY:
 	default:
 		kfree(inti);
@@ -576,6 +610,7 @@ int kvm_s390_inject_vcpu(struct kvm_vcpu *vcpu,
 		break;
 	case KVM_S390_SIGP_STOP:
 	case KVM_S390_RESTART:
+	case KVM_S390_INT_EXTERNAL_CALL:
 	case KVM_S390_INT_EMERGENCY:
 		VCPU_EVENT(vcpu, 3, "inject: type %x", s390int->type);
 		inti->type = s390int->type;

@@ -48,6 +48,7 @@
  */
 
 #include <linux/crc32.h>
+#include <linux/slab.h>
 #include "ubifs.h"
 
 /**
@@ -678,7 +679,8 @@ struct ubifs_scan_leb *ubifs_recover_leb(struct ubifs_info *c, int lnum,
 			   ret == SCANNED_GARBAGE     ||
 			   ret == SCANNED_A_BAD_PAD_NODE ||
 			   ret == SCANNED_A_CORRUPT_NODE) {
-			dbg_rcvry("found corruption - %d", ret);
+			dbg_rcvry("found corruption (%d) at %d:%d",
+				  ret, lnum, offs);
 			break;
 		} else {
 			dbg_err("unexpected return value %d", ret);
@@ -982,7 +984,7 @@ int ubifs_recover_inl_heads(struct ubifs_info *c, void *sbuf)
 }
 
 /**
- *  clean_an_unclean_leb - read and write a LEB to remove corruption.
+ * clean_an_unclean_leb - read and write a LEB to remove corruption.
  * @c: UBIFS file-system description object
  * @ucleb: unclean LEB information
  * @sbuf: LEB-sized buffer to use

@@ -6,14 +6,15 @@
  */
 
 #include <linux/ctype.h>
-#include <linux/module.h>
+#include <linux/types.h>
+#include <linux/export.h>
 #include <linux/parser.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
 /**
  * match_one: - Determines if a string matches a simple pattern
- * @s: the string to examine for presense of the pattern
+ * @s: the string to examine for presence of the pattern
  * @p: the string containing the pattern
  * @args: array of %MAX_OPT_ARGS &substring_t elements. Used to return match
  * locations.
@@ -56,13 +57,16 @@ static int match_one(char *s, const char *p, substring_t args[])
 
 		args[argc].from = s;
 		switch (*p++) {
-		case 's':
-			if (strlen(s) == 0)
+		case 's': {
+			size_t str_len = strlen(s);
+
+			if (str_len == 0)
 				return 0;
-			else if (len == -1 || len > strlen(s))
-				len = strlen(s);
+			if (len == -1 || len > str_len)
+				len = str_len;
 			args[argc].to = s + len;
 			break;
+		}
 		case 'd':
 			simple_strtol(s, &args[argc].to, 0);
 			goto num;
@@ -118,23 +122,30 @@ int match_token(char *s, const match_table_t table, substring_t args[])
  *
  * Description: Given a &substring_t and a base, attempts to parse the substring
  * as a number in that base. On success, sets @result to the integer represented
- * by the string and returns 0. Returns either -ENOMEM or -EINVAL on failure.
+ * by the string and returns 0. Returns -ENOMEM, -EINVAL, or -ERANGE on failure.
  */
 static int match_number(substring_t *s, int *result, int base)
 {
 	char *endp;
 	char *buf;
 	int ret;
+	long val;
+	size_t len = s->to - s->from;
 
-	buf = kmalloc(s->to - s->from + 1, GFP_KERNEL);
+	buf = kmalloc(len + 1, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
-	memcpy(buf, s->from, s->to - s->from);
-	buf[s->to - s->from] = '\0';
-	*result = simple_strtol(buf, &endp, base);
+	memcpy(buf, s->from, len);
+	buf[len] = '\0';
+
 	ret = 0;
+	val = simple_strtol(buf, &endp, base);
 	if (endp == buf)
 		ret = -EINVAL;
+	else if (val < (long)INT_MIN || val > (long)INT_MAX)
+		ret = -ERANGE;
+	else
+		*result = (int) val;
 	kfree(buf);
 	return ret;
 }

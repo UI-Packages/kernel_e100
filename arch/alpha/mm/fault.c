@@ -24,7 +24,6 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 
-#include <asm/system.h>
 #include <asm/uaccess.h>
 
 extern void die_if_kernel(char *,struct pt_regs *,long, unsigned long *);
@@ -107,7 +106,7 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 
 	/* If we're in an interrupt context, or have no user context,
 	   we must not take the fault.  */
-	if (!mm || in_atomic())
+	if (!mm || pagefault_disabled())
 		goto no_context;
 
 #ifdef CONFIG_ALPHA_LARGE_VMALLOC
@@ -142,7 +141,6 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 			goto bad_area;
 	}
 
- survive:
 	/* If for any reason at all we couldn't handle the fault,
 	   make sure we exit gracefully rather than endlessly redo
 	   the fault.  */
@@ -188,16 +186,10 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 	/* We ran out of memory, or some other thing happened to us that
 	   made us unable to handle the page fault gracefully.  */
  out_of_memory:
-	if (is_global_init(current)) {
-		yield();
-		down_read(&mm->mmap_sem);
-		goto survive;
-	}
-	printk(KERN_ALERT "VM: killing process %s(%d)\n",
-	       current->comm, task_pid_nr(current));
 	if (!user_mode(regs))
 		goto no_context;
-	do_group_exit(SIGKILL);
+	pagefault_out_of_memory();
+	return;
 
  do_sigbus:
 	/* Send a sigbus, regardless of whether we were in kernel

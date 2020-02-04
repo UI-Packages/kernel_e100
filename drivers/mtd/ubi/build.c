@@ -43,6 +43,7 @@
 #include <linux/log2.h>
 #include <linux/kthread.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include "ubi.h"
 
 /* Maximum length of the 'mtd=' parameter */
@@ -94,7 +95,8 @@ DEFINE_MUTEX(ubi_devices_mutex);
 static DEFINE_SPINLOCK(ubi_devices_lock);
 
 /* "Show" method for files in '/<sysfs>/class/ubi/' */
-static ssize_t ubi_version_show(struct class *class, char *buf)
+static ssize_t ubi_version_show(struct class *class,
+				struct class_attribute *attr, char *buf)
 {
 	return sprintf(buf, "%d\n", UBI_VERSION);
 }
@@ -662,7 +664,7 @@ static int io_init(struct ubi_device *ubi)
 	ubi->peb_count  = mtd_div_by_eb(ubi->mtd->size, ubi->mtd);
 	ubi->flash_size = ubi->mtd->size;
 
-	if (ubi->mtd->block_isbad && ubi->mtd->block_markbad)
+	if (mtd_can_have_bb(ubi->mtd))
 		ubi->bad_allowed = 1;
 
 	if (ubi->mtd->type == MTD_NORFLASH) {
@@ -814,6 +816,11 @@ static int autoresize(struct ubi_device *ubi, int vol_id)
 	struct ubi_volume *vol = ubi->volumes[vol_id];
 	int err, old_reserved_pebs = vol->reserved_pebs;
 
+	if (ubi->ro_mode) {
+		ubi_warn("skip auto-resize because of R/O mode");
+		return 0;
+	}
+
 	/*
 	 * Clear the auto-resize flag in the volume in-memory copy of the
 	 * volume table, and 'ubi_resize_volume()' will propagate this change
@@ -943,12 +950,8 @@ int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num, int vid_hdr_offset)
 		goto out_free;
 
 	err = -ENOMEM;
-	ubi->peb_buf1 = vmalloc(ubi->peb_size);
-	if (!ubi->peb_buf1)
-		goto out_free;
-
-	ubi->peb_buf2 = vmalloc(ubi->peb_size);
-	if (!ubi->peb_buf2)
+	ubi->peb_buf = vmalloc(ubi->peb_size);
+	if (!ubi->peb_buf)
 		goto out_free;
 
 	err = ubi_debugging_init_dev(ubi);
@@ -1027,8 +1030,7 @@ out_detach:
 out_debugging:
 	ubi_debugging_exit_dev(ubi);
 out_free:
-	vfree(ubi->peb_buf1);
-	vfree(ubi->peb_buf2);
+	vfree(ubi->peb_buf);
 	if (ref)
 		put_device(&ubi->dev);
 	else
@@ -1099,8 +1101,7 @@ int ubi_detach_mtd_dev(int ubi_num, int anyway)
 	vfree(ubi->vtbl);
 	put_mtd_device(ubi->mtd);
 	ubi_debugging_exit_dev(ubi);
-	vfree(ubi->peb_buf1);
-	vfree(ubi->peb_buf2);
+	vfree(ubi->peb_buf);
 	ubi_msg("mtd%d is detached from ubi%d", ubi->mtd->index, ubi->ubi_num);
 	put_device(&ubi->dev);
 	return 0;

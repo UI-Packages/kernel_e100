@@ -19,6 +19,7 @@
 #include <linux/delay.h>
 #include <linux/power_supply.h>
 #include <linux/max17040_battery.h>
+#include <linux/slab.h>
 
 #define MAX17040_VCELL_MSB	0x02
 #define MAX17040_VCELL_LSB	0x03
@@ -224,7 +225,6 @@ static int __devinit max17040_probe(struct i2c_client *client,
 	ret = power_supply_register(&client->dev, &chip->battery);
 	if (ret) {
 		dev_err(&client->dev, "failed: power supply register\n");
-		i2c_set_clientdata(client, NULL);
 		kfree(chip);
 		return ret;
 	}
@@ -244,7 +244,6 @@ static int __devexit max17040_remove(struct i2c_client *client)
 
 	power_supply_unregister(&chip->battery);
 	cancel_delayed_work(&chip->work);
-	i2c_set_clientdata(client, NULL);
 	kfree(chip);
 	return 0;
 }
@@ -291,18 +290,7 @@ static struct i2c_driver max17040_i2c_driver = {
 	.resume		= max17040_resume,
 	.id_table	= max17040_id,
 };
-
-static int __init max17040_init(void)
-{
-	return i2c_add_driver(&max17040_i2c_driver);
-}
-module_init(max17040_init);
-
-static void __exit max17040_exit(void)
-{
-	i2c_del_driver(&max17040_i2c_driver);
-}
-module_exit(max17040_exit);
+module_i2c_driver(max17040_i2c_driver);
 
 MODULE_AUTHOR("Minkyu Kang <mk7.kang@samsung.com>");
 MODULE_DESCRIPTION("MAX17040 Fuel Gauge");

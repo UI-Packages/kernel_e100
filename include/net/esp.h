@@ -11,7 +11,8 @@ struct esp_data {
 
 	/* Confidentiality & Integrity */
 	struct crypto_aead *aead;
-#if defined(CONFIG_CAVIUM_OCTEON_IPSEC) && defined(CONFIG_NET_KEY) 
+
+#if defined(CONFIG_CAVIUM_OCTEON_IPSEC) && defined(CONFIG_NET_KEY)
 	 u8 *iv;
 	 int ivinitted;
 	 

@@ -8,7 +8,6 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
-#include <linux/slab.h>
 #include <linux/binfmts.h>
 #include <linux/init.h>
 #include <linux/file.h>
@@ -17,7 +16,8 @@
 
 static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
-	char *cp, *i_name, *i_arg;
+	const char *i_arg, *i_name;
+	char *cp;
 	struct file *file;
 	char interp[BINPRM_BUF_SIZE];
 	int retval;
@@ -82,7 +82,9 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	retval = copy_strings_kernel(1, &i_name, bprm);
 	if (retval) return retval; 
 	bprm->argc++;
-	bprm->interp = interp;
+	retval = bprm_change_interp(interp, bprm);
+	if (retval < 0)
+		return retval;
 
 	/*
 	 * OK, now restart the process with the interpreter's dentry.
@@ -105,7 +107,8 @@ static struct linux_binfmt script_format = {
 
 static int __init init_script_binfmt(void)
 {
-	return register_binfmt(&script_format);
+	register_binfmt(&script_format);
+	return 0;
 }
 
 static void __exit exit_script_binfmt(void)

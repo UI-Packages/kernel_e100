@@ -41,6 +41,8 @@
  * be incorporated into the next SCTP release.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/wait.h>
@@ -48,6 +50,7 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <net/inet_ecn.h>
 #include <net/ip.h>
 #include <net/icmp.h>
@@ -91,7 +94,6 @@ struct sctp_packet *sctp_packet_config(struct sctp_packet *packet,
 	SCTP_DEBUG_PRINTK("%s: packet:%p vtag:0x%x\n", __func__,
 			  packet, vtag);
 
-	sctp_packet_reset(packet);
 	packet->vtag = vtag;
 
 	if (ecn_capable && sctp_packet_empty(packet)) {
@@ -332,6 +334,25 @@ finish:
 	return retval;
 }
 
+static void sctp_packet_release_owner(struct sk_buff *skb)
+{
+	sk_free(skb->sk);
+}
+
+static void sctp_packet_set_owner_w(struct sk_buff *skb, struct sock *sk)
+{
+	skb_orphan(skb);
+	skb->sk = sk;
+	skb->destructor = sctp_packet_release_owner;
+
+	/*
+	 * The data chunks have already been accounted for in sctp_sendmsg(),
+	 * therefore only reserve a single byte to keep socket around until
+	 * the packet has been transmitted.
+	 */
+	atomic_inc(&sk->sk_wmem_alloc);
+}
+
 /* All packets are sent to the network through this function from
  * sctp_outq_tail().
  *
@@ -373,11 +394,9 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	/* Set the owning socket so that we know where to get the
 	 * destination IP address.
 	 */
-	skb_set_owner_w(nskb, sk);
+	sctp_packet_set_owner_w(nskb, sk);
 
-	/* The 'obsolete' field of dst is set to 2 when a dst is freed. */
-	if (!dst || (dst->obsolete > 1)) {
-		dst_release(dst);
+	if (!sctp_transport_dst_check(tp)) {
 		sctp_transport_route(tp, NULL, sctp_sk(sk));
 		if (asoc && (asoc->param_flags & SPP_PMTUD_ENABLE)) {
 			sctp_assoc_sync_pmtu(asoc);
@@ -428,11 +447,6 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	list_for_each_entry_safe(chunk, tmp, &packet->chunk_list, list) {
 		list_del_init(&chunk->list);
 		if (sctp_chunk_is_data(chunk)) {
-
-			if (!chunk->has_tsn) {
-				sctp_chunk_assign_ssn(chunk);
-				sctp_chunk_assign_tsn(chunk);
-
 			/* 6.3.1 C4) When data is in flight and when allowed
 			 * by rule C5, a new RTT measurement MUST be made each
 			 * round trip.  Furthermore, new RTT measurements
@@ -440,13 +454,10 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 			 * for a given destination transport address.
 			 */
 
-				if (!tp->rto_pending) {
-					chunk->rtt_in_progress = 1;
-					tp->rto_pending = 1;
-				}
-			} else
-				chunk->resent = 1;
-
+			if (!tp->rto_pending) {
+				chunk->rtt_in_progress = 1;
+				tp->rto_pending = 1;
+			}
 			has_data = 1;
 		}
 
@@ -506,23 +517,20 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	 * Note: Adler-32 is no longer applicable, as has been replaced
 	 * by CRC32-C as described in <draft-ietf-tsvwg-sctpcsum-02.txt>.
 	 */
-	if (!sctp_checksum_disable &&
-	    !(dst->dev->features & (NETIF_F_NO_CSUM | NETIF_F_SCTP_CSUM))) {
-		__u32 crc32 = sctp_start_cksum((__u8 *)sh, cksum_buf_len);
+	if (!sctp_checksum_disable) {
+		if (!(dst->dev->features & NETIF_F_SCTP_CSUM)) {
+			__u32 crc32 = sctp_start_cksum((__u8 *)sh, cksum_buf_len);
 
-		/* 3) Put the resultant value into the checksum field in the
-		 *    common header, and leave the rest of the bits unchanged.
-		 */
-		sh->checksum = sctp_end_cksum(crc32);
-	} else {
-		if (dst->dev->features & NETIF_F_SCTP_CSUM) {
-			/* no need to seed psuedo checksum for SCTP */
+			/* 3) Put the resultant value into the checksum field in the
+			 *    common header, and leave the rest of the bits unchanged.
+			 */
+			sh->checksum = sctp_end_cksum(crc32);
+		} else {
+			/* no need to seed pseudo checksum for SCTP */
 			nskb->ip_summed = CHECKSUM_PARTIAL;
 			nskb->csum_start = (skb_transport_header(nskb) -
 			                    nskb->head);
 			nskb->csum_offset = offsetof(struct sctphdr, checksum);
-		} else {
-			nskb->ip_summed = CHECKSUM_UNNECESSARY;
 		}
 	}
 
@@ -556,8 +564,6 @@ int sctp_packet_transmit(struct sctp_packet *packet)
 	if (has_data) {
 		struct timer_list *timer;
 		unsigned long timeout;
-
-		tp->last_time_used = jiffies;
 
 		/* Restart the AUTOCLOSE timer when sending data. */
 		if (sctp_state(asoc, ESTABLISHED) && asoc->autoclose) {
@@ -617,7 +623,6 @@ static sctp_xmit_t sctp_packet_can_append_data(struct sctp_packet *packet,
 	sctp_xmit_t retval = SCTP_XMIT_OK;
 	size_t datasize, rwnd, inflight, flight_size;
 	struct sctp_transport *transport = packet->transport;
-	__u32 max_burst_bytes;
 	struct sctp_association *asoc = transport->asoc;
 	struct sctp_outq *q = &asoc->outqueue;
 
@@ -648,28 +653,6 @@ static sctp_xmit_t sctp_packet_can_append_data(struct sctp_packet *packet,
 			retval = SCTP_XMIT_RWND_FULL;
 			goto finish;
 		}
-	}
-
-	/* sctpimpguide-05 2.14.2
-	 * D) When the time comes for the sender to
-	 * transmit new DATA chunks, the protocol parameter Max.Burst MUST
-	 * first be applied to limit how many new DATA chunks may be sent.
-	 * The limit is applied by adjusting cwnd as follows:
-	 * 	if ((flightsize + Max.Burst * MTU) < cwnd)
-	 *		cwnd = flightsize + Max.Burst * MTU
-	 */
-	max_burst_bytes = asoc->max_burst * asoc->pathmtu;
-	if ((flight_size + max_burst_bytes) < transport->cwnd) {
-		transport->cwnd = flight_size + max_burst_bytes;
-		SCTP_DEBUG_PRINTK("%s: cwnd limited by max_burst: "
-				  "transport: %p, cwnd: %d, "
-				  "ssthresh: %d, flight_size: %d, "
-				  "pba: %d\n",
-				  __func__, transport,
-				  transport->cwnd,
-				  transport->ssthresh,
-				  transport->flight_size,
-				  transport->partial_bytes_acked);
 	}
 
 	/* RFC 2960 6.1  Transmission of DATA Chunks
@@ -706,7 +689,7 @@ static sctp_xmit_t sctp_packet_can_append_data(struct sctp_packet *packet,
 		 * Don't delay large message writes that may have been
 		 * fragmeneted into small peices.
 		 */
-		if ((len < max) && (chunk->msg->msg_size < max)) {
+		if ((len < max) && chunk->msg->can_delay) {
 			retval = SCTP_XMIT_NAGLE_DELAY;
 			goto finish;
 		}
@@ -731,13 +714,7 @@ static void sctp_packet_append_data(struct sctp_packet *packet,
 	/* Keep track of how many bytes are in flight to the receiver. */
 	asoc->outqueue.outstanding_bytes += datasize;
 
-	/* Update our view of the receiver's rwnd. Include sk_buff overhead
-	 * while updating peer.rwnd so that it reduces the chances of a
-	 * receiver running out of receive buffer space even when receive
-	 * window is still open. This can happen when a sender is sending
-	 * sending small messages.
-	 */
-	datasize += sizeof(struct sk_buff);
+	/* Update our view of the receiver's rwnd. */
 	if (datasize < rwnd)
 		rwnd -= datasize;
 	else
@@ -747,6 +724,8 @@ static void sctp_packet_append_data(struct sctp_packet *packet,
 	/* Has been accepted for transmission. */
 	if (!asoc->peer.prsctp_capable)
 		chunk->msg->can_abandon = 0;
+	sctp_chunk_assign_tsn(chunk);
+	sctp_chunk_assign_ssn(chunk);
 }
 
 static sctp_xmit_t sctp_packet_will_fit(struct sctp_packet *packet,

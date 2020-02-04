@@ -37,12 +37,12 @@
 #include <linux/crash_dump.h>
 #include <linux/iommu-helper.h>
 #include <linux/dma-mapping.h>
+#include <linux/prefetch.h>
 
 #include <asm/delay.h>		/* ia64_get_itc() */
 #include <asm/io.h>
 #include <asm/page.h>		/* PAGE_OFFSET */
 #include <asm/dma.h>
-#include <asm/system.h>		/* wmb() */
 
 #include <asm/acpi-ext.h>
 
@@ -677,12 +677,19 @@ sba_alloc_range(struct ioc *ioc, struct device *dev, size_t size)
 			spin_unlock_irqrestore(&ioc->saved_lock, flags);
 
 			pide = sba_search_bitmap(ioc, dev, pages_needed, 0);
-			if (unlikely(pide >= (ioc->res_size << 3)))
-				panic(__FILE__ ": I/O MMU @ %p is out of mapping resources\n",
-				      ioc->ioc_hpa);
+			if (unlikely(pide >= (ioc->res_size << 3))) {
+				printk(KERN_WARNING "%s: I/O MMU @ %p is"
+				       "out of mapping resources, %u %u %lx\n",
+				       __func__, ioc->ioc_hpa, ioc->res_size,
+				       pages_needed, dma_get_seg_boundary(dev));
+				return -1;
+			}
 #else
-			panic(__FILE__ ": I/O MMU @ %p is out of mapping resources\n",
-			      ioc->ioc_hpa);
+			printk(KERN_WARNING "%s: I/O MMU @ %p is"
+			       "out of mapping resources, %u %u %lx\n",
+			       __func__, ioc->ioc_hpa, ioc->res_size,
+			       pages_needed, dma_get_seg_boundary(dev));
+			return -1;
 #endif
 		}
 	}
@@ -907,7 +914,7 @@ sba_mark_invalid(struct ioc *ioc, dma_addr_t iova, size_t byte_cnt)
  * @dir:  R/W or both.
  * @attrs: optional dma attributes
  *
- * See Documentation/PCI/PCI-DMA-mapping.txt
+ * See Documentation/DMA-API-HOWTO.txt
  */
 static dma_addr_t sba_map_page(struct device *dev, struct page *page,
 			       unsigned long poff, size_t size,
@@ -965,6 +972,8 @@ static dma_addr_t sba_map_page(struct device *dev, struct page *page,
 #endif
 
 	pide = sba_alloc_range(ioc, dev, size);
+	if (pide < 0)
+		return 0;
 
 	iovp = (dma_addr_t) pide << iovp_shift;
 
@@ -1034,7 +1043,7 @@ sba_mark_clean(struct ioc *ioc, dma_addr_t iova, size_t size)
  * @dir:  R/W or both.
  * @attrs: optional dma attributes
  *
- * See Documentation/PCI/PCI-DMA-mapping.txt
+ * See Documentation/DMA-API-HOWTO.txt
  */
 static void sba_unmap_page(struct device *dev, dma_addr_t iova, size_t size,
 			   enum dma_data_direction dir, struct dma_attrs *attrs)
@@ -1054,7 +1063,7 @@ static void sba_unmap_page(struct device *dev, dma_addr_t iova, size_t size,
 		/*
 		** Address does not fall w/in IOVA, must be bypassing
 		*/
-		DBG_BYPASS("sba_unmap_single_atttrs() bypass addr: 0x%lx\n",
+		DBG_BYPASS("sba_unmap_single_attrs() bypass addr: 0x%lx\n",
 			   iova);
 
 #ifdef ENABLE_MARK_CLEAN
@@ -1117,10 +1126,11 @@ void sba_unmap_single_attrs(struct device *dev, dma_addr_t iova, size_t size,
  * @size:  number of bytes mapped in driver buffer.
  * @dma_handle:  IOVA of new buffer.
  *
- * See Documentation/PCI/PCI-DMA-mapping.txt
+ * See Documentation/DMA-API-HOWTO.txt
  */
 static void *
-sba_alloc_coherent (struct device *dev, size_t size, dma_addr_t *dma_handle, gfp_t flags)
+sba_alloc_coherent(struct device *dev, size_t size, dma_addr_t *dma_handle,
+		   gfp_t flags, struct dma_attrs *attrs)
 {
 	struct ioc *ioc;
 	void *addr;
@@ -1180,10 +1190,10 @@ sba_alloc_coherent (struct device *dev, size_t size, dma_addr_t *dma_handle, gfp
  * @vaddr:  virtual address IOVA of "consistent" buffer.
  * @dma_handler:  IO virtual address of "consistent" buffer.
  *
- * See Documentation/PCI/PCI-DMA-mapping.txt
+ * See Documentation/DMA-API-HOWTO.txt
  */
-static void sba_free_coherent (struct device *dev, size_t size, void *vaddr,
-			       dma_addr_t dma_handle)
+static void sba_free_coherent(struct device *dev, size_t size, void *vaddr,
+			      dma_addr_t dma_handle, struct dma_attrs *attrs)
 {
 	sba_unmap_single_attrs(dev, dma_handle, size, 0, NULL);
 	free_pages((unsigned long) vaddr, get_order(size));
@@ -1320,6 +1330,7 @@ sba_coalesce_chunks(struct ioc *ioc, struct device *dev,
 	unsigned long dma_offset, dma_len; /* start/len of DMA stream */
 	int n_mappings = 0;
 	unsigned int max_seg_size = dma_get_max_seg_size(dev);
+	int idx;
 
 	while (nents > 0) {
 		unsigned long vaddr = (unsigned long) sba_sg_address(startsg);
@@ -1381,7 +1392,7 @@ sba_coalesce_chunks(struct ioc *ioc, struct device *dev,
 #endif
 
 			/*
-			** Not virtually contigous.
+			** Not virtually contiguous.
 			** Terminate prev chunk.
 			** Start a new chunk.
 			**
@@ -1418,16 +1429,22 @@ sba_coalesce_chunks(struct ioc *ioc, struct device *dev,
 		vcontig_sg->dma_length = vcontig_len;
 		dma_len = (dma_len + dma_offset + ~iovp_mask) & iovp_mask;
 		ASSERT(dma_len <= DMA_CHUNK_SIZE);
-		dma_sg->dma_address = (dma_addr_t) (PIDE_FLAG
-			| (sba_alloc_range(ioc, dev, dma_len) << iovp_shift)
-			| dma_offset);
+		idx = sba_alloc_range(ioc, dev, dma_len);
+		if (idx < 0) {
+			dma_sg->dma_length = 0;
+			return -1;
+		}
+		dma_sg->dma_address = (dma_addr_t)(PIDE_FLAG | (idx << iovp_shift)
+						   | dma_offset);
 		n_mappings++;
 	}
 
 	return n_mappings;
 }
 
-
+static void sba_unmap_sg_attrs(struct device *dev, struct scatterlist *sglist,
+			       int nents, enum dma_data_direction dir,
+			       struct dma_attrs *attrs);
 /**
  * sba_map_sg - map Scatter/Gather list
  * @dev: instance of PCI owned by the driver that's asking.
@@ -1436,7 +1453,7 @@ sba_coalesce_chunks(struct ioc *ioc, struct device *dev,
  * @dir:  R/W or both.
  * @attrs: optional dma attributes
  *
- * See Documentation/PCI/PCI-DMA-mapping.txt
+ * See Documentation/DMA-API-HOWTO.txt
  */
 static int sba_map_sg_attrs(struct device *dev, struct scatterlist *sglist,
 			    int nents, enum dma_data_direction dir,
@@ -1493,6 +1510,10 @@ static int sba_map_sg_attrs(struct device *dev, struct scatterlist *sglist,
 	** Access to the virtual address is what forces a two pass algorithm.
 	*/
 	coalesced = sba_coalesce_chunks(ioc, dev, sglist, nents);
+	if (coalesced < 0) {
+		sba_unmap_sg_attrs(dev, sglist, nents, dir, attrs);
+		return 0;
+	}
 
 	/*
 	** Program the I/O Pdir
@@ -1528,7 +1549,7 @@ static int sba_map_sg_attrs(struct device *dev, struct scatterlist *sglist,
  * @dir:  R/W or both.
  * @attrs: optional dma attributes
  *
- * See Documentation/PCI/PCI-DMA-mapping.txt
+ * See Documentation/DMA-API-HOWTO.txt
  */
 static void sba_unmap_sg_attrs(struct device *dev, struct scatterlist *sglist,
 			       int nents, enum dma_data_direction dir,
@@ -2026,13 +2047,13 @@ acpi_sba_ioc_add(struct acpi_device *device)
 	struct ioc *ioc;
 	acpi_status status;
 	u64 hpa, length;
-	struct acpi_device_info *dev_info;
+	struct acpi_device_info *adi;
 
 	status = hp_acpi_csr_space(device->handle, &hpa, &length);
 	if (ACPI_FAILURE(status))
 		return 1;
 
-	status = acpi_get_object_info(device->handle, &dev_info);
+	status = acpi_get_object_info(device->handle, &adi);
 	if (ACPI_FAILURE(status))
 		return 1;
 
@@ -2040,13 +2061,13 @@ acpi_sba_ioc_add(struct acpi_device *device)
 	 * For HWP0001, only SBA appears in ACPI namespace.  It encloses the PCI
 	 * root bridges, and its CSR space includes the IOC function.
 	 */
-	if (strncmp("HWP0001", dev_info->hardware_id.string, 7) == 0) {
+	if (strncmp("HWP0001", adi->hardware_id.string, 7) == 0) {
 		hpa += ZX1_IOC_OFFSET;
 		/* zx1 based systems default to kernel page size iommu pages */
 		if (!iovp_shift)
 			iovp_shift = min(PAGE_SHIFT, 16);
 	}
-	kfree(dev_info);
+	kfree(adi);
 
 	/*
 	 * default anything not caught above or specified on cmdline to 4k
@@ -2192,8 +2213,8 @@ sba_page_override(char *str)
 __setup("sbapagesize=",sba_page_override);
 
 struct dma_map_ops sba_dma_ops = {
-	.alloc_coherent		= sba_alloc_coherent,
-	.free_coherent		= sba_free_coherent,
+	.alloc			= sba_alloc_coherent,
+	.free			= sba_free_coherent,
 	.map_page		= sba_map_page,
 	.unmap_page		= sba_unmap_page,
 	.map_sg			= sba_map_sg_attrs,

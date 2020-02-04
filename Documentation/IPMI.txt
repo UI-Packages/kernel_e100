@@ -50,6 +50,10 @@ figuring to see if it will work on your system if the SMBIOS/APCI
 information is wrong or not present.  It is fairly safe to have both
 these enabled and let the drivers auto-detect what is present.
 
+The driver also support an interface over a serial port.  This is
+rather complex to set up and use correctly.  See the section on the
+IPMI Serial Driver for details.
+
 You should generally enable ACPI on your system, as systems with IPMI
 can have ACPI tables describing them.
 
@@ -110,6 +114,19 @@ own custom interface, you probably need to use this.
 ipmi_smb - A driver for accessing BMCs on the SMBus. It uses the
 I2C kernel driver's SMBus interfaces to send and receive IPMI messages
 over the SMBus.
+
+ipmi_serial - A driver for accessing BMCs over a serial port.  This
+requires patches to the serial port code.  It also requires that a
+specific codec be loaded selected.
+
+ipmi_serial_terminal_mode - An IPMI serial codec for terminal mode
+(per the IPMI spec)
+
+ipmi_serial_direct - An IPMI serial codec for direct mode (per the
+IPMI spec).
+
+ipmi_serial_radisys_ascii - An IPMI serial codec for certain Radisys
+boards.
 
 ipmi_watchdog - IPMI requires systems to have a very capable watchdog
 timer.  This driver implements the standard Linux watchdog timer
@@ -365,6 +382,7 @@ You can change this at module load time (for a module) with:
        regshifts=<shift1>,<shift2>,...
        slave_addrs=<addr1>,<addr2>,...
        force_kipmid=<enable1>,<enable2>,...
+       kipmid_max_busy_us=<ustime1>,<ustime2>,...
        unload_when_empty=[0|1]
 
 Each of these except si_trydefaults is a list, the first item for the
@@ -433,6 +451,7 @@ kernel command line as:
        ipmi_si.regshifts=<shift1>,<shift2>,...
        ipmi_si.slave_addrs=<addr1>,<addr2>,...
        ipmi_si.force_kipmid=<enable1>,<enable2>,...
+       ipmi_si.kipmid_max_busy_us=<ustime1>,<ustime2>,...
 
 It works the same as the module parameters of the same names.
 
@@ -449,6 +468,16 @@ is in progress.  The force_kipmid module parameter will all the user to
 force this thread on or off.  If you force it off and don't have
 interrupts, the driver will run VERY slowly.  Don't blame me,
 these interfaces suck.
+
+Unfortunately, this thread can use a lot of CPU depending on the
+interface's performance.  This can waste a lot of CPU and cause
+various issues with detecting idle CPU and using extra power.  To
+avoid this, the kipmid_max_busy_us sets the maximum amount of time, in
+microseconds, that kipmid will spin before sleeping for a tick.  This
+value sets a balance between performance and CPU waste and needs to be
+tuned to your needs.  Maybe, someday, auto-tuning will be added, but
+that's not a simple thing and even the auto-tuning would need to be
+tuned to the user's desired performance.
 
 The driver supports a hot add and remove of interfaces.  This way,
 interfaces can be added or removed after the kernel is up and running.
@@ -474,13 +503,14 @@ The SMBus Driver
 ----------------
 
 The SMBus driver allows up to 4 SMBus devices to be configured in the
-system.  By default, the driver will register any SMBus interfaces it finds
-in the I2C address range of 0x20 to 0x4f on any adapter.  You can change this
+system.  By default, the driver will only register with something it
+finds in DMI or ACPI tables.  You can change this
 at module load time (for a module) with:
 
   modprobe ipmi_smb.o
 	addr=<adapter1>,<i2caddr1>[,<adapter2>,<i2caddr2>[,...]]
 	dbg=<flags1>,<flags2>...
+        slave_addrs=<addr1>,<addr2>,...
 	[defaultprobe=1] [dbg_probe=1]
 
 The addresses are specified in pairs, the first is the adapter ID and the
@@ -489,20 +519,26 @@ second is the I2C address on that adapter.
 The debug flags are bit flags for each BMC found, they are:
 IPMI messages: 1, driver state: 2, timing: 4, I2C probe: 8
 
-Setting smb_defaultprobe to zero disabled the default probing of SMBus
-interfaces at address range 0x20 to 0x4f.  This means that only the
-BMCs specified on the smb_addr line will be detected.
+Setting defaultprobe to one will enable probing of SMBus interfaces at
+address ranging from 0x20 to 0x4f.  This means any BMCs found in that
+area on any adapter will be detected.  Note that if something else is
+in this address range, the scan operation can clobber it, so be
+careful.
 
-Setting smb_dbg_probe to 1 will enable debugging of the probing and
+Setting dbg_probe to 1 will enable debugging of the probing and
 detection process for BMCs on the SMBusses.
 
-Discovering the IPMI compliant BMC on the SMBus can cause devices
-on the I2C bus to fail. The SMBus driver writes a "Get Device ID" IPMI
+The slave_addrs specifies the IPMI address of the local BMC.  This is
+usually 0x20 and the driver defaults to that, but in case it's not, it
+can be specified when the driver starts up.
+
+Discovering the IPMI compliant BMC on the SMBus can cause devices on
+the I2C bus to fail. The SMBus driver writes a "Get Device ID" IPMI
 message as a block write to the I2C bus and waits for a response.
-This action can be detrimental to some I2C devices. It is highly recommended
-that the known I2c address be given to the SMBus driver in the smb_addr
-parameter. The default address range will not be used when a smb_addr
-parameter is provided.
+This action can be detrimental to some I2C devices. It is highly
+recommended that the known I2C address be given to the SMBus driver in
+the smb_addr parameter unless you have DMI or ACPI data to tell the
+driver what to use.
 
 When compiled into the kernel, the addresses can be specified on the
 kernel command line as:
@@ -510,6 +546,7 @@ kernel command line as:
   ipmb_smb.addr=<adapter1>,<i2caddr1>[,<adapter2>,<i2caddr2>[,...]]
 	ipmi_smb.dbg=<flags1>,<flags2>...
 	ipmi_smb.defaultprobe=0 ipmi_smb.dbg_probe=1
+        ipmi_smb.slave_addrs=<addr1>,<addr2>,...
 
 These are the same options as on the module command line.
 
@@ -518,8 +555,164 @@ is enabled along with this, so the I2C driver knows to run to
 completion during sending a panic event.
 
 
+The IPMI Serial Driver
+----------------------
+
+First let met get this off my chest.  This type if interface is a bad
+idea, because:
+   * It is not standard.  Decent standards are available that are
+     very cheap to implement (like SMBus).  You think that existing
+     standards would be enough to keep manufacturers away from wierd
+     things like this.
+   * The interface cannot be autodetected and *NO* I am not going to
+     send random bytes down a serial port to see if something is there.
+     This is a huge problem.  The standard interfaces will just work
+     out of the box.  These interfaces won't.
+   * Layering drivers is a bad idea.
+   * The error checking is not strong enough be be reliable enough,
+     at least for the currently defined codecs.
+   * In particular, terminal mode is a bad idea because it doesn't have
+     any checksums.
+If you have one of these, please tell your manufacturer to not use it any
+more.  With that off my chest, these things exist in the field, and need
+to be supported, so here we go...
+
+Note that to use this, the serial core must have the layered interface
+patches.  If your kernel does not have them, you can get them at the
+OpenIPMI web site.
+
+Configuration for this driver is quite complex.  Config options are:
+  'IPMI Serial Interface' - Turn on the main interface.
+  'Default serial IPMI interface setup' - You may specify a setup
+    string in this option.
+  'Terminal mode interface for IPMI'
+  'Direct mode interface for IPMI'
+  'Radisys ASCII interface for IPMI'
+
+Those last options are codecs.  You can safely choose and install them
+all; they will not be used unless configured.
+
+It is recommended that you load these as modules and specify the
+port_info module parameter to configure the driver and leave the
+default alone.  If you compile the driver into the kernel, you can
+specify ipmi_serial.port_info=... on the kernel command line to
+configure the driver.  Setting the default setup is only recommended
+if the kernel will only be used for one type of system.
+
+The port_info parameter allows configuration for one or more ports to
+be specified as follows:
+   port_info=<port1config>[:<port2config>[:...]]
+A portconfig has the following format:
+   <port>,<ttyconfig>,<codec>,<codec options>
+
+   <port> - The name of the serial port, like ttyS0, ttyS1, etc.
+   <ttyconfg> - Standard tty configuration string, like 38400N81r.
+      The first part is the speed.  After that is parity (n, o, e)
+      defaulting to 'n'.  Then the number of bits (5 - 8) defaulting
+      to 8.  Then number of stop bits (1 or 2), defaulting to 1.
+      After that is configuration options, which there may be zero
+      or more of.  The "r" option turns on CTS/RTS handling.  Normally the
+      driver enables DTR and RTS lines sent to the device, as they
+      may be ignored, may be required, but generally don't hurt
+      anything.  You may add "R" to turn off RTS sending and "D" to turn
+      off DTR sending.  Like 9600n81RD, for instance.
+   <codec> - Which codec to use for this interface.
+   <codec options> - Options for this codec, separated by '+'
+
+Codecs:
+   TerminalMode - An interface using the "terminal mode" handling as
+      defined in the IPMI spec.  I know, I said it wasn't a standard.
+      The problem is this is defined for modem dial-ins for interactive
+      users.  Not for local BMC access.
+
+      Terminal mode options are "pp" to enable special PigeonPoint
+      handling for echo suppression, or "nopp" to disable this.
+      "ppInvIANA" is only valid if "pp" is enabled, it tells the codec
+      that the IANA in the PigeonPoint-specific messages is backwards.
+      The codec will attempt to auto-detect this, but you can force
+      it if necessary by add this, or "noppInvIANA.  If you force it,
+      that will turn off auto-detection.
+
+      Specifying "attn" will enable detecting an attention character
+      the BMC may send at any time to tell the driver to fetch the
+      flags.  This defaults to the BELL character (0x07) but may be
+      overridden by doing "attn=0xNN".  Specifying "noattn" turns this
+      feature off.  Note that you need to get the attn character
+      setting right, or the data stream will be corrupted when the
+      attn character comes in.  Multiple options are separated by a
+      "+: character, like: "attn=0x09+nopp".  These options might be
+      properly autodetected on some boards.
+
+  Direct - Use direct mode as specified in the IPMI spec.  Again, this
+      is designed for automated remote modem access, not local BMC access.
+
+      The options available are:
+
+        attn - Enable using the ASCII escape character (0x1b) as an
+	  attention character.
+	noattn - Force attn off.
+	eattn[=char] - Enable using a specific escape sequence as an
+	  attention notification.  The escape sequence is 0xAA <char>
+	  where the default char is 0x47 but may be overriden by being
+	  specified.
+	noeattn - Force eattn off.
+	rqa - Set the requester address.  The default is 0x61.
+	rsa - Set the responder address.  The default is 0x20.
+
+      Note that you must set the attn and eattn values correct or the
+      protocol may not work correctly.  The options may be automatically
+      set correctly for boards the driver knows about.  Multiple options
+      must be separated by a '+'.
+
+  RadisysAscii - A codec for certain Radisys boads.
+
+      No options are supported.
+
+The driver supports a hot add and remove of interfaces.  This way,
+interfaces can be added or removed after the kernel is up and running.
+This is done using /sys/modules/ipmi_serial/parameters/hotmod, which is a
+write-only parameter.  You write a string to this interface.  The
+string has the format:
+   <op1>[:<op2>[:<op3>...]]
+The "op"s are:
+   add|remove,<portconfig>
+where the portconfig parameter is described above.  Note that for
+removal only the port is use for comparison, the rest of the
+parameters are ignored.
+
+Note that if you are doing driver development on this, the OpenIPMI
+library has a serial BMC emulator
+
+
 Other Pieces
 ------------
+
+Get the detailed info related with the IPMI device
+--------------------------------------------------
+
+Some users need more detailed information about a device, like where
+the address came from or the raw base device for the IPMI interface.
+You can use the IPMI smi_watcher to catch the IPMI interfaces as they
+come or go, and to grab the information, you can use the function
+ipmi_get_smi_info(), which returns the following structure:
+
+struct ipmi_smi_info {
+	enum ipmi_addr_src addr_src;
+	struct device *dev;
+	union {
+		struct {
+			void *acpi_handle;
+		} acpi_info;
+	} addr_info;
+};
+
+Currently special info for only for SI_ACPI address sources is
+returned.  Others may be added as necessary.
+
+Note that the dev pointer is included in the above structure, and
+assuming ipmi_smi_get_info returns success, you must call put_device
+on the dev pointer.
+
 
 Watchdog
 --------

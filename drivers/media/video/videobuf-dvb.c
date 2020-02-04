@@ -19,6 +19,7 @@
 #include <linux/fs.h>
 #include <linux/kthread.h>
 #include <linux/file.h>
+#include <linux/slab.h>
 
 #include <linux/freezer.h>
 
@@ -56,7 +57,7 @@ static int videobuf_dvb_thread(void *data)
 		buf = list_entry(dvb->dvbq.stream.next,
 				 struct videobuf_buffer, stream);
 		list_del(&buf->stream);
-		err = videobuf_waiton(buf,0,1);
+		err = videobuf_waiton(&dvb->dvbq, buf, 0, 1);
 
 		/* no more feeds left or stop_feed() asked us to quit */
 		if (0 == dvb->nfeeds)
@@ -66,7 +67,7 @@ static int videobuf_dvb_thread(void *data)
 		try_to_freeze();
 
 		/* feed buffer data to demux */
-		outp = videobuf_queue_to_vmalloc (&dvb->dvbq, buf);
+		outp = videobuf_queue_to_vaddr(&dvb->dvbq, buf);
 
 		if (buf->state == VIDEOBUF_DONE)
 			dvb_dmx_swfilter(&dvb->demux, outp,
@@ -139,7 +140,9 @@ static int videobuf_dvb_register_adapter(struct videobuf_dvb_frontends *fe,
 			  struct device *device,
 			  char *adapter_name,
 			  short *adapter_nr,
-			  int mfe_shared)
+			  int mfe_shared,
+			  int (*fe_ioctl_override)(struct dvb_frontend *,
+					unsigned int, void *, unsigned int))
 {
 	int result;
 
@@ -154,6 +157,7 @@ static int videobuf_dvb_register_adapter(struct videobuf_dvb_frontends *fe,
 	}
 	fe->adapter.priv = adapter_priv;
 	fe->adapter.mfe_shared = mfe_shared;
+	fe->adapter.fe_ioctl_override = fe_ioctl_override;
 
 	return result;
 }
@@ -222,9 +226,10 @@ static int videobuf_dvb_register_frontend(struct dvb_adapter *adapter,
 	}
 
 	/* register network adapter */
-	dvb_net_init(adapter, &dvb->net, &dvb->demux.dmx);
-	if (dvb->net.dvbdev == NULL) {
-		result = -ENOMEM;
+	result = dvb_net_init(adapter, &dvb->net, &dvb->demux.dmx);
+	if (result < 0) {
+		printk(KERN_WARNING "%s: dvb_net_init failed (errno = %d)\n",
+		       dvb->name, result);
 		goto fail_fe_conn;
 	}
 	return 0;
@@ -253,7 +258,9 @@ int videobuf_dvb_register_bus(struct videobuf_dvb_frontends *f,
 			  void *adapter_priv,
 			  struct device *device,
 			  short *adapter_nr,
-			  int mfe_shared)
+			  int mfe_shared,
+			  int (*fe_ioctl_override)(struct dvb_frontend *,
+					unsigned int, void *, unsigned int))
 {
 	struct list_head *list, *q;
 	struct videobuf_dvb_frontend *fe;
@@ -267,7 +274,7 @@ int videobuf_dvb_register_bus(struct videobuf_dvb_frontends *f,
 
 	/* Bring up the adapter */
 	res = videobuf_dvb_register_adapter(f, module, adapter_priv, device,
-		fe->dvb.name, adapter_nr, mfe_shared);
+		fe->dvb.name, adapter_nr, mfe_shared, fe_ioctl_override);
 	if (res < 0) {
 		printk(KERN_WARNING "videobuf_dvb_register_adapter failed (errno = %d)\n", res);
 		return res;

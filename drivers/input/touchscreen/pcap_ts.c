@@ -14,6 +14,7 @@
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/string.h>
+#include <linux/slab.h>
 #include <linux/pm.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
@@ -233,7 +234,7 @@ static int pcap_ts_resume(struct device *dev)
 	return 0;
 }
 
-static struct dev_pm_ops pcap_ts_pm_ops = {
+static const struct dev_pm_ops pcap_ts_pm_ops = {
 	.suspend	= pcap_ts_suspend,
 	.resume		= pcap_ts_resume,
 };
@@ -251,19 +252,7 @@ static struct platform_driver pcap_ts_driver = {
 		.pm	= PCAP_TS_PM_OPS,
 	},
 };
-
-static int __init pcap_ts_init(void)
-{
-	return platform_driver_register(&pcap_ts_driver);
-}
-
-static void __exit pcap_ts_exit(void)
-{
-	platform_driver_unregister(&pcap_ts_driver);
-}
-
-module_init(pcap_ts_init);
-module_exit(pcap_ts_exit);
+module_platform_driver(pcap_ts_driver);
 
 MODULE_DESCRIPTION("Motorola PCAP2 touchscreen driver");
 MODULE_AUTHOR("Daniel Ribeiro / Harald Welte");

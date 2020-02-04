@@ -19,11 +19,10 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/pci_ids.h>
-#include <linux/slab.h>
 #include <linux/edac.h>
 #include "edac_core.h"
 
-#define R82600_REVISION	" Ver: 2.0.2 " __DATE__
+#define R82600_REVISION	" Ver: 2.0.2"
 #define EDAC_MOD_STR	"r82600_edac"
 
 #define r82600_printk(level, fmt, arg...) \
@@ -121,7 +120,7 @@
 				 *        write 0=NOP
 				 */
 
-#define R82600_DRBA	0x60	/* + 0x60..0x63 SDRAM Row Boundry Address
+#define R82600_DRBA	0x60	/* + 0x60..0x63 SDRAM Row Boundary Address
 				 *  Registers
 				 *
 				 * 7:0  Address lines 30:24 - upper limit of
@@ -132,7 +131,7 @@ struct r82600_error_info {
 	u32 eapr;
 };
 
-static unsigned int disable_hardware_scrub;
+static bool disable_hardware_scrub;
 
 static struct edac_pci_ctl_info *r82600_pci;
 
@@ -218,7 +217,7 @@ static void r82600_init_csrows(struct mem_ctl_info *mci, struct pci_dev *pdev,
 {
 	struct csrow_info *csrow;
 	int index;
-	u8 drbar;		/* SDRAM Row Boundry Address Register */
+	u8 drbar;		/* SDRAM Row Boundary Address Register */
 	u32 row_high_limit, row_high_limit_last;
 	u32 reg_sdram, ecc_on, row_base;
 
@@ -237,7 +236,7 @@ static void r82600_init_csrows(struct mem_ctl_info *mci, struct pci_dev *pdev,
 		row_high_limit = ((u32) drbar << 24);
 /*		row_high_limit = ((u32)drbar << 24) | 0xffffffUL; */
 
-		debugf1("%s() Row=%d, Boundry Address=%#0x, Last = %#0x\n",
+		debugf1("%s() Row=%d, Boundary Address=%#0x, Last = %#0x\n",
 			__func__, index, row_high_limit, row_high_limit_last);
 
 		/* Empty row [p.57] */
@@ -355,7 +354,7 @@ static int __devinit r82600_init_one(struct pci_dev *pdev,
 {
 	debugf0("%s()\n", __func__);
 
-	/* don't need to call pci_device_enable() */
+	/* don't need to call pci_enable_device() */
 	return r82600_probe1(pdev, ent->driver_data);
 }
 
@@ -374,7 +373,7 @@ static void __devexit r82600_remove_one(struct pci_dev *pdev)
 	edac_mc_free(mci);
 }
 
-static const struct pci_device_id r82600_pci_tbl[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(r82600_pci_tbl) = {
 	{
 	 PCI_DEVICE(PCI_VENDOR_ID_RADISYS, R82600_BRIDGE_ID)
 	 },

@@ -18,7 +18,6 @@
 #include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/io.h>
-#include <asm/system.h>
 #include <asm/sections.h>
 #include <asm/pmac_low_i2c.h>
 
@@ -107,10 +106,8 @@ static int wf_lm75_probe(struct i2c_client *client,
 	i2c_set_clientdata(client, lm);
 
 	rc = wf_register_sensor(&lm->sens);
-	if (rc) {
-		i2c_set_clientdata(client, NULL);
+	if (rc)
 		kfree(lm);
-	}
 
 	return rc;
 }
@@ -216,7 +213,6 @@ static int wf_lm75_remove(struct i2c_client *client)
 	/* release sensor */
 	wf_unregister_sensor(&lm->sens);
 
-	i2c_set_clientdata(client, NULL);
 	return 0;
 }
 
@@ -239,9 +235,9 @@ static struct i2c_driver wf_lm75_driver = {
 static int __init wf_lm75_sensor_init(void)
 {
 	/* Don't register on old machines that use therm_pm72 for now */
-	if (machine_is_compatible("PowerMac7,2") ||
-	    machine_is_compatible("PowerMac7,3") ||
-	    machine_is_compatible("RackMac3,1"))
+	if (of_machine_is_compatible("PowerMac7,2") ||
+	    of_machine_is_compatible("PowerMac7,3") ||
+	    of_machine_is_compatible("RackMac3,1"))
 		return -ENODEV;
 	return i2c_add_driver(&wf_lm75_driver);
 }

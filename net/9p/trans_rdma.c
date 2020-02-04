@@ -26,6 +26,8 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/in.h>
 #include <linux/module.h>
 #include <linux/net.h>
@@ -40,6 +42,7 @@
 #include <linux/file.h>
 #include <linux/parser.h>
 #include <linux/semaphore.h>
+#include <linux/slab.h>
 #include <net/9p/9p.h>
 #include <net/9p/client.h>
 #include <net/9p/transport.h>
@@ -58,7 +61,6 @@
 						 * safely advertise a maxsize
 						 * of 64k */
 
-#define P9_RDMA_MAX_SGE (P9_RDMA_MAXSIZE >> PAGE_SHIFT)
 /**
  * struct p9_trans_rdma - RDMA transport instance
  *
@@ -166,8 +168,7 @@ static int parse_opts(char *params, struct p9_rdma_opts *opts)
 	char *p;
 	substring_t args[MAX_OPT_ARGS];
 	int option;
-	char *options;
-	int ret;
+	char *options, *tmp_options;
 
 	opts->port = P9_PORT;
 	opts->sq_depth = P9_RDMA_SQ_DEPTH;
@@ -177,12 +178,13 @@ static int parse_opts(char *params, struct p9_rdma_opts *opts)
 	if (!params)
 		return 0;
 
-	options = kstrdup(params, GFP_KERNEL);
-	if (!options) {
-		P9_DPRINTK(P9_DEBUG_ERROR,
-			   "failed to allocate copy of option string\n");
+	tmp_options = kstrdup(params, GFP_KERNEL);
+	if (!tmp_options) {
+		p9_debug(P9_DEBUG_ERROR,
+			 "failed to allocate copy of option string\n");
 		return -ENOMEM;
 	}
+	options = tmp_options;
 
 	while ((p = strsep(&options, ",")) != NULL) {
 		int token;
@@ -192,9 +194,8 @@ static int parse_opts(char *params, struct p9_rdma_opts *opts)
 		token = match_token(p, tokens, args);
 		r = match_int(&args[0], &option);
 		if (r < 0) {
-			P9_DPRINTK(P9_DEBUG_ERROR,
-				   "integer field, but no integer?\n");
-			ret = r;
+			p9_debug(P9_DEBUG_ERROR,
+				 "integer field, but no integer?\n");
 			continue;
 		}
 		switch (token) {
@@ -216,7 +217,7 @@ static int parse_opts(char *params, struct p9_rdma_opts *opts)
 	}
 	/* RQ must be at least as large as the SQ */
 	opts->rq_depth = max(opts->rq_depth, opts->sq_depth);
-	kfree(options);
+	kfree(tmp_options);
 	return 0;
 }
 
@@ -302,11 +303,9 @@ handle_recv(struct p9_client *client, struct p9_trans_rdma *rdma,
 	return;
 
  err_out:
-	P9_DPRINTK(P9_DEBUG_ERROR, "req %p err %d status %d\n",
-		   req, err, status);
+	p9_debug(P9_DEBUG_ERROR, "req %p err %d status %d\n", req, err, status);
 	rdma->state = P9_RDMA_FLUSHING;
 	client->status = Disconnected;
-	return;
 }
 
 static void
@@ -320,8 +319,8 @@ handle_send(struct p9_client *client, struct p9_trans_rdma *rdma,
 
 static void qp_event_handler(struct ib_event *event, void *context)
 {
-	P9_DPRINTK(P9_DEBUG_ERROR, "QP event %d context %p\n", event->event,
-								context);
+	p9_debug(P9_DEBUG_ERROR, "QP event %d context %p\n",
+		 event->event, context);
 }
 
 static void cq_comp_handler(struct ib_cq *cq, void *cq_context)
@@ -347,8 +346,7 @@ static void cq_comp_handler(struct ib_cq *cq, void *cq_context)
 			break;
 
 		default:
-			printk(KERN_ERR "9prdma: unexpected completion type, "
-			       "c->wc_op=%d, wc.opcode=%d, status=%d\n",
+			pr_err("unexpected completion type, c->wc_op=%d, wc.opcode=%d, status=%d\n",
 			       c->wc_op, wc.opcode, wc.status);
 			break;
 		}
@@ -358,7 +356,7 @@ static void cq_comp_handler(struct ib_cq *cq, void *cq_context)
 
 static void cq_event_handler(struct ib_event *e, void *v)
 {
-	P9_DPRINTK(P9_DEBUG_ERROR, "CQ event %d context %p\n", e->event, v);
+	p9_debug(P9_DEBUG_ERROR, "CQ event %d context %p\n", e->event, v);
 }
 
 static void rdma_destroy_trans(struct p9_trans_rdma *rdma)
@@ -409,7 +407,7 @@ post_recv(struct p9_client *client, struct p9_rdma_context *c)
 	return ib_post_recv(rdma->qp, &wr, &bad_wr);
 
  error:
-	P9_DPRINTK(P9_DEBUG_ERROR, "EIO\n");
+	p9_debug(P9_DEBUG_ERROR, "EIO\n");
 	return -EIO;
 }
 
@@ -424,9 +422,11 @@ static int rdma_request(struct p9_client *client, struct p9_req_t *req)
 	struct p9_rdma_context *rpl_context = NULL;
 
 	/* Allocate an fcall for the reply */
-	rpl_context = kmalloc(sizeof *rpl_context, GFP_KERNEL);
-	if (!rpl_context)
+	rpl_context = kmalloc(sizeof *rpl_context, GFP_NOFS);
+	if (!rpl_context) {
+		err = -ENOMEM;
 		goto err_close;
+	}
 
 	/*
 	 * If the request has a buffer, steal it, otherwise
@@ -435,7 +435,7 @@ static int rdma_request(struct p9_client *client, struct p9_req_t *req)
 	 */
 	if (!req->rc) {
 		req->rc = kmalloc(sizeof(struct p9_fcall)+client->msize,
-								GFP_KERNEL);
+				  GFP_NOFS);
 		if (req->rc) {
 			req->rc->sdata = (char *) req->rc +
 						sizeof(struct p9_fcall);
@@ -444,8 +444,8 @@ static int rdma_request(struct p9_client *client, struct p9_req_t *req)
 	}
 	rpl_context->rc = req->rc;
 	if (!rpl_context->rc) {
-		kfree(rpl_context);
-		goto err_close;
+		err = -ENOMEM;
+		goto err_free2;
 	}
 
 	/*
@@ -457,11 +457,8 @@ static int rdma_request(struct p9_client *client, struct p9_req_t *req)
 	 */
 	if (atomic_inc_return(&rdma->rq_count) <= rdma->rq_depth) {
 		err = post_recv(client, rpl_context);
-		if (err) {
-			kfree(rpl_context->rc);
-			kfree(rpl_context);
-			goto err_close;
-		}
+		if (err)
+			goto err_free1;
 	} else
 		atomic_dec(&rdma->rq_count);
 
@@ -469,9 +466,11 @@ static int rdma_request(struct p9_client *client, struct p9_req_t *req)
 	req->rc = NULL;
 
 	/* Post the request */
-	c = kmalloc(sizeof *c, GFP_KERNEL);
-	if (!c)
-		goto err_close;
+	c = kmalloc(sizeof *c, GFP_NOFS);
+	if (!c) {
+		err = -ENOMEM;
+		goto err_free1;
+	}
 	c->req = req;
 
 	c->busa = ib_dma_map_single(rdma->cm_id->device,
@@ -498,9 +497,15 @@ static int rdma_request(struct p9_client *client, struct p9_req_t *req)
 	return ib_post_send(rdma->qp, &wr, &bad_wr);
 
  error:
-	P9_DPRINTK(P9_DEBUG_ERROR, "EIO\n");
+	kfree(c);
+	kfree(rpl_context->rc);
+	kfree(rpl_context);
+	p9_debug(P9_DEBUG_ERROR, "EIO\n");
 	return -EIO;
-
+ err_free1:
+	kfree(rpl_context->rc);
+ err_free2:
+	kfree(rpl_context);
  err_close:
 	spin_lock_irqsave(&rdma->req_lock, flags);
 	if (rdma->state < P9_RDMA_CLOSING) {
@@ -584,7 +589,8 @@ rdma_create_trans(struct p9_client *client, const char *addr, char *args)
 		return -ENOMEM;
 
 	/* Create the RDMA CM ID */
-	rdma->cm_id = rdma_create_id(p9_cm_event_handler, client, RDMA_PS_TCP);
+	rdma->cm_id = rdma_create_id(p9_cm_event_handler, client, RDMA_PS_TCP,
+				     IB_QPT_RC);
 	if (IS_ERR(rdma->cm_id))
 		goto error;
 

@@ -5,8 +5,9 @@
  *
  * cmdline.c: Kernel command line creation using ARCS argc/argv.
  *
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  */
+#include <linux/bug.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -15,11 +16,6 @@
 #include <asm/bootinfo.h>
 
 #undef DEBUG_CMDLINE
-
-char * __init prom_getcmdline(void)
-{
-	return arcs_cmdline;
-}
 
 static char *ignored[] = {
 	"ConsoleIn=",

@@ -7,6 +7,7 @@
 #include <linux/time.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>
+#include <linux/pid_namespace.h>
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/stat.h>
@@ -16,42 +17,24 @@
 #include <linux/limits.h>
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/smp_lock.h>
 #include <linux/sysctl.h>
+#include <linux/seq_file.h>
+#include <linux/slab.h>
+#include <linux/mount.h>
 
-#include <asm/system.h>
 #include <asm/uaccess.h>
 
 #include "internal.h"
 
-struct proc_dir_entry *de_get(struct proc_dir_entry *de)
-{
-	atomic_inc(&de->count);
-	return de;
-}
-
-/*
- * Decrements the use count and checks for deferred deletion.
- */
-void de_put(struct proc_dir_entry *de)
-{
-	if (!atomic_read(&de->count)) {
-		printk("de_put: entry %s already free!\n", de->name);
-		return;
-	}
-
-	if (atomic_dec_and_test(&de->count))
-		free_proc_entry(de);
-}
-
-/*
- * Decrement the use count of the proc_dir_entry.
- */
-static void proc_delete_inode(struct inode *inode)
+static void proc_evict_inode(struct inode *inode)
 {
 	struct proc_dir_entry *de;
+	struct ctl_table_header *head;
+	const struct proc_ns_operations *ns_ops;
+	void *ns;
 
 	truncate_inode_pages(&inode->i_data, 0);
+	end_writeback(inode);
 
 	/* Stop tracking associated processes */
 	put_pid(PROC_I(inode)->pid);
@@ -59,13 +42,18 @@ static void proc_delete_inode(struct inode *inode)
 	/* Let go of any associated proc directory entry */
 	de = PROC_I(inode)->pde;
 	if (de)
-		de_put(de);
-	if (PROC_I(inode)->sysctl)
-		sysctl_head_put(PROC_I(inode)->sysctl);
-	clear_inode(inode);
+		pde_put(de);
+	head = PROC_I(inode)->sysctl;
+	if (head) {
+		rcu_assign_pointer(PROC_I(inode)->sysctl, NULL);
+		sysctl_head_put(head);
+	}
+	/* Release any associated namespace */
+	ns_ops = PROC_I(inode)->ns_ops;
+	ns = PROC_I(inode)->ns;
+	if (ns_ops && ns)
+		ns_ops->put(ns);
 }
-
-struct vfsmount *proc_mnt;
 
 static struct kmem_cache * proc_inode_cachep;
 
@@ -83,14 +71,22 @@ static struct inode *proc_alloc_inode(struct super_block *sb)
 	ei->pde = NULL;
 	ei->sysctl = NULL;
 	ei->sysctl_entry = NULL;
+	ei->ns = NULL;
+	ei->ns_ops = NULL;
 	inode = &ei->vfs_inode;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	return inode;
 }
 
+static void proc_i_callback(struct rcu_head *head)
+{
+	struct inode *inode = container_of(head, struct inode, i_rcu);
+	kmem_cache_free(proc_inode_cachep, PROC_I(inode));
+}
+
 static void proc_destroy_inode(struct inode *inode)
 {
-	kmem_cache_free(proc_inode_cachep, PROC_I(inode));
+	call_rcu(&inode->i_rcu, proc_i_callback);
 }
 
 static void init_once(void *foo)
@@ -109,12 +105,27 @@ void __init proc_init_inodecache(void)
 					     init_once);
 }
 
+static int proc_show_options(struct seq_file *seq, struct dentry *root)
+{
+	struct super_block *sb = root->d_sb;
+	struct pid_namespace *pid = sb->s_fs_info;
+
+	if (pid->pid_gid)
+		seq_printf(seq, ",gid=%lu", (unsigned long)pid->pid_gid);
+	if (pid->hide_pid != 0)
+		seq_printf(seq, ",hidepid=%u", pid->hide_pid);
+
+	return 0;
+}
+
 static const struct super_operations proc_sops = {
 	.alloc_inode	= proc_alloc_inode,
 	.destroy_inode	= proc_destroy_inode,
 	.drop_inode	= generic_delete_inode,
-	.delete_inode	= proc_delete_inode,
+	.evict_inode	= proc_evict_inode,
 	.statfs		= simple_statfs,
+	.remount_fs	= proc_remount,
+	.show_options	= proc_show_options,
 };
 
 static void __pde_users_dec(struct proc_dir_entry *pde)
@@ -236,8 +247,7 @@ static long proc_reg_unlocked_ioctl(struct file *file, unsigned int cmd, unsigne
 {
 	struct proc_dir_entry *pde = PDE(file->f_path.dentry->d_inode);
 	long rv = -ENOTTY;
-	long (*unlocked_ioctl)(struct file *, unsigned int, unsigned long);
-	int (*ioctl)(struct inode *, struct file *, unsigned int, unsigned long);
+	long (*ioctl)(struct file *, unsigned int, unsigned long);
 
 	spin_lock(&pde->pde_unload_lock);
 	if (!pde->proc_fops) {
@@ -245,19 +255,11 @@ static long proc_reg_unlocked_ioctl(struct file *file, unsigned int cmd, unsigne
 		return rv;
 	}
 	pde->pde_users++;
-	unlocked_ioctl = pde->proc_fops->unlocked_ioctl;
-	ioctl = pde->proc_fops->ioctl;
+	ioctl = pde->proc_fops->unlocked_ioctl;
 	spin_unlock(&pde->pde_unload_lock);
 
-	if (unlocked_ioctl) {
-		rv = unlocked_ioctl(file, cmd, arg);
-		if (rv == -ENOIOCTLCMD)
-			rv = -EINVAL;
-	} else if (ioctl) {
-		lock_kernel();
-		rv = ioctl(file->f_path.dentry->d_inode, file, cmd, arg);
-		unlock_kernel();
-	}
+	if (ioctl)
+		rv = ioctl(file, cmd, arg);
 
 	pde_users_dec(pde);
 	return rv;
@@ -335,7 +337,7 @@ static int proc_reg_open(struct inode *inode, struct file *file)
 	if (!pde->proc_fops) {
 		spin_unlock(&pde->pde_unload_lock);
 		kfree(pdeo);
-		return -EINVAL;
+		return -ENOENT;
 	}
 	pde->pde_users++;
 	open = pde->proc_fops->open;
@@ -441,12 +443,11 @@ static const struct file_operations proc_reg_file_ops_no_compat = {
 };
 #endif
 
-struct inode *proc_get_inode(struct super_block *sb, unsigned int ino,
-				struct proc_dir_entry *de)
+struct inode *proc_get_inode(struct super_block *sb, struct proc_dir_entry *de)
 {
 	struct inode * inode;
 
-	inode = iget_locked(sb, ino);
+	inode = iget_locked(sb, de->low_ino);
 	if (!inode)
 		return NULL;
 	if (inode->i_state & I_NEW) {
@@ -462,7 +463,7 @@ struct inode *proc_get_inode(struct super_block *sb, unsigned int ino,
 		if (de->size)
 			inode->i_size = de->size;
 		if (de->nlink)
-			inode->i_nlink = de->nlink;
+			set_nlink(inode, de->nlink);
 		if (de->proc_iops)
 			inode->i_op = de->proc_iops;
 		if (de->proc_fops) {
@@ -480,14 +481,12 @@ struct inode *proc_get_inode(struct super_block *sb, unsigned int ino,
 		}
 		unlock_new_inode(inode);
 	} else
-	       de_put(de);
+	       pde_put(de);
 	return inode;
 }			
 
 int proc_fill_super(struct super_block *s)
 {
-	struct inode * root_inode;
-
 	s->s_flags |= MS_NODIRATIME | MS_NOSUID | MS_NOEXEC;
 	s->s_blocksize = 1024;
 	s->s_blocksize_bits = 10;
@@ -495,20 +494,12 @@ int proc_fill_super(struct super_block *s)
 	s->s_op = &proc_sops;
 	s->s_time_gran = 1;
 	
-	de_get(&proc_root);
-	root_inode = proc_get_inode(s, PROC_ROOT_INO, &proc_root);
-	if (!root_inode)
-		goto out_no_root;
-	root_inode->i_uid = 0;
-	root_inode->i_gid = 0;
-	s->s_root = d_alloc_root(root_inode);
-	if (!s->s_root)
-		goto out_no_root;
-	return 0;
+	pde_get(&proc_root);
+	s->s_root = d_make_root(proc_get_inode(s, &proc_root));
+	if (s->s_root)
+		return 0;
 
-out_no_root:
 	printk("proc_read_super: get root inode failed\n");
-	iput(root_inode);
-	de_put(&proc_root);
+	pde_put(&proc_root);
 	return -ENOMEM;
 }

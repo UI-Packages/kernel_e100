@@ -20,7 +20,6 @@
 #include <linux/ptrace.h>
 #include <linux/hardirq.h>
 
-#include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
 #include <asm/gdb-stub.h>
@@ -79,7 +78,7 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_atomic() || !mm)
+	if (!mm || pagefault_disabled())
 		goto no_context;
 
 	down_read(&mm->mmap_sem);
@@ -257,10 +256,10 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
  */
  out_of_memory:
 	up_read(&mm->mmap_sem);
-	printk("VM: killing process %s\n", current->comm);
-	if (user_mode(__frame))
-		do_group_exit(SIGKILL);
-	goto no_context;
+	if (!user_mode(__frame))
+		goto no_context;
+	pagefault_out_of_memory();
+	return;
 
  do_sigbus:
 	up_read(&mm->mmap_sem);

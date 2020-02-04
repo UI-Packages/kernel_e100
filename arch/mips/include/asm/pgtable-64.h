@@ -9,6 +9,7 @@
 #ifndef _ASM_PGTABLE_64_H
 #define _ASM_PGTABLE_64_H
 
+#include <linux/compiler.h>
 #include <linux/linkage.h>
 
 #include <asm/addrspace.h>
@@ -113,10 +114,10 @@
 #endif
 #define PTRS_PER_PTE	((PAGE_SIZE << PTE_ORDER) / sizeof(pte_t))
 
-#if PGDIR_SIZE >= TASK_SIZE
+#if PGDIR_SIZE >= TASK_SIZE64
 #define USER_PTRS_PER_PGD       (1)
 #else
-#define USER_PTRS_PER_PGD	(TASK_SIZE / PGDIR_SIZE)
+#define USER_PTRS_PER_PGD	(TASK_SIZE64 / PGDIR_SIZE)
 #endif
 #define FIRST_USER_ADDRESS	0UL
 
@@ -178,7 +179,19 @@ static inline int pmd_none(pmd_t pmd)
 	return pmd_val(pmd) == (unsigned long) invalid_pte_table;
 }
 
-#define pmd_bad(pmd)		(pmd_val(pmd) & ~PAGE_MASK)
+static inline int pmd_bad(pmd_t pmd)
+{
+#ifdef CONFIG_MIPS_HUGE_TLB_SUPPORT
+	/* pmd_huge(pmd) but inline */
+	if (unlikely(pmd_val(pmd) & _PAGE_HUGE))
+		return 0;
+#endif
+
+	if (unlikely(pmd_val(pmd) & ~PAGE_MASK))
+		return 1;
+
+	return 0;
+}
 
 static inline int pmd_present(pmd_t pmd)
 {
@@ -262,10 +275,7 @@ static inline pmd_t *pmd_offset(pud_t * pud, unsigned long address)
 	((pte_t *) pmd_page_vaddr(*(dir)) + __pte_offset(address))
 #define pte_offset_map(dir, address)					\
 	((pte_t *)page_address(pmd_page(*(dir))) + __pte_offset(address))
-#define pte_offset_map_nested(dir, address)				\
-	((pte_t *)page_address(pmd_page(*(dir))) + __pte_offset(address))
 #define pte_unmap(pte) ((void)(pte))
-#define pte_unmap_nested(pte) ((void)(pte))
 
 /*
  * Initialize a new pgd / pmd table with invalid pointers.

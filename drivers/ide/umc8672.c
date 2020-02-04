@@ -104,10 +104,11 @@ static void umc_set_speeds(u8 speeds[])
 		speeds[0], speeds[1], speeds[2], speeds[3]);
 }
 
-static void umc_set_pio_mode(ide_drive_t *drive, const u8 pio)
+static void umc_set_pio_mode(ide_hwif_t *hwif, ide_drive_t *drive)
 {
-	ide_hwif_t *hwif = drive->hwif, *mate = hwif->mate;
+	ide_hwif_t *mate = hwif->mate;
 	unsigned long uninitialized_var(flags);
+	const u8 pio = drive->pio_mode - XFER_PIO_0;
 
 	printk("%s: setting umc8672 to PIO mode%d (speed %d)\n",
 		drive->name, pio, pio_to_umc[pio]);
@@ -159,7 +160,7 @@ static int __init umc8672_probe(void)
 	return ide_legacy_device_add(&umc8672_port_info, 0);
 }
 
-static int probe_umc8672;
+static bool probe_umc8672;
 
 module_param_named(probe, probe_umc8672, bool, 0);
 MODULE_PARM_DESC(probe, "probe for UMC8672 chipset");

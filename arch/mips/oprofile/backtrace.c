@@ -1,170 +1,175 @@
-/*
- * Mips specific backtracing code for oprofile
- *
- * @remark Copyright 2002 OProfile authors
- * @remark Read the file COPYING
- *
- * Copyright (c) 2008 Wind River Systems, Inc
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * Author: David Lerner <david.lerner@windriver.com>
- *
- * Based on i386 oprofile backtrace code by John Levon, David Smith modified
- * for mips.
- *
- */
-
-#include <linux/types.h>
+#include <linux/oprofile.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/oprofile.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
+#include <asm/ptrace.h>
 #include <asm/stacktrace.h>
-#include "mem_validate.h"
-#include "mips_context.h"
-#include "stack_crawl.h"
-#include "context.h"
-#include "backtrace.h"
+#include <linux/stacktrace.h>
+#include <linux/kernel.h>
+#include <asm/sections.h>
+#include <asm/inst.h>
 
-#define MAX_DEPTH 64
+struct stackframe {
+	unsigned long sp;
+	unsigned long pc;
+	unsigned long ra;
+};
 
-/*
- * Indicate that backtrace logic failed
- */
-#define BACKTRACE_ABORTED (0UL)
-
-/*
- * op_is_syscall_ret()
- * returns non-zero if the return pc is within a system call handler
- * at a point where the user registers have been saved on the stack.
- */
-#pragma weak handle_sys
-#pragma weak ret_from_handle_sys
-#pragma weak handle_sysn32
-#pragma weak ret_from_handle_sysn32
-#pragma weak handle_sys64
-#pragma weak ret_from_handle_sys64
-
-extern void handle_sys(void);
-extern void ret_from_handle_sys(void);
-extern void handle_sysn32(void);
-extern void ret_from_handle_sysn32(void);
-extern void handle_sys64(void);
-extern void ret_from_handle_sys64(void);
-
-static inline
-int op_is_syscall_ret(unsigned long pc)
+static inline int get_mem(unsigned long addr, unsigned long *result)
 {
-	return ((pc >= (unsigned long)handle_sys) &&
-			(pc < (unsigned long)ret_from_handle_sys)) ||
-	       ((pc >= (unsigned long)handle_sysn32) &&
-			(pc < (unsigned long)ret_from_handle_sysn32)) ||
-	       ((pc >= (unsigned long)handle_sys64) &&
-			(pc < (unsigned long)ret_from_handle_sys64));
+	unsigned long *address = (unsigned long *) addr;
+	if (!access_ok(VERIFY_READ, addr, sizeof(unsigned long)))
+		return -1;
+	if (__copy_from_user_inatomic(result, address, sizeof(unsigned long)))
+		return -3;
+	return 0;
 }
 
 /*
- * op_kernel_backtrace()
- * returns a pointer to the user register set if op_user_backtrace should
- * proceed
+ * These two instruction helpers were taken from process.c
  */
-static
-struct pt_regs *op_kernel_backtrace(struct pt_regs *const regs,
-				    unsigned int *depth)
+static inline int is_ra_save_ins(union mips_instruction *ip)
 {
-	/* taken from arch/mips/kernel/traps.c */
-	unsigned long pc = regs->cp0_epc;
+	/* sw / sd $ra, offset($sp) */
+	return (ip->i_format.opcode == sw_op || ip->i_format.opcode == sd_op)
+		&& ip->i_format.rs == 29 && ip->i_format.rt == 31;
+}
 
-	if (__kernel_text_address(pc)) {
-#ifdef CONFIG_KALLSYMS
-		unsigned long sp = regs->regs[29];
-		unsigned long ra = regs->regs[31];
-	        int trace_thru_syscall = oprofile_get_trace_thru_syscall();
-		while (pc && *depth) {
-			--(*depth);
-			if (trace_thru_syscall && op_is_syscall_ret(pc)) {
-				struct pt_regs *uregs = (struct pt_regs *) sp;
-				if (__kernel_text_address(uregs->cp0_epc)) {
-					pc = uregs->cp0_epc;
-					sp = uregs->regs[29];
-					ra = uregs->regs[31];
-				} else {
-					oprofile_syscall_trace_boundary();
-					oprofile_add_trace(uregs->cp0_epc);
-					return uregs;
-				}
-			} else {
-				pc = unwind_stack(current, &sp, pc, &ra);
-			}
-			oprofile_add_trace(pc);
-		}
-#endif
+static inline int is_sp_move_ins(union mips_instruction *ip)
+{
+	/* addiu/daddiu sp,sp,-imm */
+	if (ip->i_format.rs != 29 || ip->i_format.rt != 29)
 		return 0;
-	}
-	return regs;
+	if (ip->i_format.opcode == addiu_op || ip->i_format.opcode == daddiu_op)
+		return 1;
+	return 0;
 }
 
 /*
- * op_user_backtrace()
- * Initiate a stack crawl, analyzing text instructions, to locate
- * the next stack frame.  Log the discovered callstack pc addresses
- * to the oprofile cpu buffer.
+ * Looks for specific instructions that mark the end of a function.
+ * This usually means we ran into the code area of the previous function.
  */
-static
-void op_user_backtrace(struct pt_regs *const regs, unsigned int *depth)
+static inline int is_end_of_function_marker(union mips_instruction *ip)
 {
-	struct memory_access_data membuf;
-	struct frame_deltas frame;
-	struct op_context child;
-	struct op_context parent;
-	int have_gprs = 1;	/* first pass through, we have gpr regs */
-	unsigned long pc_sample;
-	child.pc = (void *)regs->cp0_epc;
-	child.sp = (void *)regs->regs[REG_SP];
-	child.fp = (void *)regs->regs[REG_S8];
-	child.gpregs[BT_REG_SP] = regs->regs[REG_SP];
-	child.gpregs[BT_REG_FP] = regs->regs[REG_S8];
-	child.gpregs[BT_REG_LR] = regs->regs[REG_RA];
-	/*  child could be a leaf, impacting frame_crawl */
-	child.leaf = true;
+	/* jr ra */
+	if (ip->r_format.func == jr_op && ip->r_format.rs == 31)
+		return 1;
+	/* lui gp */
+	if (ip->i_format.opcode == lui_op && ip->i_format.rt == 28)
+		return 1;
+	return 0;
+}
 
-	while (*depth) {
-		--(*depth);
-		pc_sample = BACKTRACE_ABORTED;
-		memset((void *)&frame, 0, (size_t) sizeof(frame));
-		if (op_frame_crawl((void *)child.pc, &membuf, have_gprs,
-				   &frame)) {
-			/* Found next frame, sp & pc */
-			if (apply_context_results(&child, &frame, &parent)) {
-				if (parent.pc) {
-					/* Frame looked good && pc > 0 */
-					pc_sample = (unsigned long)parent.pc;
-				}
-			}
-		}
-		/* log the sample */
-		oprofile_add_trace(pc_sample);
-		child.pc = parent.pc;
-		child.sp = parent.sp;
-		child.fp = parent.fp;
-		child.gpregs[BT_REG_SP] = (unsigned long)parent.sp;
-		child.gpregs[BT_REG_FP] = (unsigned long)parent.fp;
-		child.leaf = 0;
-		have_gprs = 0;
-		if (pc_sample == BACKTRACE_ABORTED)
+/*
+ * TODO for userspace stack unwinding:
+ * - handle cases where the stack is adjusted inside a function
+ *     (generally doesn't happen)
+ * - find optimal value for max_instr_check
+ * - try to find a way to handle leaf functions
+ */
+
+static inline int unwind_user_frame(struct stackframe *old_frame,
+				    const unsigned int max_instr_check)
+{
+	struct stackframe new_frame = *old_frame;
+	off_t ra_offset = 0;
+	size_t stack_size = 0;
+	unsigned long addr;
+
+	if (old_frame->pc == 0 || old_frame->sp == 0 || old_frame->ra == 0)
+		return -9;
+
+	for (addr = new_frame.pc; (addr + max_instr_check > new_frame.pc)
+		&& (!ra_offset || !stack_size); --addr) {
+		union mips_instruction ip;
+
+		if (get_mem(addr, (unsigned long *) &ip))
+			return -11;
+
+		if (is_sp_move_ins(&ip)) {
+			int stack_adjustment = ip.i_format.simmediate;
+			if (stack_adjustment > 0)
+				/* This marks the end of the previous function,
+				   which means we overran. */
+				break;
+			stack_size = (unsigned) stack_adjustment;
+		} else if (is_ra_save_ins(&ip)) {
+			int ra_slot = ip.i_format.simmediate;
+			if (ra_slot < 0)
+				/* This shouldn't happen. */
+				break;
+			ra_offset = ra_slot;
+		} else if (is_end_of_function_marker(&ip))
+			break;
+	}
+
+	if (!ra_offset || !stack_size)
+		return -1;
+
+	if (ra_offset) {
+		new_frame.ra = old_frame->sp + ra_offset;
+		if (get_mem(new_frame.ra, &(new_frame.ra)))
+			return -13;
+	}
+
+	if (stack_size) {
+		new_frame.sp = old_frame->sp + stack_size;
+		if (get_mem(new_frame.sp, &(new_frame.sp)))
+			return -14;
+	}
+
+	if (new_frame.sp > old_frame->sp)
+		return -2;
+
+	new_frame.pc = old_frame->ra;
+	*old_frame = new_frame;
+
+	return 0;
+}
+
+static inline void do_user_backtrace(unsigned long low_addr,
+				     struct stackframe *frame,
+				     unsigned int depth)
+{
+	const unsigned int max_instr_check = 512;
+	const unsigned long high_addr = low_addr + THREAD_SIZE;
+
+	while (depth-- && !unwind_user_frame(frame, max_instr_check)) {
+		oprofile_add_trace(frame->ra);
+		if (frame->sp < low_addr || frame->sp > high_addr)
 			break;
 	}
 }
 
-void mips_backtrace(struct pt_regs *const regs, unsigned int depth)
+#ifndef CONFIG_KALLSYMS
+static inline void do_kernel_backtrace(unsigned long low_addr,
+				       struct stackframe *frame,
+				       unsigned int depth) { }
+#else
+static inline void do_kernel_backtrace(unsigned long low_addr,
+				       struct stackframe *frame,
+				       unsigned int depth)
 {
-	struct pt_regs *uregs;
-	if (depth > MAX_DEPTH)
-		depth = MAX_DEPTH;
-	uregs = op_kernel_backtrace(regs, &depth);
-	if (uregs)
-		op_user_backtrace(uregs, &depth);
+	while (depth-- && frame->pc) {
+		frame->pc = unwind_stack_by_address(low_addr,
+						    &(frame->sp),
+						    frame->pc,
+						    &(frame->ra));
+		oprofile_add_trace(frame->ra);
+	}
+}
+#endif
+
+void notrace op_mips_backtrace(struct pt_regs *const regs, unsigned int depth)
+{
+	struct stackframe frame = { .sp = regs->regs[29],
+				    .pc = regs->cp0_epc,
+				    .ra = regs->regs[31] };
+	const int userspace = user_mode(regs);
+	const unsigned long low_addr = ALIGN(frame.sp, THREAD_SIZE);
+
+	if (userspace)
+		do_user_backtrace(low_addr, &frame, depth);
+	else
+		do_kernel_backtrace(low_addr, &frame, depth);
 }

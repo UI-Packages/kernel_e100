@@ -249,7 +249,8 @@ extern struct mips_abi mips_abi_n32;
 
 #define SET_PERSONALITY(ex)						\
 do {									\
-	set_personality(PER_LINUX);					\
+	if (personality(current->personality) != PER_LINUX)		\
+		set_personality(PER_LINUX);				\
 									\
 	current->thread.abi = &mips_abi;				\
 } while (0)
@@ -296,6 +297,8 @@ do {									\
 
 #define SET_PERSONALITY(ex)						\
 do {									\
+	unsigned int p;							\
+									\
 	clear_thread_flag(TIF_32BIT_REGS);				\
 	clear_thread_flag(TIF_32BIT_ADDR);				\
 									\
@@ -304,7 +307,8 @@ do {									\
 	else								\
 		current->thread.abi = &mips_abi;			\
 									\
-	if (current->personality != PER_LINUX32)			\
+	p = personality(current->personality);				\
+	if (p != PER_LINUX32 && p != PER_LINUX)				\
 		set_personality(PER_LINUX);				\
 } while (0)
 
@@ -327,7 +331,7 @@ extern int dump_task_fpu(struct task_struct *, elf_fpregset_t *);
 #define ELF_CORE_COPY_FPREGS(tsk, elf_fpregs)			\
 	dump_task_fpu(tsk, elf_fpregs)
 
-#define USE_ELF_CORE_DUMP
+#define CORE_DUMP_USE_REGSET
 #define ELF_EXEC_PAGESIZE	PAGE_SIZE
 
 /* This yields a mask that user programs can use to figure out what

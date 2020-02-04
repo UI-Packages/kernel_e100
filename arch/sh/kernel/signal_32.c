@@ -25,7 +25,6 @@
 #include <linux/freezer.h>
 #include <linux/io.h>
 #include <linux/tracehook.h>
-#include <asm/system.h>
 #include <asm/ucontext.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -58,16 +57,18 @@ sys_sigsuspend(old_sigset_t mask,
 	       unsigned long r5, unsigned long r6, unsigned long r7,
 	       struct pt_regs __regs)
 {
-	mask &= _BLOCKABLE;
-	spin_lock_irq(&current->sighand->siglock);
+	sigset_t blocked;
+
 	current->saved_sigmask = current->blocked;
-	siginitset(&current->blocked, mask);
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+
+	mask &= _BLOCKABLE;
+	siginitset(&blocked, mask);
+	set_current_blocked(&blocked);
 
 	current->state = TASK_INTERRUPTIBLE;
 	schedule();
-	set_thread_flag(TIF_RESTORE_SIGMASK);
+	set_restore_sigmask();
+
 	return -ERESTARTNOHAND;
 }
 
@@ -149,7 +150,7 @@ static inline int restore_sigcontext_fpu(struct sigcontext __user *sc)
 		return 0;
 
 	set_used_math();
-	return __copy_from_user(&tsk->thread.fpu.hard, &sc->sc_fpregs[0],
+	return __copy_from_user(&tsk->thread.xstate->hardfpu, &sc->sc_fpregs[0],
 				sizeof(long)*(16*2+2));
 }
 
@@ -174,7 +175,7 @@ static inline int save_sigcontext_fpu(struct sigcontext __user *sc,
 	clear_used_math();
 
 	unlazy_fpu(tsk, regs);
-	return __copy_to_user(&sc->sc_fpregs[0], &tsk->thread.fpu.hard,
+	return __copy_to_user(&sc->sc_fpregs[0], &tsk->thread.xstate->hardfpu,
 			      sizeof(long)*(16*2+2));
 }
 #endif /* CONFIG_SH_FPU */
@@ -239,11 +240,7 @@ asmlinkage int sys_sigreturn(unsigned long r4, unsigned long r5,
 		goto badframe;
 
 	sigdelsetmask(&set, ~_BLOCKABLE);
-
-	spin_lock_irq(&current->sighand->siglock);
-	current->blocked = set;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&set);
 
 	if (restore_sigcontext(regs, &frame->sc, &r0))
 		goto badframe;
@@ -273,10 +270,7 @@ asmlinkage int sys_rt_sigreturn(unsigned long r4, unsigned long r5,
 		goto badframe;
 
 	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-	current->blocked = set;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&set);
 
 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, &r0))
 		goto badframe;
@@ -527,7 +521,7 @@ handle_syscall_restart(unsigned long save_r0, struct pt_regs *regs,
 		/* fallthrough */
 		case -ERESTARTNOINTR:
 			regs->regs[0] = save_r0;
-			regs->pc -= instruction_size(ctrl_inw(regs->pc - 4));
+			regs->pc -= instruction_size(__raw_readw(regs->pc - 4));
 			break;
 	}
 }
@@ -547,17 +541,8 @@ handle_signal(unsigned long sig, struct k_sigaction *ka, siginfo_t *info,
 	else
 		ret = setup_frame(sig, ka, oldset, regs);
 
-	if (ka->sa.sa_flags & SA_ONESHOT)
-		ka->sa.sa_handler = SIG_DFL;
-
-	if (ret == 0) {
-		spin_lock_irq(&current->sighand->siglock);
-		sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
-		if (!(ka->sa.sa_flags & SA_NODEFER))
-			sigaddset(&current->blocked,sig);
-		recalc_sigpending();
-		spin_unlock_irq(&current->sighand->siglock);
-	}
+	if (ret == 0)
+		block_sigmask(ka, sig);
 
 	return ret;
 }
@@ -587,10 +572,7 @@ static void do_signal(struct pt_regs *regs, unsigned int save_r0)
 	if (!user_mode(regs))
 		return;
 
-	if (try_to_freeze())
-		goto no_signal;
-
-	if (test_thread_flag(TIF_RESTORE_SIGMASK))
+	if (current_thread_info()->status & TS_RESTORE_SIGMASK)
 		oldset = &current->saved_sigmask;
 	else
 		oldset = &current->blocked;
@@ -602,12 +584,13 @@ static void do_signal(struct pt_regs *regs, unsigned int save_r0)
 		/* Whee!  Actually deliver the signal.  */
 		if (handle_signal(signr, &ka, &info, oldset,
 				  regs, save_r0) == 0) {
-			/* a signal was successfully delivered; the saved
+			/*
+			 * A signal was successfully delivered; the saved
 			 * sigmask will have been stored in the signal frame,
 			 * and will be restored by sigreturn, so we can simply
-			 * clear the TIF_RESTORE_SIGMASK flag */
-			if (test_thread_flag(TIF_RESTORE_SIGMASK))
-				clear_thread_flag(TIF_RESTORE_SIGMASK);
+			 * clear the TS_RESTORE_SIGMASK flag
+			 */
+			current_thread_info()->status &= ~TS_RESTORE_SIGMASK;
 
 			tracehook_signal_handler(signr, &info, &ka, regs,
 					test_thread_flag(TIF_SINGLESTEP));
@@ -616,7 +599,6 @@ static void do_signal(struct pt_regs *regs, unsigned int save_r0)
 		return;
 	}
 
-no_signal:
 	/* Did we come from a system call? */
 	if (regs->tra >= 0) {
 		/* Restart the system call - no handlers present */
@@ -624,17 +606,19 @@ no_signal:
 		    regs->regs[0] == -ERESTARTSYS ||
 		    regs->regs[0] == -ERESTARTNOINTR) {
 			regs->regs[0] = save_r0;
-			regs->pc -= instruction_size(ctrl_inw(regs->pc - 4));
+			regs->pc -= instruction_size(__raw_readw(regs->pc - 4));
 		} else if (regs->regs[0] == -ERESTART_RESTARTBLOCK) {
-			regs->pc -= instruction_size(ctrl_inw(regs->pc - 4));
+			regs->pc -= instruction_size(__raw_readw(regs->pc - 4));
 			regs->regs[3] = __NR_restart_syscall;
 		}
 	}
 
-	/* if there's no signal to deliver, we just put the saved sigmask
-	 * back */
-	if (test_thread_flag(TIF_RESTORE_SIGMASK)) {
-		clear_thread_flag(TIF_RESTORE_SIGMASK);
+	/*
+	 * If there's no signal to deliver, we just put the saved sigmask
+	 * back.
+	 */
+	if (current_thread_info()->status & TS_RESTORE_SIGMASK) {
+		current_thread_info()->status &= ~TS_RESTORE_SIGMASK;
 		sigprocmask(SIG_SETMASK, &current->saved_sigmask, NULL);
 	}
 }

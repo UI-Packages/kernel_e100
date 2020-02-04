@@ -1,5 +1,4 @@
-#include <linux/utsrelease.h>
-#include <linux/module.h>
+#include <generated/utsrelease.h>
 
 /* Simply sanity version stamp for modules. */
 #ifdef CONFIG_SMP

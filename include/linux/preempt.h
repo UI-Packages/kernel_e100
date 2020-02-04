@@ -27,27 +27,44 @@
 
 asmlinkage void preempt_schedule(void);
 
-#define preempt_disable() \
-do { \
-	inc_preempt_count(); \
-	barrier(); \
-} while (0)
-
-#define preempt_enable_no_resched() \
-do { \
-	barrier(); \
-	dec_preempt_count(); \
-} while (0)
-
 #define preempt_check_resched() \
 do { \
 	if (unlikely(test_thread_flag(TIF_NEED_RESCHED))) \
 		preempt_schedule(); \
 } while (0)
 
+#else /* !CONFIG_PREEMPT */
+
+#define preempt_check_resched()		do { } while (0)
+
+#endif /* CONFIG_PREEMPT */
+
+
+#ifdef CONFIG_PREEMPT_COUNT
+
+#define preempt_disable() \
+do { \
+	inc_preempt_count(); \
+	barrier(); \
+} while (0)
+
+#define sched_preempt_enable_no_resched() \
+do { \
+	barrier(); \
+	dec_preempt_count(); \
+} while (0)
+
+#ifndef CONFIG_PREEMPT_RT_BASE
+# define preempt_enable_no_resched()	sched_preempt_enable_no_resched()
+# define preempt_check_resched_rt()	do { } while (0)
+#else
+# define preempt_enable_no_resched()	preempt_enable()
+# define preempt_check_resched_rt()	preempt_check_resched()
+#endif
+
 #define preempt_enable() \
 do { \
-	preempt_enable_no_resched(); \
+	sched_preempt_enable_no_resched(); \
 	barrier(); \
 	preempt_check_resched(); \
 } while (0)
@@ -80,17 +97,39 @@ do { \
 	preempt_check_resched(); \
 } while (0)
 
-#else
+#else /* !CONFIG_PREEMPT_COUNT */
 
 #define preempt_disable()		do { } while (0)
+#define sched_preempt_enable_no_resched()	do { } while (0)
 #define preempt_enable_no_resched()	do { } while (0)
 #define preempt_enable()		do { } while (0)
-#define preempt_check_resched()		do { } while (0)
 
 #define preempt_disable_notrace()		do { } while (0)
 #define preempt_enable_no_resched_notrace()	do { } while (0)
 #define preempt_enable_notrace()		do { } while (0)
+#define preempt_check_resched_rt()	do { } while (0)
 
+#endif /* CONFIG_PREEMPT_COUNT */
+
+#ifdef CONFIG_PREEMPT_RT_FULL
+# define preempt_disable_rt()		preempt_disable()
+# define preempt_enable_rt()		preempt_enable()
+# define preempt_disable_nort()		do { } while (0)
+# define preempt_enable_nort()		do { } while (0)
+# ifdef CONFIG_SMP
+   extern void migrate_disable(void);
+   extern void migrate_enable(void);
+# else /* CONFIG_SMP */
+#  define migrate_disable()		do { } while (0)
+#  define migrate_enable()		do { } while (0)
+# endif /* CONFIG_SMP */
+#else
+# define preempt_disable_rt()		do { } while (0)
+# define preempt_enable_rt()		do { } while (0)
+# define preempt_disable_nort()		preempt_disable()
+# define preempt_enable_nort()		preempt_enable()
+# define migrate_disable()		preempt_disable()
+# define migrate_enable()		preempt_enable()
 #endif
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
@@ -105,6 +144,11 @@ struct preempt_notifier;
  * @sched_out: we've just been preempted
  *    notifier: struct preempt_notifier for the task being preempted
  *    next: the task that's kicking us out
+ *
+ * Please note that sched_in and out are called under different
+ * contexts.  sched_out is called with rq lock held and irq disabled
+ * while sched_in is called without rq lock and irq enabled.  This
+ * difference is intentional and depended upon by its users.
  */
 struct preempt_ops {
 	void (*sched_in)(struct preempt_notifier *notifier, int cpu);

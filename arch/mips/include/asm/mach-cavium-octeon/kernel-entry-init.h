@@ -3,16 +3,15 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2005-2008 Cavium Networks, Inc
+ * Copyright (C) 2005-2012 Cavium, Inc
  */
 #ifndef __ASM_MACH_CAVIUM_OCTEON_KERNEL_ENTRY_H
 #define __ASM_MACH_CAVIUM_OCTEON_KERNEL_ENTRY_H
 
-
-#define CP0_CYCLE_COUNTER $9, 6
 #define CP0_CVMCTL_REG $9, 7
 #define CP0_CVMMEMCTL_REG $11,7
 #define CP0_PRID_REG $15, 0
+#define CP0_DCACHE_ERR_REG $27, 1
 #define CP0_PRID_OCTEON_PASS1 0x000d0000
 #define CP0_PRID_OCTEON_CN30XX 0x000d0200
 
@@ -155,20 +154,37 @@ continue_in_mapped_space:
 	ori     v0, CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE
 	dmtc0   v0, CP0_CVMMEMCTL_REG	# Write the cavium mem control register
 	dmfc0   v0, CP0_CVMCTL_REG	# Read the cavium control register
-#ifdef CONFIG_CAVIUM_OCTEON_HW_FIX_UNALIGNED
 	# Disable unaligned load/store support but leave HW fixup enabled
+	# Needed for octeon specific memcpy
 	or  v0, v0, 0x5001
 	xor v0, v0, 0x1001
-#else
-	# Disable unaligned load/store and HW fixup support
-	or  v0, v0, 0x5001
-	xor v0, v0, 0x5001
-#endif
 	# First clear off CvmCtl[IPPCI] bit and move the performance
 	# counters interrupt to IRQ 6
 	dli	v1, ~(7 << 7)
 	and	v0, v0, v1
-	or	v0, v0, 0x300		# (6 << 7)
+	ori	v0, v0, (6 << 7)
+
+	mfc0	v1, CP0_PRID_REG
+	and	t1, v1, 0xfff8
+	xor	t1, t1, 0x9000		# 63-P1
+	beqz	t1, 4f
+	and	t1, v1, 0xfff8
+	xor	t1, t1, 0x9008		# 63-P2
+	beqz	t1, 4f
+	and	t1, v1, 0xfff8
+	xor	t1, t1, 0x9100		# 68-P1
+	beqz	t1, 4f
+	and	t1, v1, 0xff00
+	xor	t1, t1, 0x9200		# 66-PX
+	bnez	t1, 5f			# Skip WAR for others.
+	and	t1, v1, 0x00ff
+	slti	t1, t1, 2		# 66-P1.2 and later good.
+	beqz	t1, 5f
+
+4:	# core-16057 work around
+	or	v0, v0, 0x2000		# Set IPREF bit.
+
+5:	# No core-16057 work around
 	# Write the cavium control register
 	dmtc0   v0, CP0_CVMCTL_REG
 	sync
@@ -181,7 +197,14 @@ continue_in_mapped_space:
 1:	dsubu	v0, 8
 	sd	$0, -32768(v0)
 	bnez	v0, 1b
-2:	# Get my core id
+2:
+	mfc0	v0, CP0_PRID_REG
+	bbit0	v0, 15, 1f
+	# OCTEON II or better have bit 15 set.  Clear the error bits.
+	dli	v0, 0x27
+	dmtc0	v0, CP0_DCACHE_ERR_REG
+1:
+	# Get my core id
 	rdhwr   v0, $0
 	# Jump the master to kernel_entry
 	bne     a2, zero, octeon_main_processor

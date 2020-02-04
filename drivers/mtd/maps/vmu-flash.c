@@ -8,6 +8,7 @@
  * GNU General Public Licence
  */
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/maple.h>
@@ -359,9 +360,6 @@ static int vmu_flash_read(struct mtd_info *mtd, loff_t from, size_t len,
 	int index = 0, retval, partition, leftover, numblocks;
 	unsigned char cx;
 
-	if (len < 1)
-		return -EIO;
-
 	mpart = mtd->priv;
 	mdev = mpart->mdev;
 	partition = mpart->partition;
@@ -433,11 +431,6 @@ static int vmu_flash_write(struct mtd_info *mtd, loff_t to, size_t len,
 	partition = mpart->partition;
 	card = maple_get_drvdata(mdev);
 
-	/* simple sanity checks */
-	if (len < 1) {
-		error = -EIO;
-		goto failed;
-	}
 	numblocks = card->parts[partition].numblocks;
 	if (to + len > numblocks * card->blocklen)
 		len = numblocks * card->blocklen - to;
@@ -543,9 +536,9 @@ static void vmu_queryblocks(struct mapleq *mq)
 	mtd_cur->flags = MTD_WRITEABLE|MTD_NO_ERASE;
 	mtd_cur->size = part_cur->numblocks * card->blocklen;
 	mtd_cur->erasesize = card->blocklen;
-	mtd_cur->write = vmu_flash_write;
-	mtd_cur->read = vmu_flash_read;
-	mtd_cur->sync = vmu_flash_sync;
+	mtd_cur->_write = vmu_flash_write;
+	mtd_cur->_read = vmu_flash_read;
+	mtd_cur->_sync = vmu_flash_sync;
 	mtd_cur->writesize = card->blocklen;
 
 	mpart = kmalloc(sizeof(struct mdev_part), GFP_KERNEL);
@@ -562,7 +555,7 @@ static void vmu_queryblocks(struct mapleq *mq)
 		goto fail_cache_create;
 	part_cur->pcache = pcache;
 
-	error = add_mtd_device(mtd_cur);
+	error = mtd_device_register(mtd_cur, NULL, 0);
 	if (error)
 		goto fail_mtd_register;
 
@@ -612,16 +605,15 @@ static int __devinit vmu_connect(struct maple_device *mdev)
 
 	test_flash_data = be32_to_cpu(mdev->devinfo.function);
 	/* Need to count how many bits are set - to find out which
-	 * function_data element has details of the memory card:
-	 * using Brian Kernighan's/Peter Wegner's method */
-	for (c = 0; test_flash_data; c++)
-		test_flash_data &= test_flash_data - 1;
+	 * function_data element has details of the memory card
+	 */
+	c = hweight_long(test_flash_data);
 
 	basic_flash_data = be32_to_cpu(mdev->devinfo.function_data[c - 1]);
 
 	card = kmalloc(sizeof(struct memcard), GFP_KERNEL);
 	if (!card) {
-		error = ENOMEM;
+		error = -ENOMEM;
 		goto fail_nomem;
 	}
 
@@ -709,7 +701,7 @@ static void __devexit vmu_disconnect(struct maple_device *mdev)
 	for (x = 0; x < card->partitions; x++) {
 		mpart = ((card->mtd)[x]).priv;
 		mpart->mdev = NULL;
-		del_mtd_device(&((card->mtd)[x]));
+		mtd_device_unregister(&((card->mtd)[x]));
 		kfree(((card->parts)[x]).name);
 	}
 	kfree(card->parts);

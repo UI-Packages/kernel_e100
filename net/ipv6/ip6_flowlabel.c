@@ -20,6 +20,8 @@
 #include <linux/route.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
+#include <linux/export.h>
 
 #include <net/net_namespace.h>
 #include <net/sock.h>
@@ -67,7 +69,7 @@ static inline struct ip6_flowlabel *__fl_lookup(struct net *net, __be32 label)
 	struct ip6_flowlabel *fl;
 
 	for (fl=fl_ht[FL_HASH(label)]; fl; fl = fl->next) {
-		if (fl->label == label && fl->fl_net == net)
+		if (fl->label == label && net_eq(fl->fl_net, net))
 			return fl;
 	}
 	return NULL;
@@ -154,7 +156,7 @@ static void ip6_fl_gc(unsigned long dummy)
 	write_unlock(&ip6_fl_lock);
 }
 
-static void ip6_fl_purge(struct net *net)
+static void __net_exit ip6_fl_purge(struct net *net)
 {
 	int i;
 
@@ -163,7 +165,8 @@ static void ip6_fl_purge(struct net *net)
 		struct ip6_flowlabel *fl, **flp;
 		flp = &fl_ht[i];
 		while ((fl = *flp) != NULL) {
-			if (fl->fl_net == net && atomic_read(&fl->users) == 0) {
+			if (net_eq(fl->fl_net, net) &&
+			    atomic_read(&fl->users) == 0) {
 				*flp = fl->next;
 				fl_free(fl);
 				atomic_dec(&fl_size);
@@ -320,8 +323,8 @@ static int fl6_renew(struct ip6_flowlabel *fl, unsigned long linger, unsigned lo
 }
 
 static struct ip6_flowlabel *
-fl_create(struct net *net, struct in6_flowlabel_req *freq, char __user *optval,
-	  int optlen, int *err_p)
+fl_create(struct net *net, struct sock *sk, struct in6_flowlabel_req *freq,
+	  char __user *optval, int optlen, int *err_p)
 {
 	struct ip6_flowlabel *fl = NULL;
 	int olen;
@@ -340,7 +343,7 @@ fl_create(struct net *net, struct in6_flowlabel_req *freq, char __user *optval,
 
 	if (olen > 0) {
 		struct msghdr msg;
-		struct flowi flowi;
+		struct flowi6 flowi6;
 		int junk;
 
 		err = -ENOMEM;
@@ -356,9 +359,10 @@ fl_create(struct net *net, struct in6_flowlabel_req *freq, char __user *optval,
 
 		msg.msg_controllen = olen;
 		msg.msg_control = (void*)(fl->opt+1);
-		flowi.oif = 0;
+		memset(&flowi6, 0, sizeof(flowi6));
 
-		err = datagram_send_ctl(net, &msg, &flowi, fl->opt, &junk, &junk);
+		err = datagram_send_ctl(net, sk, &msg, &flowi6, fl->opt, &junk,
+					&junk, &junk);
 		if (err)
 			goto done;
 		err = -EINVAL;
@@ -377,12 +381,12 @@ fl_create(struct net *net, struct in6_flowlabel_req *freq, char __user *optval,
 		goto done;
 	fl->share = freq->flr_share;
 	addr_type = ipv6_addr_type(&freq->flr_dst);
-	if ((addr_type&IPV6_ADDR_MAPPED)
-	    || addr_type == IPV6_ADDR_ANY) {
+	if ((addr_type & IPV6_ADDR_MAPPED) ||
+	    addr_type == IPV6_ADDR_ANY) {
 		err = -EINVAL;
 		goto done;
 	}
-	ipv6_addr_copy(&fl->dst, &freq->flr_dst);
+	fl->dst = freq->flr_dst;
 	atomic_set(&fl->users, 1);
 	switch (fl->share) {
 	case IPV6_FL_S_EXCL:
@@ -421,8 +425,8 @@ static int mem_check(struct sock *sk)
 
 	if (room <= 0 ||
 	    ((count >= FL_MAX_PER_SOCK ||
-	     (count > 0 && room < FL_MAX_SIZE/2) || room < FL_MAX_SIZE/4)
-	     && !capable(CAP_NET_ADMIN)))
+	      (count > 0 && room < FL_MAX_SIZE/2) || room < FL_MAX_SIZE/4) &&
+	     !capable(CAP_NET_ADMIN)))
 		return -ENOBUFS;
 
 	return 0;
@@ -525,7 +529,7 @@ int ipv6_flowlabel_opt(struct sock *sk, char __user *optval, int optlen)
 		if (freq.flr_label & ~IPV6_FLOWLABEL_MASK)
 			return -EINVAL;
 
-		fl = fl_create(net, &freq, optval, optlen, &err);
+		fl = fl_create(net, sk, &freq, optval, optlen, &err);
 		if (fl == NULL)
 			return err;
 		sfl1 = kmalloc(sizeof(*sfl1), GFP_KERNEL);
@@ -630,7 +634,7 @@ static struct ip6_flowlabel *ip6fl_get_first(struct seq_file *seq)
 	for (state->bucket = 0; state->bucket <= FL_HASH_MASK; ++state->bucket) {
 		fl = fl_ht[state->bucket];
 
-		while (fl && fl->fl_net != net)
+		while (fl && !net_eq(fl->fl_net, net))
 			fl = fl->next;
 		if (fl)
 			break;
@@ -645,7 +649,7 @@ static struct ip6_flowlabel *ip6fl_get_next(struct seq_file *seq, struct ip6_flo
 
 	fl = fl->next;
 try_again:
-	while (fl && fl->fl_net != net)
+	while (fl && !net_eq(fl->fl_net, net))
 		fl = fl->next;
 
 	while (!fl) {
@@ -734,7 +738,7 @@ static const struct file_operations ip6fl_seq_fops = {
 	.release	=	seq_release_net,
 };
 
-static int ip6_flowlabel_proc_init(struct net *net)
+static int __net_init ip6_flowlabel_proc_init(struct net *net)
 {
 	if (!proc_net_fops_create(net, "ip6_flowlabel",
 				  S_IRUGO, &ip6fl_seq_fops))
@@ -742,7 +746,7 @@ static int ip6_flowlabel_proc_init(struct net *net)
 	return 0;
 }
 
-static void ip6_flowlabel_proc_fini(struct net *net)
+static void __net_exit ip6_flowlabel_proc_fini(struct net *net)
 {
 	proc_net_remove(net, "ip6_flowlabel");
 }
@@ -753,11 +757,10 @@ static inline int ip6_flowlabel_proc_init(struct net *net)
 }
 static inline void ip6_flowlabel_proc_fini(struct net *net)
 {
-	return ;
 }
 #endif
 
-static inline void ip6_flowlabel_net_exit(struct net *net)
+static void __net_exit ip6_flowlabel_net_exit(struct net *net)
 {
 	ip6_fl_purge(net);
 	ip6_flowlabel_proc_fini(net);

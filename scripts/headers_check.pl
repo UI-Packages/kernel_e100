@@ -19,6 +19,7 @@
 # 3) Check for leaked CONFIG_ symbols
 
 use strict;
+use File::Basename;
 
 my ($dir, $arch, @files) = @ARGV;
 
@@ -28,11 +29,12 @@ my $lineno = 0;
 my $filename;
 
 foreach my $file (@files) {
-	local *FH;
 	$filename = $file;
-	open(FH, "<$filename") or die "$filename: $!\n";
+
+	open(my $fh, '<', $filename)
+		or die "$filename: $!\n";
 	$lineno = 0;
-	while ($line = <FH>) {
+	while ($line = <$fh>) {
 		$lineno++;
 		&check_include();
 		&check_asm_types();
@@ -40,7 +42,7 @@ foreach my $file (@files) {
 		&check_declarations();
 		# Dropped for now. Too much noise &check_config();
 	}
-	close FH;
+	close $fh;
 }
 exit $ret;
 
@@ -63,10 +65,10 @@ sub check_include
 
 sub check_declarations
 {
-	if ($line =~m/^\s*extern\b/) {
+	if ($line =~m/^(\s*extern|unsigned|char|short|int|long|void)\b/) {
 		printf STDERR "$filename:$lineno: " .
-		              "userspace cannot call function or variable " .
-		              "defined in the kernel\n";
+			      "userspace cannot reference function or " .
+			      "variable defined in the kernel\n";
 	}
 }
 
@@ -78,7 +80,7 @@ sub check_config
 }
 
 my $linux_asm_types;
-sub check_asm_types()
+sub check_asm_types
 {
 	if ($filename =~ /types.h|int-l64.h|int-ll64.h/o) {
 		return;
@@ -98,6 +100,39 @@ sub check_asm_types()
 }
 
 my $linux_types;
+my %import_stack = ();
+sub check_include_typesh
+{
+	my $path = $_[0];
+	my $import_path;
+
+	my $fh;
+	my @file_paths = ($path, $dir . "/" .  $path, dirname($filename) . "/" . $path);
+	for my $possible ( @file_paths ) {
+	    if (not $import_stack{$possible} and open($fh, '<', $possible)) {
+		$import_path = $possible;
+		$import_stack{$import_path} = 1;
+		last;
+	    }
+	}
+	if (eof $fh) {
+	    return;
+	}
+
+	my $line;
+	while ($line = <$fh>) {
+		if ($line =~ m/^\s*#\s*include\s+<linux\/types.h>/) {
+			$linux_types = 1;
+			last;
+		}
+		if (my $included = ($line =~ /^\s*#\s*include\s+[<"](\S+)[>"]/)[0]) {
+			check_include_typesh($included);
+		}
+	}
+	close $fh;
+	delete $import_stack{$import_path};
+}
+
 sub check_sizetypes
 {
 	if ($filename =~ /types.h|int-l64.h|int-ll64.h/o) {
@@ -112,6 +147,9 @@ sub check_sizetypes
 		$linux_types = 1;
 		return;
 	}
+	if (my $included = ($line =~ /^\s*#\s*include\s+[<"](\S+)[>"]/)[0]) {
+		check_include_typesh($included);
+	}
 	if ($line =~ m/__[us](8|16|32|64)\b/) {
 		printf STDERR "$filename:$lineno: " .
 		              "found __[us]{8,16,32,64} type " .
@@ -121,4 +159,3 @@ sub check_sizetypes
 		#$ret = 1;
 	}
 }
-

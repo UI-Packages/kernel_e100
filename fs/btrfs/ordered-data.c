@@ -16,7 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#include <linux/gfp.h>
 #include <linux/slab.h>
 #include <linux/blkdev.h>
 #include <linux/writeback.h>
@@ -58,6 +57,14 @@ static struct rb_node *tree_insert(struct rb_root *root, u64 file_offset,
 	rb_link_node(node, parent, p);
 	rb_insert_color(node, root);
 	return NULL;
+}
+
+static void ordered_data_tree_panic(struct inode *inode, int errno,
+					       u64 offset)
+{
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+	btrfs_panic(fs_info, errno, "Inconsistency in ordered tree at offset "
+		    "%llu\n", (unsigned long long)offset);
 }
 
 /*
@@ -125,6 +132,15 @@ static int offset_in_entry(struct btrfs_ordered_extent *entry, u64 file_offset)
 	return 1;
 }
 
+static int range_overlaps(struct btrfs_ordered_extent *entry, u64 file_offset,
+			  u64 len)
+{
+	if (file_offset + len <= entry->file_offset ||
+	    entry->file_offset + entry->len <= file_offset)
+		return 0;
+	return 1;
+}
+
 /*
  * look find the first ordered struct that has this offset, otherwise
  * the first one less than this offset
@@ -133,7 +149,7 @@ static inline struct rb_node *tree_search(struct btrfs_ordered_inode_tree *tree,
 					  u64 file_offset)
 {
 	struct rb_root *root = &tree->tree;
-	struct rb_node *prev;
+	struct rb_node *prev = NULL;
 	struct rb_node *ret;
 	struct btrfs_ordered_extent *entry;
 
@@ -162,8 +178,9 @@ static inline struct rb_node *tree_search(struct btrfs_ordered_inode_tree *tree,
  * The tree is given a single reference on the ordered extent that was
  * inserted.
  */
-int btrfs_add_ordered_extent(struct inode *inode, u64 file_offset,
-			     u64 start, u64 len, u64 disk_len, int type)
+static int __btrfs_add_ordered_extent(struct inode *inode, u64 file_offset,
+				      u64 start, u64 len, u64 disk_len,
+				      int type, int dio, int compress_type)
 {
 	struct btrfs_ordered_inode_tree *tree;
 	struct rb_node *node;
@@ -174,15 +191,18 @@ int btrfs_add_ordered_extent(struct inode *inode, u64 file_offset,
 	if (!entry)
 		return -ENOMEM;
 
-	mutex_lock(&tree->mutex);
 	entry->file_offset = file_offset;
 	entry->start = start;
 	entry->len = len;
 	entry->disk_len = disk_len;
 	entry->bytes_left = len;
 	entry->inode = inode;
+	entry->compress_type = compress_type;
 	if (type != BTRFS_ORDERED_IO_DONE && type != BTRFS_ORDERED_COMPLETE)
 		set_bit(type, &entry->flags);
+
+	if (dio)
+		set_bit(BTRFS_ORDERED_DIRECT, &entry->flags);
 
 	/* one ref for the tree */
 	atomic_set(&entry->refs, 1);
@@ -190,18 +210,46 @@ int btrfs_add_ordered_extent(struct inode *inode, u64 file_offset,
 	INIT_LIST_HEAD(&entry->list);
 	INIT_LIST_HEAD(&entry->root_extent_list);
 
+	trace_btrfs_ordered_extent_add(inode, entry);
+
+	spin_lock(&tree->lock);
 	node = tree_insert(&tree->tree, file_offset,
 			   &entry->rb_node);
-	BUG_ON(node);
+	if (node)
+		ordered_data_tree_panic(inode, -EEXIST, file_offset);
+	spin_unlock(&tree->lock);
 
 	spin_lock(&BTRFS_I(inode)->root->fs_info->ordered_extent_lock);
 	list_add_tail(&entry->root_extent_list,
 		      &BTRFS_I(inode)->root->fs_info->ordered_extents);
 	spin_unlock(&BTRFS_I(inode)->root->fs_info->ordered_extent_lock);
 
-	mutex_unlock(&tree->mutex);
-	BUG_ON(node);
 	return 0;
+}
+
+int btrfs_add_ordered_extent(struct inode *inode, u64 file_offset,
+			     u64 start, u64 len, u64 disk_len, int type)
+{
+	return __btrfs_add_ordered_extent(inode, file_offset, start, len,
+					  disk_len, type, 0,
+					  BTRFS_COMPRESS_NONE);
+}
+
+int btrfs_add_ordered_extent_dio(struct inode *inode, u64 file_offset,
+				 u64 start, u64 len, u64 disk_len, int type)
+{
+	return __btrfs_add_ordered_extent(inode, file_offset, start, len,
+					  disk_len, type, 1,
+					  BTRFS_COMPRESS_NONE);
+}
+
+int btrfs_add_ordered_extent_compress(struct inode *inode, u64 file_offset,
+				      u64 start, u64 len, u64 disk_len,
+				      int type, int compress_type)
+{
+	return __btrfs_add_ordered_extent(inode, file_offset, start, len,
+					  disk_len, type, 0,
+					  compress_type);
 }
 
 /*
@@ -209,17 +257,83 @@ int btrfs_add_ordered_extent(struct inode *inode, u64 file_offset,
  * when an ordered extent is finished.  If the list covers more than one
  * ordered extent, it is split across multiples.
  */
-int btrfs_add_ordered_sum(struct inode *inode,
-			  struct btrfs_ordered_extent *entry,
-			  struct btrfs_ordered_sum *sum)
+void btrfs_add_ordered_sum(struct inode *inode,
+			   struct btrfs_ordered_extent *entry,
+			   struct btrfs_ordered_sum *sum)
 {
 	struct btrfs_ordered_inode_tree *tree;
 
 	tree = &BTRFS_I(inode)->ordered_tree;
-	mutex_lock(&tree->mutex);
+	spin_lock(&tree->lock);
 	list_add_tail(&sum->list, &entry->list);
-	mutex_unlock(&tree->mutex);
-	return 0;
+	spin_unlock(&tree->lock);
+}
+
+/*
+ * this is used to account for finished IO across a given range
+ * of the file.  The IO may span ordered extents.  If
+ * a given ordered_extent is completely done, 1 is returned, otherwise
+ * 0.
+ *
+ * test_and_set_bit on a flag in the struct btrfs_ordered_extent is used
+ * to make sure this function only returns 1 once for a given ordered extent.
+ *
+ * file_offset is updated to one byte past the range that is recorded as
+ * complete.  This allows you to walk forward in the file.
+ */
+int btrfs_dec_test_first_ordered_pending(struct inode *inode,
+				   struct btrfs_ordered_extent **cached,
+				   u64 *file_offset, u64 io_size)
+{
+	struct btrfs_ordered_inode_tree *tree;
+	struct rb_node *node;
+	struct btrfs_ordered_extent *entry = NULL;
+	int ret;
+	u64 dec_end;
+	u64 dec_start;
+	u64 to_dec;
+
+	tree = &BTRFS_I(inode)->ordered_tree;
+	spin_lock(&tree->lock);
+	node = tree_search(tree, *file_offset);
+	if (!node) {
+		ret = 1;
+		goto out;
+	}
+
+	entry = rb_entry(node, struct btrfs_ordered_extent, rb_node);
+	if (!offset_in_entry(entry, *file_offset)) {
+		ret = 1;
+		goto out;
+	}
+
+	dec_start = max(*file_offset, entry->file_offset);
+	dec_end = min(*file_offset + io_size, entry->file_offset +
+		      entry->len);
+	*file_offset = dec_end;
+	if (dec_start > dec_end) {
+		printk(KERN_CRIT "bad ordering dec_start %llu end %llu\n",
+		       (unsigned long long)dec_start,
+		       (unsigned long long)dec_end);
+	}
+	to_dec = dec_end - dec_start;
+	if (to_dec > entry->bytes_left) {
+		printk(KERN_CRIT "bad ordered accounting left %llu size %llu\n",
+		       (unsigned long long)entry->bytes_left,
+		       (unsigned long long)to_dec);
+	}
+	entry->bytes_left -= to_dec;
+	if (entry->bytes_left == 0)
+		ret = test_and_set_bit(BTRFS_ORDERED_IO_DONE, &entry->flags);
+	else
+		ret = 1;
+out:
+	if (!ret && cached && entry) {
+		*cached = entry;
+		atomic_inc(&entry->refs);
+	}
+	spin_unlock(&tree->lock);
+	return ret == 0;
 }
 
 /*
@@ -232,15 +346,16 @@ int btrfs_add_ordered_sum(struct inode *inode,
  * to make sure this function only returns 1 once for a given ordered extent.
  */
 int btrfs_dec_test_ordered_pending(struct inode *inode,
+				   struct btrfs_ordered_extent **cached,
 				   u64 file_offset, u64 io_size)
 {
 	struct btrfs_ordered_inode_tree *tree;
 	struct rb_node *node;
-	struct btrfs_ordered_extent *entry;
+	struct btrfs_ordered_extent *entry = NULL;
 	int ret;
 
 	tree = &BTRFS_I(inode)->ordered_tree;
-	mutex_lock(&tree->mutex);
+	spin_lock(&tree->lock);
 	node = tree_search(tree, file_offset);
 	if (!node) {
 		ret = 1;
@@ -264,7 +379,11 @@ int btrfs_dec_test_ordered_pending(struct inode *inode,
 	else
 		ret = 1;
 out:
-	mutex_unlock(&tree->mutex);
+	if (!ret && cached && entry) {
+		*cached = entry;
+		atomic_inc(&entry->refs);
+	}
+	spin_unlock(&tree->lock);
 	return ret == 0;
 }
 
@@ -272,10 +391,12 @@ out:
  * used to drop a reference on an ordered extent.  This will free
  * the extent if the last reference is dropped
  */
-int btrfs_put_ordered_extent(struct btrfs_ordered_extent *entry)
+void btrfs_put_ordered_extent(struct btrfs_ordered_extent *entry)
 {
 	struct list_head *cur;
 	struct btrfs_ordered_sum *sum;
+
+	trace_btrfs_ordered_extent_put(entry->inode, entry);
 
 	if (atomic_dec_and_test(&entry->refs)) {
 		while (!list_empty(&entry->list)) {
@@ -286,34 +407,30 @@ int btrfs_put_ordered_extent(struct btrfs_ordered_extent *entry)
 		}
 		kfree(entry);
 	}
-	return 0;
 }
 
 /*
  * remove an ordered extent from the tree.  No references are dropped
- * but, anyone waiting on this extent is woken up.
+ * and you must wake_up entry->wait.  You must hold the tree lock
+ * while you call this function.
  */
-int btrfs_remove_ordered_extent(struct inode *inode,
-				struct btrfs_ordered_extent *entry)
+static void __btrfs_remove_ordered_extent(struct inode *inode,
+					  struct btrfs_ordered_extent *entry)
 {
 	struct btrfs_ordered_inode_tree *tree;
+	struct btrfs_root *root = BTRFS_I(inode)->root;
 	struct rb_node *node;
 
 	tree = &BTRFS_I(inode)->ordered_tree;
-	mutex_lock(&tree->mutex);
 	node = &entry->rb_node;
 	rb_erase(node, &tree->tree);
 	tree->last = NULL;
 	set_bit(BTRFS_ORDERED_COMPLETE, &entry->flags);
 
-	spin_lock(&BTRFS_I(inode)->accounting_lock);
-	BTRFS_I(inode)->outstanding_extents--;
-	spin_unlock(&BTRFS_I(inode)->accounting_lock);
-	btrfs_unreserve_metadata_for_delalloc(BTRFS_I(inode)->root,
-					      inode, 1);
-
-	spin_lock(&BTRFS_I(inode)->root->fs_info->ordered_extent_lock);
+	spin_lock(&root->fs_info->ordered_extent_lock);
 	list_del_init(&entry->root_extent_list);
+
+	trace_btrfs_ordered_extent_remove(inode, entry);
 
 	/*
 	 * we have no more ordered extents for this inode and
@@ -324,18 +441,31 @@ int btrfs_remove_ordered_extent(struct inode *inode,
 	    !mapping_tagged(inode->i_mapping, PAGECACHE_TAG_DIRTY)) {
 		list_del_init(&BTRFS_I(inode)->ordered_operations);
 	}
-	spin_unlock(&BTRFS_I(inode)->root->fs_info->ordered_extent_lock);
+	spin_unlock(&root->fs_info->ordered_extent_lock);
+}
 
-	mutex_unlock(&tree->mutex);
+/*
+ * remove an ordered extent from the tree.  No references are dropped
+ * but any waiters are woken.
+ */
+void btrfs_remove_ordered_extent(struct inode *inode,
+				 struct btrfs_ordered_extent *entry)
+{
+	struct btrfs_ordered_inode_tree *tree;
+
+	tree = &BTRFS_I(inode)->ordered_tree;
+	spin_lock(&tree->lock);
+	__btrfs_remove_ordered_extent(inode, entry);
+	spin_unlock(&tree->lock);
 	wake_up(&entry->wait);
-	return 0;
 }
 
 /*
  * wait for all the ordered extents in a root.  This is done when balancing
  * space between drives.
  */
-int btrfs_wait_ordered_extents(struct btrfs_root *root, int nocow_only)
+void btrfs_wait_ordered_extents(struct btrfs_root *root,
+				int nocow_only, int delay_iput)
 {
 	struct list_head splice;
 	struct list_head *cur;
@@ -372,7 +502,10 @@ int btrfs_wait_ordered_extents(struct btrfs_root *root, int nocow_only)
 		if (inode) {
 			btrfs_start_ordered_extent(inode, ordered, 1);
 			btrfs_put_ordered_extent(ordered);
-			iput(inode);
+			if (delay_iput)
+				btrfs_add_delayed_iput(inode);
+			else
+				iput(inode);
 		} else {
 			btrfs_put_ordered_extent(ordered);
 		}
@@ -380,7 +513,6 @@ int btrfs_wait_ordered_extents(struct btrfs_root *root, int nocow_only)
 		spin_lock(&root->fs_info->ordered_extent_lock);
 	}
 	spin_unlock(&root->fs_info->ordered_extent_lock);
-	return 0;
 }
 
 /*
@@ -393,7 +525,7 @@ int btrfs_wait_ordered_extents(struct btrfs_root *root, int nocow_only)
  * extra check to make sure the ordered operation list really is empty
  * before we return
  */
-int btrfs_run_ordered_operations(struct btrfs_root *root, int wait)
+void btrfs_run_ordered_operations(struct btrfs_root *root, int wait)
 {
 	struct btrfs_inode *btrfs_inode;
 	struct inode *inode;
@@ -430,7 +562,7 @@ again:
 				btrfs_wait_ordered_range(inode, 0, (u64)-1);
 			else
 				filemap_flush(inode->i_mapping);
-			iput(inode);
+			btrfs_add_delayed_iput(inode);
 		}
 
 		cond_resched();
@@ -441,8 +573,6 @@ again:
 
 	spin_unlock(&root->fs_info->ordered_extent_lock);
 	mutex_unlock(&root->fs_info->ordered_operations_mutex);
-
-	return 0;
 }
 
 /*
@@ -459,12 +589,15 @@ void btrfs_start_ordered_extent(struct inode *inode,
 	u64 start = entry->file_offset;
 	u64 end = start + entry->len - 1;
 
+	trace_btrfs_ordered_extent_start(inode, entry);
+
 	/*
 	 * pages in the range can be dirty, clean or writeback.  We
 	 * start IO on any dirty ones so the wait doesn't stall waiting
 	 * for pdflush to find them
 	 */
-	filemap_fdatawrite_range(inode->i_mapping, start, end);
+	if (!test_bit(BTRFS_ORDERED_DIRECT, &entry->flags))
+		filemap_fdatawrite_range(inode->i_mapping, start, end);
 	if (wait) {
 		wait_event(entry->wait, test_bit(BTRFS_ORDERED_COMPLETE,
 						 &entry->flags));
@@ -474,11 +607,10 @@ void btrfs_start_ordered_extent(struct inode *inode,
 /*
  * Used to wait on ordered extents across a large range of bytes.
  */
-int btrfs_wait_ordered_range(struct inode *inode, u64 start, u64 len)
+void btrfs_wait_ordered_range(struct inode *inode, u64 start, u64 len)
 {
 	u64 end;
 	u64 orig_end;
-	u64 wait_end;
 	struct btrfs_ordered_extent *ordered;
 	int found;
 
@@ -489,7 +621,6 @@ int btrfs_wait_ordered_range(struct inode *inode, u64 start, u64 len)
 		if (orig_end > INT_LIMIT(loff_t))
 			orig_end = INT_LIMIT(loff_t);
 	}
-	wait_end = orig_end;
 again:
 	/* start IO across the range first to instantiate any delalloc
 	 * extents
@@ -531,7 +662,6 @@ again:
 		schedule_timeout(1);
 		goto again;
 	}
-	return 0;
 }
 
 /*
@@ -546,7 +676,7 @@ struct btrfs_ordered_extent *btrfs_lookup_ordered_extent(struct inode *inode,
 	struct btrfs_ordered_extent *entry = NULL;
 
 	tree = &BTRFS_I(inode)->ordered_tree;
-	mutex_lock(&tree->mutex);
+	spin_lock(&tree->lock);
 	node = tree_search(tree, file_offset);
 	if (!node)
 		goto out;
@@ -557,7 +687,48 @@ struct btrfs_ordered_extent *btrfs_lookup_ordered_extent(struct inode *inode,
 	if (entry)
 		atomic_inc(&entry->refs);
 out:
-	mutex_unlock(&tree->mutex);
+	spin_unlock(&tree->lock);
+	return entry;
+}
+
+/* Since the DIO code tries to lock a wide area we need to look for any ordered
+ * extents that exist in the range, rather than just the start of the range.
+ */
+struct btrfs_ordered_extent *btrfs_lookup_ordered_range(struct inode *inode,
+							u64 file_offset,
+							u64 len)
+{
+	struct btrfs_ordered_inode_tree *tree;
+	struct rb_node *node;
+	struct btrfs_ordered_extent *entry = NULL;
+
+	tree = &BTRFS_I(inode)->ordered_tree;
+	spin_lock(&tree->lock);
+	node = tree_search(tree, file_offset);
+	if (!node) {
+		node = tree_search(tree, file_offset + len);
+		if (!node)
+			goto out;
+	}
+
+	while (1) {
+		entry = rb_entry(node, struct btrfs_ordered_extent, rb_node);
+		if (range_overlaps(entry, file_offset, len))
+			break;
+
+		if (entry->file_offset >= file_offset + len) {
+			entry = NULL;
+			break;
+		}
+		entry = NULL;
+		node = rb_next(node);
+		if (!node)
+			break;
+	}
+out:
+	if (entry)
+		atomic_inc(&entry->refs);
+	spin_unlock(&tree->lock);
 	return entry;
 }
 
@@ -573,7 +744,7 @@ btrfs_lookup_first_ordered_extent(struct inode *inode, u64 file_offset)
 	struct btrfs_ordered_extent *entry = NULL;
 
 	tree = &BTRFS_I(inode)->ordered_tree;
-	mutex_lock(&tree->mutex);
+	spin_lock(&tree->lock);
 	node = tree_search(tree, file_offset);
 	if (!node)
 		goto out;
@@ -581,7 +752,7 @@ btrfs_lookup_first_ordered_extent(struct inode *inode, u64 file_offset)
 	entry = rb_entry(node, struct btrfs_ordered_extent, rb_node);
 	atomic_inc(&entry->refs);
 out:
-	mutex_unlock(&tree->mutex);
+	spin_unlock(&tree->lock);
 	return entry;
 }
 
@@ -589,7 +760,7 @@ out:
  * After an extent is done, call this to conditionally update the on disk
  * i_size.  i_size is updated to cover any fully written part of the file.
  */
-int btrfs_ordered_update_i_size(struct inode *inode,
+int btrfs_ordered_update_i_size(struct inode *inode, u64 offset,
 				struct btrfs_ordered_extent *ordered)
 {
 	struct btrfs_ordered_inode_tree *tree = &BTRFS_I(inode)->ordered_tree;
@@ -597,18 +768,32 @@ int btrfs_ordered_update_i_size(struct inode *inode,
 	u64 disk_i_size;
 	u64 new_i_size;
 	u64 i_size_test;
+	u64 i_size = i_size_read(inode);
 	struct rb_node *node;
+	struct rb_node *prev = NULL;
 	struct btrfs_ordered_extent *test;
+	int ret = 1;
 
-	mutex_lock(&tree->mutex);
+	if (ordered)
+		offset = entry_end(ordered);
+	else
+		offset = ALIGN(offset, BTRFS_I(inode)->root->sectorsize);
+
+	spin_lock(&tree->lock);
 	disk_i_size = BTRFS_I(inode)->disk_i_size;
+
+	/* truncate file */
+	if (disk_i_size > i_size) {
+		BTRFS_I(inode)->disk_i_size = i_size;
+		ret = 0;
+		goto out;
+	}
 
 	/*
 	 * if the disk i_size is already at the inode->i_size, or
 	 * this ordered extent is inside the disk i_size, we're done
 	 */
-	if (disk_i_size >= inode->i_size ||
-	    ordered->file_offset + ordered->len <= disk_i_size) {
+	if (disk_i_size == i_size || offset <= disk_i_size) {
 		goto out;
 	}
 
@@ -616,8 +801,7 @@ int btrfs_ordered_update_i_size(struct inode *inode,
 	 * we can't update the disk_isize if there are delalloc bytes
 	 * between disk_i_size and  this ordered extent
 	 */
-	if (test_range_bit(io_tree, disk_i_size,
-			   ordered->file_offset + ordered->len - 1,
+	if (test_range_bit(io_tree, disk_i_size, offset - 1,
 			   EXTENT_DELALLOC, 0, NULL)) {
 		goto out;
 	}
@@ -626,20 +810,32 @@ int btrfs_ordered_update_i_size(struct inode *inode,
 	 * if we find an ordered extent then we can't update disk i_size
 	 * yet
 	 */
-	node = &ordered->rb_node;
-	while (1) {
-		node = rb_prev(node);
-		if (!node)
-			break;
+	if (ordered) {
+		node = rb_prev(&ordered->rb_node);
+	} else {
+		prev = tree_search(tree, offset);
+		/*
+		 * we insert file extents without involving ordered struct,
+		 * so there should be no ordered struct cover this offset
+		 */
+		if (prev) {
+			test = rb_entry(prev, struct btrfs_ordered_extent,
+					rb_node);
+			BUG_ON(offset_in_entry(test, offset));
+		}
+		node = prev;
+	}
+	while (node) {
 		test = rb_entry(node, struct btrfs_ordered_extent, rb_node);
 		if (test->file_offset + test->len <= disk_i_size)
 			break;
-		if (test->file_offset >= inode->i_size)
+		if (test->file_offset >= i_size)
 			break;
 		if (test->file_offset >= disk_i_size)
 			goto out;
+		node = rb_prev(node);
 	}
-	new_i_size = min_t(u64, entry_end(ordered), i_size_read(inode));
+	new_i_size = min_t(u64, offset, i_size);
 
 	/*
 	 * at this point, we know we can safely update i_size to at least
@@ -647,7 +843,14 @@ int btrfs_ordered_update_i_size(struct inode *inode,
 	 * walk forward and see if ios from higher up in the file have
 	 * finished.
 	 */
-	node = rb_next(&ordered->rb_node);
+	if (ordered) {
+		node = rb_next(&ordered->rb_node);
+	} else {
+		if (prev)
+			node = rb_next(prev);
+		else
+			node = rb_first(&tree->tree);
+	}
 	i_size_test = 0;
 	if (node) {
 		/*
@@ -655,10 +858,10 @@ int btrfs_ordered_update_i_size(struct inode *inode,
 		 * between our ordered extent and the next one.
 		 */
 		test = rb_entry(node, struct btrfs_ordered_extent, rb_node);
-		if (test->file_offset > entry_end(ordered))
+		if (test->file_offset > offset)
 			i_size_test = test->file_offset;
 	} else {
-		i_size_test = i_size_read(inode);
+		i_size_test = i_size;
 	}
 
 	/*
@@ -667,15 +870,25 @@ int btrfs_ordered_update_i_size(struct inode *inode,
 	 * are no delalloc bytes in this area, it is safe to update
 	 * disk_i_size to the end of the region.
 	 */
-	if (i_size_test > entry_end(ordered) &&
-	    !test_range_bit(io_tree, entry_end(ordered), i_size_test - 1,
-			   EXTENT_DELALLOC, 0, NULL)) {
-		new_i_size = min_t(u64, i_size_test, i_size_read(inode));
+	if (i_size_test > offset &&
+	    !test_range_bit(io_tree, offset, i_size_test - 1,
+			    EXTENT_DELALLOC, 0, NULL)) {
+		new_i_size = min_t(u64, i_size_test, i_size);
 	}
 	BTRFS_I(inode)->disk_i_size = new_i_size;
+	ret = 0;
 out:
-	mutex_unlock(&tree->mutex);
-	return 0;
+	/*
+	 * we need to remove the ordered extent with the tree lock held
+	 * so that other people calling this function don't find our fully
+	 * processed ordered entry and skip updating the i_size
+	 */
+	if (ordered)
+		__btrfs_remove_ordered_extent(inode, ordered);
+	spin_unlock(&tree->lock);
+	if (ordered)
+		wake_up(&ordered->wait);
+	return ret;
 }
 
 /*
@@ -699,7 +912,7 @@ int btrfs_find_ordered_sum(struct inode *inode, u64 offset, u64 disk_bytenr,
 	if (!ordered)
 		return 1;
 
-	mutex_lock(&tree->mutex);
+	spin_lock(&tree->lock);
 	list_for_each_entry_reverse(ordered_sum, &ordered->list, list) {
 		if (disk_bytenr >= ordered_sum->bytenr) {
 			num_sectors = ordered_sum->len / sectorsize;
@@ -714,7 +927,7 @@ int btrfs_find_ordered_sum(struct inode *inode, u64 offset, u64 disk_bytenr,
 		}
 	}
 out:
-	mutex_unlock(&tree->mutex);
+	spin_unlock(&tree->lock);
 	btrfs_put_ordered_extent(ordered);
 	return ret;
 }
@@ -732,9 +945,8 @@ out:
  * If trans is not null, we'll do a friendly check for a transaction that
  * is already flushing things and force the IO down ourselves.
  */
-int btrfs_add_ordered_operation(struct btrfs_trans_handle *trans,
-				struct btrfs_root *root,
-				struct inode *inode)
+void btrfs_add_ordered_operation(struct btrfs_trans_handle *trans,
+				 struct btrfs_root *root, struct inode *inode)
 {
 	u64 last_mod;
 
@@ -745,7 +957,7 @@ int btrfs_add_ordered_operation(struct btrfs_trans_handle *trans,
 	 * commit, we can safely return without doing anything
 	 */
 	if (last_mod < root->fs_info->last_trans_committed)
-		return 0;
+		return;
 
 	/*
 	 * the transaction is already committing.  Just start the IO and
@@ -753,7 +965,7 @@ int btrfs_add_ordered_operation(struct btrfs_trans_handle *trans,
 	 */
 	if (trans && root->fs_info->running_transaction->blocked) {
 		btrfs_wait_ordered_range(inode, 0, (u64)-1);
-		return 0;
+		return;
 	}
 
 	spin_lock(&root->fs_info->ordered_extent_lock);
@@ -762,6 +974,4 @@ int btrfs_add_ordered_operation(struct btrfs_trans_handle *trans,
 			      &root->fs_info->ordered_operations);
 	}
 	spin_unlock(&root->fs_info->ordered_extent_lock);
-
-	return 0;
 }

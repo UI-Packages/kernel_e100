@@ -17,10 +17,10 @@
 #ifndef _LINUX_CRYPTO_H
 #define _LINUX_CRYPTO_H
 
-#include <asm/atomic.h>
-#include <linux/module.h>
+#include <linux/atomic.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
+#include <linux/bug.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
@@ -72,6 +72,16 @@
 #define CRYPTO_ALG_TESTED		0x00000400
 
 /*
+ * Set if the algorithm is an instance that is build from templates.
+ */
+#define CRYPTO_ALG_INSTANCE		0x00000800
+
+/* Set this bit if the algorithm provided is hardware accelerated but
+ * not available to userspace via instruction set or so.
+ */
+#define CRYPTO_ALG_KERN_DRIVER_ONLY	0x00001000
+
+/*
  * Transform masks and values (for crt_flags).
  */
 #define CRYPTO_TFM_REQ_MASK		0x000fff00
@@ -99,13 +109,7 @@
  * as arm where pointers are 32-bit aligned but there are data types such as
  * u64 which require 64-bit alignment.
  */
-#if defined(ARCH_KMALLOC_MINALIGN)
 #define CRYPTO_MINALIGN ARCH_KMALLOC_MINALIGN
-#elif defined(ARCH_SLAB_MINALIGN)
-#define CRYPTO_MINALIGN ARCH_SLAB_MINALIGN
-#else
-#define CRYPTO_MINALIGN __alignof__(unsigned long long)
-#endif
 
 #define CRYPTO_MINALIGN_ATTR __attribute__ ((__aligned__(CRYPTO_MINALIGN)))
 
@@ -250,29 +254,6 @@ struct cipher_alg {
 	void (*cia_decrypt)(struct crypto_tfm *tfm, u8 *dst, const u8 *src);
 };
 
-struct digest_alg {
-	unsigned int dia_digestsize;
-	void (*dia_init)(struct crypto_tfm *tfm);
-	void (*dia_update)(struct crypto_tfm *tfm, const u8 *data,
-			   unsigned int len);
-	void (*dia_final)(struct crypto_tfm *tfm, u8 *out);
-	int (*dia_setkey)(struct crypto_tfm *tfm, const u8 *key,
-	                  unsigned int keylen);
-};
-
-struct hash_alg {
-	int (*init)(struct hash_desc *desc);
-	int (*update)(struct hash_desc *desc, struct scatterlist *sg,
-		      unsigned int nbytes);
-	int (*final)(struct hash_desc *desc, u8 *out);
-	int (*digest)(struct hash_desc *desc, struct scatterlist *sg,
-		      unsigned int nbytes, u8 *out);
-	int (*setkey)(struct crypto_hash *tfm, const u8 *key,
-		      unsigned int keylen);
-
-	unsigned int digestsize;
-};
-
 struct compress_alg {
 	int (*coa_compress)(struct crypto_tfm *tfm, const u8 *src,
 			    unsigned int slen, u8 *dst, unsigned int *dlen);
@@ -293,8 +274,6 @@ struct rng_alg {
 #define cra_aead	cra_u.aead
 #define cra_blkcipher	cra_u.blkcipher
 #define cra_cipher	cra_u.cipher
-#define cra_digest	cra_u.digest
-#define cra_hash	cra_u.hash
 #define cra_compress	cra_u.compress
 #define cra_rng		cra_u.rng
 
@@ -320,8 +299,6 @@ struct crypto_alg {
 		struct aead_alg aead;
 		struct blkcipher_alg blkcipher;
 		struct cipher_alg cipher;
-		struct digest_alg digest;
-		struct hash_alg hash;
 		struct compress_alg compress;
 		struct rng_alg rng;
 	} cra_u;
@@ -338,6 +315,8 @@ struct crypto_alg {
  */
 int crypto_register_alg(struct crypto_alg *alg);
 int crypto_unregister_alg(struct crypto_alg *alg);
+int crypto_register_algs(struct crypto_alg *algs, int count);
+int crypto_unregister_algs(struct crypto_alg *algs, int count);
 
 /*
  * Algorithm query interface.
@@ -536,11 +515,6 @@ static inline const char *crypto_tfm_alg_driver_name(struct crypto_tfm *tfm)
 static inline int crypto_tfm_alg_priority(struct crypto_tfm *tfm)
 {
 	return tfm->__crt_alg->cra_priority;
-}
-
-static inline const char *crypto_tfm_alg_modname(struct crypto_tfm *tfm)
-{
-	return module_name(tfm->__crt_alg->cra_module);
 }
 
 static inline u32 crypto_tfm_alg_type(struct crypto_tfm *tfm)

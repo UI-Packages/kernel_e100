@@ -4,9 +4,11 @@
  * for more details.
  *
  * Copyright (C) 2004-2007 Cavium Networks
- * Copyright (C) 2008 Wind River Systems
+ * Copyright (C) 2008, 2009 Wind River Systems
+ *   written by Ralf Baechle <ralf@linux-mips.org>
  */
 #include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/console.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -20,45 +22,133 @@
 #include <linux/platform_device.h>
 #include <linux/serial_core.h>
 #include <linux/serial_8250.h>
-#ifdef CONFIG_BLK_DEV_INITRD
+#include <linux/of_fdt.h>
+#include <linux/libfdt.h>
 #include <linux/initrd.h>
-#endif
+#include <linux/kexec.h>
 
 #include <asm/processor.h>
 #include <asm/reboot.h>
 #include <asm/smp-ops.h>
-#include <asm/system.h>
 #include <asm/irq_cpu.h>
 #include <asm/mipsregs.h>
 #include <asm/bootinfo.h>
 #include <asm/sections.h>
 #include <asm/time.h>
-#include <asm/traps.h>
 
 #include <asm/octeon/octeon.h>
 #include <asm/octeon/octeon-boot-info.h>
+#include <asm/octeon/pci-octeon.h>
+#include <asm/octeon/cvmx-mio-defs.h>
+#include <asm/octeon/cvmx-sso-defs.h>
 
-#include <asm/octeon/cvmx-clock.h>
-#include <asm/octeon/cvmx-error.h>
-#include <asm/octeon/cvmx-debug.h>
-#include <asm/octeon/cvmx-pcie.h>
-
-#ifdef CONFIG_CAVIUM_DECODE_RSL
-extern int __cvmx_interrupt_ecc_report_single_bit_errors;
-#endif
+#include <asm/octeon/cvmx-qlm.h>
 
 extern struct plat_smp_ops octeon_smp_ops;
 
-extern void pci_console_init(const char *arg);
-
 static unsigned long long MAX_MEMORY = 512ull << 20;
+
+DEFINE_SEMAPHORE(octeon_bootbus_sem);
 
 struct octeon_boot_descriptor *octeon_boot_desc_ptr;
 
 struct cvmx_bootinfo *octeon_bootinfo;
 EXPORT_SYMBOL(octeon_bootinfo);
 
-#if CONFIG_CAVIUM_RESERVE32
+#ifdef CONFIG_KEXEC
+#ifdef CONFIG_SMP
+/*
+ * Wait for relocation code is prepared and send
+ * secondary CPUs to spin until kernel is relocated.
+ */
+static void octeon_kexec_smp_down(void *ignored)
+{
+	int cpu = smp_processor_id();
+
+	local_irq_disable();
+	set_cpu_online(cpu, false);
+	while (!atomic_read(&kexec_ready_to_reboot))
+		cpu_relax();
+
+	asm volatile (
+	"	sync						\n"
+	"	synci	($0)					\n");
+
+	relocated_kexec_smp_wait(NULL);
+}
+#endif
+
+static int octeon_kexec_prepare(struct kimage *image)
+{
+	int i;
+	char *bootloader = "kexec";
+
+	octeon_boot_desc_ptr->argc = 0;
+	for (i = 0; i < image->nr_segments; i++) {
+		if (!strncmp(bootloader, (char *)image->segment[i].buf,
+				strlen(bootloader))) {
+			/*
+			 * convert command line string to array
+			 * of parameters (as bootloader does).
+			 */
+			int argc = 0, offt;
+			char *str = (char *)image->segment[i].buf;
+			char *ptr = strchr(str, ' ');
+			while (ptr && (OCTEON_ARGV_MAX_ARGS > argc)) {
+				*ptr = '\0';
+				if (ptr[1] != ' ') {
+					offt = (int)(ptr - str + 1);
+					octeon_boot_desc_ptr->argv[argc] =
+						image->segment[i].mem + offt;
+					argc++;
+				}
+				ptr = strchr(ptr + 1, ' ');
+			}
+			octeon_boot_desc_ptr->argc = argc;
+			break;
+		}
+	}
+	return 0;
+}
+
+static void octeon_generic_shutdown(void)
+{
+#ifdef CONFIG_SMP
+	int cpu;
+	secondary_kexec_args[2] = 0UL; /* running on secondary cpu */
+	secondary_kexec_args[3] = (unsigned long)octeon_boot_desc_ptr;
+	/* disable watchdogs */
+	for_each_online_cpu(cpu)
+		cvmx_write_csr(CVMX_CIU_WDOGX(cpu_logical_map(cpu)), 0);
+#else
+	cvmx_write_csr(CVMX_CIU_WDOGX(cvmx_get_core_num()), 0);
+#endif
+	kexec_args[2] = 1UL; /* running on octeon_main_processor */
+	kexec_args[3] = (unsigned long)octeon_boot_desc_ptr;
+}
+
+static void octeon_shutdown(void)
+{
+	octeon_generic_shutdown();
+#ifdef CONFIG_SMP
+	smp_call_function(octeon_kexec_smp_down, NULL, 0);
+	smp_wmb();
+	while (num_online_cpus() > 1) {
+		cpu_relax();
+		mdelay(1);
+	}
+#endif
+}
+
+static void octeon_crash_shutdown(struct pt_regs *regs)
+{
+	octeon_generic_shutdown();
+	default_machine_crash_shutdown(regs);
+}
+
+#endif /* CONFIG_KEXEC */
+
+#if CONFIG_CAVIUM_RESERVE32 > 0
 uint64_t octeon_reserve32_memory;
 EXPORT_SYMBOL(octeon_reserve32_memory);
 #endif
@@ -68,10 +158,6 @@ static int octeon_uart;
 extern asmlinkage void handle_int(void);
 extern asmlinkage void plat_irq_dispatch(void);
 
-/* Any mdio busses that are configured for this kernel. */
-struct mii_bus *octeon_mdiobuses[2];
-EXPORT_SYMBOL(octeon_mdiobuses);
-
 /*
  * If set to a non-zero value, the bootloader entry point for
  * HOTPLUG_CPU and other tricks.
@@ -79,11 +165,13 @@ EXPORT_SYMBOL(octeon_mdiobuses);
 u64 octeon_bootloader_entry_addr;
 EXPORT_SYMBOL(octeon_bootloader_entry_addr);
 
-
 /* If an initrd named block is specified, its name goes here. */
 static char __initdata rd_name[64];
 
-#define SDK_VERSION "2.0"
+/* Up to four blocks may be specified. */
+static char __initdata named_memory_blocks[4][CVMX_BOOTMEM_NAME_LEN];
+
+#define SDK_VERSION "3.0"
 
 /**
  * Return non zero if we are currently running in the Octeon simulator
@@ -124,16 +212,14 @@ uint64_t octeon_get_clock_rate(void)
 }
 EXPORT_SYMBOL(octeon_get_clock_rate);
 
-/*
- * Get the IO clock rate of Octeon2
- *
- * Returns IO Clock rate in HZ
- */
-uint64_t octeon_get_io_clock_rate(void)
+static u64 octeon_io_clock_rate;
+
+u64 octeon_get_io_clock_rate(void)
 {
-	return cvmx_clock_get_rate(CVMX_CLOCK_SCLK);
+	return octeon_io_clock_rate;
 }
 EXPORT_SYMBOL(octeon_get_io_clock_rate);
+
 
 /**
  * Write to the LCD display connected to the bootbus. This display
@@ -167,12 +253,8 @@ void octeon_write_lcd(const char *s)
 int octeon_get_boot_uart(void)
 {
 	int uart;
-#ifdef CONFIG_CAVIUM_OCTEON_2ND_KERNEL
-	uart = 1;
-#else
 	uart = (octeon_boot_desc_ptr->flags & OCTEON_BL_FLAG_CONSOLE_UART1) ?
 		1 : 0;
-#endif
 	return uart;
 }
 
@@ -278,20 +360,6 @@ static void octeon_halt(void)
 }
 
 /**
- * Handle all the error condition interrupts that might occur.
- *
- */
-#ifdef CONFIG_CAVIUM_DECODE_RSL
-static irqreturn_t octeon_rml_interrupt(int cpl, void *dev_id)
-{
-	if (cvmx_error_poll())
-		return IRQ_HANDLED;
-	else
-		return IRQ_NONE;
-}
-#endif
-
-/**
  * Return a string representing the system type
  *
  * Returns
@@ -311,7 +379,6 @@ void octeon_user_io_init(void)
 {
 	union octeon_cvmemctl cvmmemctl;
 	union cvmx_iob_fau_timeout fau_timeout;
-	union cvmx_pow_nw_tim nm_tim;
 
 	/* Get the current settings for CP0_CVMMEMCTL_REG */
 	cvmmemctl.u64 = read_c0_cvmmemctl();
@@ -387,6 +454,7 @@ void octeon_user_io_init(void)
 	cvmmemctl.s.wbfltime = 0;
 	/* R/W If set, do not put Istream in the L2 cache. */
 	cvmmemctl.s.istrnol2 = 0;
+
 	/*
 	 * R/W The write buffer threshold. As per erratum Core-14752
 	 * for CN63XX, a sc/scd might fail if the write buffer is
@@ -397,6 +465,7 @@ void octeon_user_io_init(void)
 		cvmmemctl.s.wbthresh = 4;
 	else
 		cvmmemctl.s.wbthresh = 10;
+
 	/* R/W If set, CVMSEG is available for loads/stores in
 	 * kernel/debug mode. */
 #if CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0
@@ -410,6 +479,10 @@ void octeon_user_io_init(void)
 	/* R/W If set, CVMSEG is available for loads/stores in user
 	 * mode. */
 	cvmmemctl.s.cvmsegenau = 0;
+
+	/* Enable TLB parity error reporting on OCTEON II */
+	if (OCTEON_IS_OCTEON2())
+		cvmmemctl.s.tlbperrena = 1;
 
 	write_c0_cvmmemctl(cvmmemctl.u64);
 
@@ -426,19 +499,26 @@ void octeon_user_io_init(void)
 	fau_timeout.s.tout_enb = 0;
 	cvmx_write_csr(CVMX_IOB_FAU_TIMEOUT, fau_timeout.u64);
 
-	nm_tim.u64 = 0;
-	/* 4096 cycles */
-	nm_tim.s.nw_tim = 3;
-	cvmx_write_csr(CVMX_POW_NW_TIM, nm_tim.u64);
-
+	if (OCTEON_IS_MODEL(OCTEON_CN68XX)) {
+		union cvmx_sso_nw_tim nm_tim;
+		nm_tim.u64 = 0;
+		/* 4096 cycles */
+		nm_tim.s.nw_tim = 3;
+		cvmx_write_csr(CVMX_SSO_NW_TIM, nm_tim.u64);
+	} else {
+		union cvmx_pow_nw_tim nm_tim;
+		nm_tim.u64 = 0;
+		/* 4096 cycles */
+		nm_tim.s.nw_tim = 3;
+		cvmx_write_csr(CVMX_POW_NW_TIM, nm_tim.u64);
+	}
 	write_octeon_c0_icacheerr(0);
 	write_c0_derraddr1(0);
 }
-
 #if defined(CONFIG_CAVIUM_OCTEON_USER_MEM_PER_PROCESS) || \
 	defined(CONFIG_CAVIUM_OCTEON_USER_IO_PER_PROCESS)
 
-void cavium_prepare_arch_switch(struct task_struct *next)
+void octeon_prepare_arch_switch(struct task_struct *next)
 {
 	struct task_struct *group_leader = next->group_leader;
 	union octeon_cvmemctl cvmmemctl;
@@ -454,7 +534,7 @@ void cavium_prepare_arch_switch(struct task_struct *next)
 	write_c0_cvmmemctl(cvmmemctl.u64);
 }
 #else
-static void cavium_prepare_arch_switch(struct task_struct *next)
+static void octeon_prepare_arch_switch(struct task_struct *next)
 {
 }
 #endif
@@ -503,15 +583,30 @@ int xkphys_usermem_read(long pid)
 	return (io ? 2 : 0) | (mem ? 1 : 0);
 }
 
+/* the caller must hold RCU read lock */
+int is_task_and_current_same(struct task_struct *t)
+{
+	const struct cred *cred = current_cred(), *tcred;
+
+	tcred = __task_cred(t);
+	if ((cred->euid ^ tcred->suid) &&
+	    (cred->euid ^ tcred->uid) &&
+	    (cred->uid  ^ tcred->suid) &&
+	    (cred->uid  ^ tcred->uid)) {
+		return 0;
+	}
+	return 1;
+}
+
 int xkphys_usermem_write(long pid, int value)
 {
 	struct task_struct *task, *group_leader;
-	const struct cred *cred = current_cred(), *tcred;
+	int permission_ok = 0;
 
 #if defined(CONFIG_CAVIUM_OCTEON_USER_IO)
 	if ((value & 2) == 0)
 		return -EINVAL;
-#elif ! defined(CONFIG_CAVIUM_OCTEON_USER_IO_PER_PROCESS)
+#elif !defined(CONFIG_CAVIUM_OCTEON_USER_IO_PER_PROCESS)
 	if (value & 2)
 		return -EINVAL;
 #endif
@@ -530,16 +625,18 @@ int xkphys_usermem_write(long pid, int value)
 		return -ESRCH;
 
 	rcu_read_lock();
-	tcred = __task_cred(task);
+	/* Allow XKPHYS disable of other tasks from the current user*/
+	if (value == 0 && is_task_and_current_same(task))
+		permission_ok = 1;
+	rcu_read_unlock();
 
-	if (cred->uid != tcred->euid &&
-			cred->euid != tcred->euid &&
-			!(capable(CAP_SYS_RAWIO) || value == 0)) {
-		rcu_read_unlock();
+	if (capable(CAP_SYS_RAWIO))
+		permission_ok = 1;
+
+	if (!permission_ok) {
 		put_task_struct(task);
 		return -EPERM;
 	}
-	rcu_read_unlock();
 
 	if (value & 1)
 		set_tsk_thread_flag(group_leader, TIF_XKPHYS_MEM_EN);
@@ -553,10 +650,12 @@ int xkphys_usermem_write(long pid, int value)
 
 	preempt_disable();
 
-	/* If we are adjusting ourselves, make the change effective 
-           immediatly.  */
+	/*
+	 * If we are adjusting ourselves, make the change effective
+	 * immediatly.
+	 */
 	if (group_leader == current->group_leader)
-		cavium_prepare_arch_switch(current);
+		octeon_prepare_arch_switch(current);
 
 	preempt_enable();
 
@@ -571,10 +670,9 @@ void __init prom_init(void)
 {
 	struct cvmx_sysinfo *sysinfo;
 	struct linux_app_boot_info *labi;
-	const int coreid = cvmx_get_core_num();
 	int i;
 	int argc;
-#if CONFIG_CAVIUM_RESERVE32
+#if CONFIG_CAVIUM_RESERVE32 > 0
 	int64_t addr = -1;
 #endif
 	/*
@@ -582,54 +680,13 @@ void __init prom_init(void)
 	 * $a3, this is available as fw_arg3.
 	 */
 	octeon_boot_desc_ptr = (struct octeon_boot_descriptor *)fw_arg3;
-	octeon_bootinfo =
-		cvmx_phys_to_ptr(octeon_boot_desc_ptr->cvmx_desc_vaddr);
-	cvmx_bootmem_init((u64)cvmx_phys_to_ptr(octeon_bootinfo->phy_mem_desc_addr));
-
-#ifdef CONFIG_CAVIUM_DECODE_RSL
-	cvmx_error_initialize(CVMX_ERROR_FLAGS_ECC_SINGLE_BIT | CVMX_ERROR_FLAGS_CORRECTABLE);
-#endif
-
-	/*
-	 * Only enable the LED controller if we're running on a CN38XX, CN58XX,
-	 * or CN56XX. The CN30XX and CN31XX don't have an LED controller.
-	 */
-	if (!octeon_is_simulation() &&
-	    octeon_has_feature(OCTEON_FEATURE_LED_CONTROLLER)) {
-		cvmx_write_csr(CVMX_LED_EN, 0);
-		cvmx_write_csr(CVMX_LED_PRT, 0);
-		cvmx_write_csr(CVMX_LED_DBG, 0);
-		cvmx_write_csr(CVMX_LED_PRT_FMT, 0);
-		cvmx_write_csr(CVMX_LED_UDD_CNTX(0), 32);
-		cvmx_write_csr(CVMX_LED_UDD_CNTX(1), 32);
-		cvmx_write_csr(CVMX_LED_UDD_DATX(0), 0);
-		cvmx_write_csr(CVMX_LED_UDD_DATX(1), 0);
-		cvmx_write_csr(CVMX_LED_EN, 1);
-	}
-#if CONFIG_CAVIUM_RESERVE32
-	/*
-	 * We need to temporarily allocate all memory in the reserve32
-	 * region. This makes sure the kernel doesn't allocate this
-	 * memory when it is getting memory from the
-	 * bootloader. Later, after the memory allocations are
-	 * complete, the reserve32 will be freed.
-	 *
-	 * Allocate memory for RESERVED32 aligned on 2MB boundary. This
-	 * is in case we later use hugetlb entries with it.
-	 */
-	addr = cvmx_bootmem_phy_named_block_alloc(CONFIG_CAVIUM_RESERVE32 << 20,
-						0, 0, 2 << 20,
-						"CAVIUM_RESERVE32", 0);
-	if (addr < 0)
-		pr_err("Failed to allocate CAVIUM_RESERVE32 memory area\n");
-	else
-		octeon_reserve32_memory = addr;
-#endif
+	octeon_bootinfo = phys_to_virt(octeon_boot_desc_ptr->cvmx_desc_vaddr);
+	cvmx_bootmem_init(octeon_bootinfo->phy_mem_desc_addr);
 
 	sysinfo = cvmx_sysinfo_get();
 	memset(sysinfo, 0, sizeof(*sysinfo));
 	sysinfo->system_dram_size = octeon_bootinfo->dram_size << 20;
-	sysinfo->phy_mem_desc_addr = (u64)cvmx_phys_to_ptr(octeon_bootinfo->phy_mem_desc_addr);
+	sysinfo->phy_mem_desc_addr = (u64)phys_to_virt(octeon_bootinfo->phy_mem_desc_addr);
 	sysinfo->core_mask = octeon_bootinfo->core_mask;
 	sysinfo->exception_base_addr = octeon_bootinfo->exception_base_addr;
 	sysinfo->cpu_clock_hz = octeon_bootinfo->eclock_hz;
@@ -651,20 +708,57 @@ void __init prom_init(void)
 	sysinfo->dfa_ref_clock_hz = octeon_bootinfo->dfa_ref_clock_hz;
 	sysinfo->bootloader_config_flags = octeon_bootinfo->config_flags;
 
+	if (OCTEON_IS_OCTEON2()) {
+		/* I/O clock runs at a different rate than the CPU. */
+		union cvmx_mio_rst_boot rst_boot;
+		rst_boot.u64 = cvmx_read_csr(CVMX_MIO_RST_BOOT);
+		octeon_io_clock_rate = 50000000 * rst_boot.s.pnr_mul;
+	} else {
+		octeon_io_clock_rate = sysinfo->cpu_clock_hz;
+	}
+
+	/* init octeon feature map */
+	octeon_feature_init();
+
+	/*
+	 * Only enable the LED controller if we're running on a CN38XX, CN58XX,
+	 * or CN56XX. The CN30XX and CN31XX don't have an LED controller.
+	 */
+	if (!octeon_is_simulation() &&
+	    octeon_has_feature(OCTEON_FEATURE_LED_CONTROLLER)) {
+		cvmx_write_csr(CVMX_LED_EN, 0);
+		cvmx_write_csr(CVMX_LED_PRT, 0);
+		cvmx_write_csr(CVMX_LED_DBG, 0);
+		cvmx_write_csr(CVMX_LED_PRT_FMT, 0);
+		cvmx_write_csr(CVMX_LED_UDD_CNTX(0), 32);
+		cvmx_write_csr(CVMX_LED_UDD_CNTX(1), 32);
+		cvmx_write_csr(CVMX_LED_UDD_DATX(0), 0);
+		cvmx_write_csr(CVMX_LED_UDD_DATX(1), 0);
+		cvmx_write_csr(CVMX_LED_EN, 1);
+	}
+#if CONFIG_CAVIUM_RESERVE32 > 0
+	/*
+	 * We need to temporarily allocate all memory in the reserve32
+	 * region. This makes sure the kernel doesn't allocate this
+	 * memory when it is getting memory from the
+	 * bootloader. Later, after the memory allocations are
+	 * complete, the reserve32 will be freed.
+	 *
+	 * Allocate memory for RESERVED32 aligned on 2MB boundary. This
+	 * is in case we later use hugetlb entries with it.
+	 */
+	addr = cvmx_bootmem_phy_named_block_alloc(CONFIG_CAVIUM_RESERVE32 << 20,
+						0, 0, 2 << 20,
+						"CAVIUM_RESERVE32", 0);
+	if (addr < 0)
+		pr_err("Failed to allocate CAVIUM_RESERVE32 memory area\n");
+	else
+		octeon_reserve32_memory = addr;
+#endif
+
 	octeon_check_cpu_bist();
 
 	octeon_uart = octeon_get_boot_uart();
-
-	/*
-	 * Disable All CIU Interrupts. The ones we need will be
-	 * enabled later.  Read the SUM register so we know the write
-	 * completed.
-	 */
-	cvmx_write_csr(CVMX_CIU_INTX_EN0((coreid * 2)), 0);
-	cvmx_write_csr(CVMX_CIU_INTX_EN0((coreid * 2 + 1)), 0);
-	cvmx_write_csr(CVMX_CIU_INTX_EN1((coreid * 2)), 0);
-	cvmx_write_csr(CVMX_CIU_INTX_EN1((coreid * 2 + 1)), 0);
-	cvmx_read_csr(CVMX_CIU_INTX_SUM0((coreid * 2)));
 
 #ifdef CONFIG_SMP
 	octeon_write_lcd("LinuxSMP");
@@ -672,9 +766,15 @@ void __init prom_init(void)
 	octeon_write_lcd("Linux");
 #endif
 
-
 #ifdef CONFIG_CAVIUM_GDB
-	cvmx_debug_init ();
+	/*
+	 * When debugging the linux kernel, force the cores to enter
+	 * the debug exception handler to break in.
+	 */
+	if (octeon_get_boot_debug_flag()) {
+		cvmx_write_csr(CVMX_CIU_DINT, 1 << cvmx_get_core_num());
+		cvmx_read_csr(CVMX_CIU_DINT);
+	}
 #endif
 
 	octeon_setup_delays();
@@ -698,10 +798,28 @@ void __init prom_init(void)
 	arcs_cmdline[0] = 0;
 	argc = octeon_boot_desc_ptr->argc;
 	for (i = 0; i < argc; i++) {
-		const char *arg =
-			cvmx_phys_to_ptr(octeon_boot_desc_ptr->argv[i]);
-		if ((strncmp(arg, "MEM=", 4) == 0) ||
-		    (strncmp(arg, "mem=", 4) == 0)) {
+		const char *arg = phys_to_virt(octeon_boot_desc_ptr->argv[i]);
+		if (strncmp(arg, "mem=block:", 10) == 0) {
+			const char *pos = arg + 10;
+			int j;
+
+			for (j = 0; pos[0] && j < ARRAY_SIZE(named_memory_blocks); j++) {
+				int len;
+				char *comma = strchr(pos, ',');
+				if (comma)
+					len = comma - pos;
+				else
+					len = max(strlen(pos), ARRAY_SIZE(named_memory_blocks[0]));
+				strncpy(named_memory_blocks[j], pos, len);
+				if (comma)
+					pos = comma + 1;
+				else
+					break;
+			}
+			for (j = 0; j < ARRAY_SIZE(named_memory_blocks); j++)
+				pr_err("Named Block[%d] = \"%s\"\n", j, named_memory_blocks[j]);
+		} else if ((strncmp(arg, "MEM=", 4) == 0) ||
+			   (strncmp(arg, "mem=", 4) == 0)) {
 			sscanf(arg + 4, "%llu", &MAX_MEMORY);
 			MAX_MEMORY <<= 20;
 			if (MAX_MEMORY == 0)
@@ -709,37 +827,31 @@ void __init prom_init(void)
 		} else if (strncmp(arg, "rd_name=", 8) == 0) {
 			strncpy(rd_name, arg + 8, sizeof(rd_name));
 			rd_name[sizeof(rd_name) - 1] = 0;
-		}
+			goto append_arg;
+		} else if (strcmp(arg, "ecc_verbose") == 0) {
 #ifdef CONFIG_CAVIUM_REPORT_SINGLE_BIT_ECC
-		else if (strcmp(arg, "ecc_verbose") == 0) {
 			__cvmx_interrupt_ecc_report_single_bit_errors = 1;
 			pr_notice("Reporting of single bit ECC errors is "
 				  "turned on\n");
-		}
 #endif
-		else if (strlen(arcs_cmdline) + strlen(arg) + 1 <
-			   sizeof(arcs_cmdline) - 1) {
-			strcat(arcs_cmdline, " ");
-			strcat(arcs_cmdline, arg);
+			goto append_arg;
+		} else {
+append_arg:
+			if (strlen(arcs_cmdline) + strlen(arg) + 1 < sizeof(arcs_cmdline) - 1) {
+				strcat(arcs_cmdline, " ");
+				strcat(arcs_cmdline, arg);
+			}
 		}
 	}
 
 	if (strstr(arcs_cmdline, "console=pci"))
-		pci_console_init(strstr(arcs_cmdline, "console=pci") + 8);
+		octeon_pci_console_init(strstr(arcs_cmdline, "console=pci") + 8);
 
 	if (strstr(arcs_cmdline, "console=") == NULL) {
-#ifdef CONFIG_GDB_CONSOLE
-		strcat(arcs_cmdline, " console=gdb");
-#else
-#ifdef CONFIG_CAVIUM_OCTEON_2ND_KERNEL
-		strcat(arcs_cmdline, " console=ttyS0,115200");
-#else
 		if (octeon_uart == 1)
 			strcat(arcs_cmdline, " console=ttyS1,115200");
 		else
 			strcat(arcs_cmdline, " console=ttyS0,115200");
-#endif
-#endif
 	}
 
 	if (octeon_is_simulation()) {
@@ -758,14 +870,19 @@ void __init prom_init(void)
 	_machine_restart = octeon_restart;
 	_machine_halt = octeon_halt;
 
+#ifdef CONFIG_KEXEC
+	_machine_kexec_shutdown = octeon_shutdown;
+	_machine_crash_shutdown = octeon_crash_shutdown;
+	_machine_kexec_prepare = octeon_kexec_prepare;
+#endif
 	octeon_user_io_init();
 	register_smp_ops(&octeon_smp_ops);
 
-	labi = (struct linux_app_boot_info *)PHYS_TO_XKSEG_CACHED(LABI_ADDR_IN_BOOTLOADER);
+	labi = phys_to_virt(LABI_ADDR_IN_BOOTLOADER);
 	if (labi->labi_signature == LABI_SIGNATURE)
 		octeon_bootloader_entry_addr = labi->InitTLBStart_addr;
 
-	pr_info("Cavium Networks SDK-" SDK_VERSION "\n");
+	pr_info("Cavium Inc. SDK-" SDK_VERSION "\n");
 }
 
 #ifdef CONFIG_CAVIUM_OCTEON_LOCK_L2
@@ -832,56 +949,49 @@ static __init void memory_exclude_page(u64 addr, u64 *mem, u64 *size)
 	}
 }
 
-/* Add Octeon specific bus error handler, as write buffer parity errors
-** trigger bus errors.  These are fatal since the copy in the write buffer
-** is the only copy of the data. */
-int octeon_be_handler(struct pt_regs *regs, int is_fixup)
-{
-	unsigned long long dcache_err;
-	dcache_err = read_octeon_c0_dcacheerr();
-	if (dcache_err & (1ULL<<1)) 	{
-		unsigned long coreid = cvmx_get_core_num();
-
-		pr_err("Core%lu: Write buffer parity error:\n", coreid);
-		pr_err("cp0_errorepc == %lx\n", read_c0_errorepc());
-		pr_err("CacheErr (Dcache) == %llx\n",
-		       (unsigned long long)dcache_err);
-
-		write_octeon_c0_dcacheerr(dcache_err);
-		return MIPS_BE_FATAL;
-	}
-	if (is_fixup)
-		return MIPS_BE_FIXUP;
-	else
-		return MIPS_BE_FATAL;
-}
-
 void __init plat_mem_setup(void)
 {
 	uint64_t mem_alloc_size;
 	uint64_t total = 0;
 	int64_t memory;
+	const struct cvmx_bootmem_named_block_desc *named_block;
 
 #ifdef CONFIG_BLK_DEV_INITRD
-	const cvmx_bootmem_named_block_desc_t *initrd_block;
-
-	if (rd_name[0] &&
-	    (initrd_block = cvmx_bootmem_find_named_block(rd_name)) != NULL) {
-		initrd_start = initrd_block->base_addr + PAGE_OFFSET;
-		initrd_end = initrd_start + initrd_block->size;
-		add_memory_region(initrd_block->base_addr, initrd_block->size,
-			BOOT_MEM_INIT_RAM);
-		initrd_in_reserved = 1;
-		total += initrd_block->size;
+	if (rd_name[0]) {
+		named_block = cvmx_bootmem_find_named_block(rd_name);
+		if (named_block != NULL) {
+			initrd_start = named_block->base_addr + PAGE_OFFSET;
+			initrd_end = initrd_start + named_block->size;
+			add_memory_region(named_block->base_addr, named_block->size,
+					  BOOT_MEM_INIT_RAM);
+			initrd_in_reserved = 1;
+			total += named_block->size;
+		}
 	}
 #endif
 
-	/* First add the init memory we will be returning.  */
-	memory = __pa_symbol(&__init_begin) & PAGE_MASK;
-	mem_alloc_size = (__pa_symbol(&__init_end) & PAGE_MASK) - memory;
-	if (mem_alloc_size > 0) {
-		add_memory_region(memory, mem_alloc_size, BOOT_MEM_INIT_RAM);
-		total += mem_alloc_size;
+	if (named_memory_blocks[0][0]) {
+		/* Memory from named blocks only */
+		int i;
+
+		for (i = 0;
+		     named_memory_blocks[i][0] && i < ARRAY_SIZE(named_memory_blocks);
+		     i++) {
+			named_block = cvmx_bootmem_find_named_block(named_memory_blocks[i]);
+			if (!named_block) {
+				pr_err("Error: Couldn't find cvmx_bootmem block \"%s\"",
+				       named_memory_blocks[i]);
+				return;
+			}
+			pr_info("Adding memory from \"%s\": %016lx @ %016lx\n",
+				named_memory_blocks[i],
+				(unsigned long)named_block->size,
+				(unsigned long)named_block->base_addr);
+			add_memory_region(named_block->base_addr, named_block->size,
+					  BOOT_MEM_RAM);
+			total += named_block->size;
+		}
+		goto mem_alloc_done;
 	}
 
 	/*
@@ -889,7 +999,7 @@ void __init plat_mem_setup(void)
 	 * some memory vectors. When SPARSEMEM is in use, it doesn't
 	 * verify that the size is big enough for the final
 	 * vectors. Making the smallest chuck 4MB seems to be enough
-	 * to consistantly work.
+	 * to consistently work.
 	 */
 	mem_alloc_size = 4 << 20;
 	if (mem_alloc_size > MAX_MEMORY)
@@ -946,7 +1056,9 @@ void __init plat_mem_setup(void)
 	}
 	cvmx_bootmem_unlock();
 
-#if CONFIG_CAVIUM_RESERVE32
+mem_alloc_done:
+
+#if CONFIG_CAVIUM_RESERVE32 > 0
 	/*
 	 * Now that we've allocated the kernel memory it is safe to
 	 * free the reserved region. We free it here so that builtin
@@ -960,10 +1072,14 @@ void __init plat_mem_setup(void)
 		panic("Unable to allocate memory from "
 		      "cvmx_bootmem_phy_alloc\n");
 
-	board_be_handler = octeon_be_handler;
+	/* Initialize QLM and also apply any erratas */
+	cvmx_qlm_init();
 }
 
-
+/*
+ * Emit one character to the boot UART.  Exported for use by the
+ * watchdog timer.
+ */
 int prom_putchar(char c)
 {
 	uint64_t lsrval;
@@ -981,7 +1097,7 @@ EXPORT_SYMBOL(prom_putchar);
 
 void prom_free_prom_memory(void)
 {
-	if (OCTEON_IS_MODEL(OCTEON_CN63XX_PASS1_X)) {
+	if (CAVIUM_OCTEON_DCACHE_PREFETCH_WAR) {
 		/* Check for presence of Core-14449 fix.  */
 		u32 insn;
 		u32 *foo;
@@ -1000,19 +1116,128 @@ void prom_free_prom_memory(void)
 			: "=r" (insn) : : "$31", "memory");
 
 		if ((insn >> 26) != 0x33)
-			panic("No PREF instruction at Core-14449 probe point.\n");
+			panic("No PREF instruction at Core-14449 probe point.");
 
 		if (((insn >> 16) & 0x1f) != 28)
-			panic("Core-14449 WAR not in place (%04x).\n"
-				"Please build kernel with proper options (CONFIG_CAVIUM_OCTEON2).\n", insn);
+			panic("OCTEON II DCache prefetch workaround not in place (%04x).\n"
+			      "Please build kernel with proper options (CONFIG_CAVIUM_CN63XXP1).",
+			      insn);
 	}
-#ifdef CONFIG_CAVIUM_DECODE_RSL
-	/* Add an interrupt handler for general failures. */
-	if (request_irq(OCTEON_IRQ_RML, octeon_rml_interrupt, IRQF_SHARED,
-			"RML/RSL", octeon_rml_interrupt)) {
-		panic("Unable to request_irq(OCTEON_IRQ_RML)\n");
-	}
-#endif
 }
 
+int octeon_prune_device_tree(void);
+int ubnt_dt_set_mac(void);
 
+extern const char __dtb_octeon_3xxx_begin;
+extern const char __dtb_octeon_3xxx_end;
+extern const char __dtb_octeon_68xx_begin;
+extern const char __dtb_octeon_68xx_end;
+extern const char __dtb_ubnt_e100_begin;
+extern const char __dtb_ubnt_e100_end;
+extern const char __dtb_ubnt_e101_begin;
+extern const char __dtb_ubnt_e101_end;
+void __init device_tree_init(void)
+{
+	int dt_size;
+	struct boot_param_header *fdt;
+	bool do_prune;
+	bool do_set_mac = false;
+
+	if (octeon_bootinfo->minor_version >= 3 && octeon_bootinfo->fdt_addr) {
+		fdt = phys_to_virt(octeon_bootinfo->fdt_addr);
+		pr_info("Using passed Device Tree <%p>.\n", fdt);
+		if (fdt_check_header(fdt))
+			panic("Corrupt Device Tree passed to kernel.");
+		dt_size = be32_to_cpu(fdt->totalsize);
+		do_prune = false;
+	} else if (OCTEON_IS_MODEL(OCTEON_CN68XX)) {
+		fdt = (struct boot_param_header *)&__dtb_octeon_68xx_begin;
+		dt_size = &__dtb_octeon_68xx_end - &__dtb_octeon_68xx_begin;
+		do_prune = true;
+	} else if (octeon_bootinfo->board_type == CVMX_BOARD_TYPE_UBNT_E100) {
+		switch (octeon_bootinfo->board_rev_major) {
+		case 1:
+			fdt = (struct boot_param_header *)
+			      &__dtb_ubnt_e101_begin;
+			dt_size = &__dtb_ubnt_e101_end
+			          - &__dtb_ubnt_e101_begin;
+			break;
+		default:
+			fdt = (struct boot_param_header *)
+			      &__dtb_ubnt_e100_begin;
+			dt_size = &__dtb_ubnt_e100_end
+			          - &__dtb_ubnt_e100_begin;
+			break;
+		}
+		do_prune = false;
+		do_set_mac = true;
+	} else {
+		fdt = (struct boot_param_header *)&__dtb_octeon_3xxx_begin;
+		dt_size = &__dtb_octeon_3xxx_end - &__dtb_octeon_3xxx_begin;
+		do_prune = true;
+	}
+
+	/* Copy the default tree from init memory. */
+	initial_boot_params = early_init_dt_alloc_memory_arch(dt_size, 8);
+	if (initial_boot_params == NULL)
+		panic("Could not allocate initial_boot_params\n");
+	memcpy(initial_boot_params, fdt, dt_size);
+
+	if (do_prune) {
+		octeon_prune_device_tree();
+		pr_info("Using internal Device Tree.\n");
+	}
+
+	if (do_set_mac)
+		ubnt_dt_set_mac();
+
+	unflatten_device_tree();
+}
+
+static int __initdata disable_octeon_edac_p;
+
+static int __init disable_octeon_edac(char *str)
+{
+	disable_octeon_edac_p = 1;
+	return 0;
+}
+early_param("disable_octeon_edac", disable_octeon_edac);
+
+static char *edac_device_names[] = {
+	"octeon_l2c_edac",
+	"octeon_pc_edac",
+};
+
+static int __init edac_devinit(void)
+{
+	struct platform_device *dev;
+	int i, err = 0;
+	int num_lmc;
+	char *name;
+
+	if (disable_octeon_edac_p)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(edac_device_names); i++) {
+		name = edac_device_names[i];
+		dev = platform_device_register_simple(name, -1, NULL, 0);
+		if (IS_ERR(dev)) {
+			pr_err("Registation of %s failed!\n", name);
+			err = PTR_ERR(dev);
+		}
+	}
+
+	num_lmc = OCTEON_IS_MODEL(OCTEON_CN68XX) ? 4 :
+		(OCTEON_IS_MODEL(OCTEON_CN56XX) ? 2 : 1);
+	for (i = 0; i < num_lmc; i++) {
+		dev = platform_device_register_simple("octeon_lmc_edac",
+						      i, NULL, 0);
+		if (IS_ERR(dev)) {
+			pr_err("Registation of co_lmc_edac %d failed!\n", i);
+			err = PTR_ERR(dev);
+		}
+	}
+
+	return err;
+}
+device_initcall(edac_devinit);

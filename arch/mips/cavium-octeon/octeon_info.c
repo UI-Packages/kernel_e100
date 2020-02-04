@@ -5,7 +5,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2004-2007 Cavium Networks
+ * Copyright (C) 2004-2012 Cavium Inc.
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -13,10 +13,9 @@
 #include <linux/seq_file.h>
 #include <linux/proc_fs.h>
 #include <asm/octeon/octeon.h>
-#include <asm/octeon/cvmx-app-init.h>
 
-extern cvmx_bootinfo_t *octeon_bootinfo;
-#if CONFIG_CAVIUM_RESERVE32
+extern struct cvmx_bootinfo *octeon_bootinfo;
+#if defined(CONFIG_CAVIUM_RESERVE32) && CONFIG_CAVIUM_RESERVE32
 extern uint64_t octeon_reserve32_memory;
 #endif
 
@@ -29,32 +28,30 @@ extern uint64_t octeon_reserve32_memory;
  */
 static int octeon_info_show(struct seq_file *m, void *v)
 {
+	struct cvmx_sysinfo *sysinfo = cvmx_sysinfo_get();
 
 	seq_printf(m, "processor_id:        0x%x\n", read_c0_prid());
 	seq_printf(m, "boot_flags:          0x%x\n", octeon_bootinfo->flags);
 	seq_printf(m, "dram_size:           %u\n", octeon_bootinfo->dram_size);
-	seq_printf(m, "phy_mem_desc_addr:   0x%x\n",
-		   octeon_bootinfo->phy_mem_desc_addr);
+	seq_printf(m, "phy_mem_desc_addr:   0x%x\n", (uint32_t)sysinfo->phy_mem_desc_addr);
 	seq_printf(m, "eclock_hz:           %u\n", octeon_bootinfo->eclock_hz);
 	seq_printf(m, "io_clock_hz:         %llu\n", octeon_get_io_clock_rate());
 	seq_printf(m, "dclock_hz:           %u\n", octeon_bootinfo->dclock_hz);
 	seq_printf(m, "board_type:          %u\n", octeon_bootinfo->board_type);
 	seq_printf(m, "board_serial_number: %s\n",
-		   octeon_bootinfo->board_serial_number);
+		   sysinfo->board_serial_number);
 	seq_printf(m, "ubnt_r1:             %u\n",
 		   octeon_bootinfo->board_rev_major);
 	seq_printf(m, "ubnt_r2:             %u\n",
 		   octeon_bootinfo->board_rev_minor);
-	seq_printf(m, "mac_addr_base:       %02x:%02x:%02x:%02x:%02x:%02x\n",
-		   (int) octeon_bootinfo->mac_addr_base[0],
-		   (int) octeon_bootinfo->mac_addr_base[1],
-		   (int) octeon_bootinfo->mac_addr_base[2],
-		   (int) octeon_bootinfo->mac_addr_base[3],
-		   (int) octeon_bootinfo->mac_addr_base[4],
-		   (int) octeon_bootinfo->mac_addr_base[5]);
+	seq_printf(m, "mac_addr_base:       %pM\n", sysinfo->mac_addr_base);
 	seq_printf(m, "mac_addr_count:      %u\n",
-		   octeon_bootinfo->mac_addr_count);
-#if CONFIG_CAVIUM_RESERVE32
+		   sysinfo->mac_addr_count);
+	if (octeon_bootinfo->minor_version >= 3 && octeon_bootinfo->fdt_addr) {
+		seq_printf(m, "fdt_addr:            0x%lx\n",
+			(long int) octeon_bootinfo->fdt_addr);
+	}
+#if defined(CONFIG_CAVIUM_RESERVE32) && CONFIG_CAVIUM_RESERVE32
 	seq_printf(m, "32bit_shared_mem_base: 0x%lx\n",
 		   (long int) octeon_reserve32_memory);
 	seq_printf(m, "32bit_shared_mem_size: 0x%x\n",
@@ -65,7 +62,6 @@ static int octeon_info_show(struct seq_file *m, void *v)
 #endif
 	return 0;
 }
-
 
 /**
  * /proc/octeon_info was openned. Use the single_open iterator
@@ -79,14 +75,12 @@ static int octeon_info_open(struct inode *inode, struct file *file)
 	return single_open(file, octeon_info_show, NULL);
 }
 
-
-static struct file_operations octeon_info_operations = {
+static const struct file_operations octeon_info_operations = {
 	.open = octeon_info_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = single_release,
 };
-
 
 /**
  * Module initialization
@@ -104,7 +98,6 @@ static int __init octeon_info_init(void)
 	return 0;
 }
 
-
 /**
  * Module cleanup
  *
@@ -115,9 +108,8 @@ static void __exit octeon_info_cleanup(void)
 	remove_proc_entry("octeon_info", NULL);
 }
 
-
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Cavium Networks <support@caviumnetworks.com>");
-MODULE_DESCRIPTION("Cavium Networks Octeon information interface.");
+MODULE_AUTHOR("Cavium Inc. <support@cavium.com>");
+MODULE_DESCRIPTION("Cavium Inc. OCTEON information interface.");
 module_init(octeon_info_init);
 module_exit(octeon_info_cleanup);

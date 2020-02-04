@@ -11,6 +11,7 @@
 #include <linux/etherdevice.h>
 #include <linux/list.h>
 #include <linux/netdevice.h>
+#include <linux/slab.h>
 #include "dsa_priv.h"
 
 #define DSA_HLEN	4
@@ -204,20 +205,7 @@ out:
 	return 0;
 }
 
-static struct packet_type edsa_packet_type __read_mostly = {
+struct packet_type edsa_packet_type __read_mostly = {
 	.type	= cpu_to_be16(ETH_P_EDSA),
 	.func	= edsa_rcv,
 };
-
-static int __init edsa_init_module(void)
-{
-	dev_add_pack(&edsa_packet_type);
-	return 0;
-}
-module_init(edsa_init_module);
-
-static void __exit edsa_cleanup_module(void)
-{
-	dev_remove_pack(&edsa_packet_type);
-}
-module_exit(edsa_cleanup_module);

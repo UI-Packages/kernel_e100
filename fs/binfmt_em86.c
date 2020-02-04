@@ -11,7 +11,6 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
-#include <linux/slab.h>
 #include <linux/binfmts.h>
 #include <linux/elf.h>
 #include <linux/init.h>
@@ -101,7 +100,8 @@ static struct linux_binfmt em86_format = {
 
 static int __init init_em86_binfmt(void)
 {
-	return register_binfmt(&em86_format);
+	register_binfmt(&em86_format);
+	return 0;
 }
 
 static void __exit exit_em86_binfmt(void)

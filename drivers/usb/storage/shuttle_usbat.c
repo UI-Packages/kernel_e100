@@ -170,7 +170,7 @@ static int init_usbat_flash(struct us_data *us);
 { USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
   .driver_info = (flags)|(USB_US_TYPE_STOR<<24) }
 
-struct usb_device_id usbat_usb_ids[] = {
+static struct usb_device_id usbat_usb_ids[] = {
 #	include "unusual_usbat.h"
 	{ }		/* Terminating entry */
 };
@@ -340,7 +340,7 @@ static int usbat_check_status(struct us_data *us)
 }
 
 /*
- * Stores critical information in internal registers in prepartion for the execution
+ * Stores critical information in internal registers in preparation for the execution
  * of a conditional usbat_read_blocks or usbat_write_blocks call.
  */
 static int usbat_set_shuttle_features(struct us_data *us,
@@ -1628,10 +1628,10 @@ static int usbat_hp8200e_transport(struct scsi_cmnd *srb, struct us_data *us)
 		return USB_STOR_TRANSPORT_ERROR;
 	}
 
-	if ( (result = usbat_multiple_write(us, 
-			registers, data, 7)) != USB_STOR_TRANSPORT_GOOD) {
+	result = usbat_multiple_write(us, registers, data, 7);
+
+	if (result != USB_STOR_TRANSPORT_GOOD)
 		return result;
-	}
 
 	/*
 	 * Write the 12-byte command header.
@@ -1643,12 +1643,11 @@ static int usbat_hp8200e_transport(struct scsi_cmnd *srb, struct us_data *us)
 	 * AT SPEED 4 IS UNRELIABLE!!!
 	 */
 
-	if ((result = usbat_write_block(us,
-			USBAT_ATA, srb->cmnd, 12,
-				(srb->cmnd[0]==GPCMD_BLANK ? 75 : 10), 0) !=
-			     USB_STOR_TRANSPORT_GOOD)) {
+	result = usbat_write_block(us, USBAT_ATA, srb->cmnd, 12,
+				   srb->cmnd[0] == GPCMD_BLANK ? 75 : 10, 0);
+
+	if (result != USB_STOR_TRANSPORT_GOOD)
 		return result;
-	}
 
 	/* If there is response data to be read in then do it here. */
 
@@ -1864,17 +1863,7 @@ static struct usb_driver usbat_driver = {
 	.post_reset =	usb_stor_post_reset,
 	.id_table =	usbat_usb_ids,
 	.soft_unbind =	1,
+	.no_dynamic_id = 1,
 };
 
-static int __init usbat_init(void)
-{
-	return usb_register(&usbat_driver);
-}
-
-static void __exit usbat_exit(void)
-{
-	usb_deregister(&usbat_driver);
-}
-
-module_init(usbat_init);
-module_exit(usbat_exit);
+module_usb_driver(usbat_driver);

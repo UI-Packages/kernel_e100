@@ -15,7 +15,7 @@
 #define _INET6_HASHTABLES_H
 
 
-#if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 #include <linux/in6.h>
 #include <linux/ipv6.h>
 #include <linux/types.h>
@@ -46,14 +46,14 @@ static inline int inet6_sk_ehashfn(const struct sock *sk)
 	const struct ipv6_pinfo *np = inet6_sk(sk);
 	const struct in6_addr *laddr = &np->rcv_saddr;
 	const struct in6_addr *faddr = &np->daddr;
-	const __u16 lport = inet->num;
-	const __be16 fport = inet->dport;
+	const __u16 lport = inet->inet_num;
+	const __be16 fport = inet->inet_dport;
 	struct net *net = sock_net(sk);
 
 	return inet6_ehashfn(net, laddr, lport, faddr, fport);
 }
 
-extern void __inet6_hash(struct sock *sk);
+extern int __inet6_hash(struct sock *sk, struct inet_timewait_sock *twp);
 
 /*
  * Sockets in TCP_CLOSE state are _always_ taken out of the hash, so
@@ -110,5 +110,5 @@ extern struct sock *inet6_lookup(struct net *net, struct inet_hashinfo *hashinfo
 				 const struct in6_addr *saddr, const __be16 sport,
 				 const struct in6_addr *daddr, const __be16 dport,
 				 const int dif);
-#endif /* defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE) */
+#endif /* IS_ENABLED(CONFIG_IPV6) */
 #endif /* _INET6_HASHTABLES_H */

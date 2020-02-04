@@ -19,6 +19,7 @@
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
 #include <asm/war.h>
+#include <asm/msa_calling.h>
 
 #ifndef CONFIG_BINFMT_ELF32
 /* Neither O32 nor N32, so define handle_sys here */
@@ -37,6 +38,7 @@ NESTED(handle_sys64, PT_SIZE, sp)
 	TRACE_IRQS_ON_RELOAD
 	STI
 	.set	at
+	MSA_KERNEL
 #endif
 
 	dsubu	t0, v0, __NR_64_Linux	# check syscall number
@@ -66,9 +68,9 @@ NESTED(handle_sys64, PT_SIZE, sp)
 	sd	t0, PT_R7(sp)		# set error flag
 	beqz	t0, 1f
 
+	ld	t1, PT_R2(sp)		# syscall number
 	dnegu	v0			# error
-	sd	v0, PT_R0(sp)		# set flag for syscall
-					# restarting
+	sd	t1, PT_R0(sp)		# save it for syscall restarting
 1:	sd	v0, PT_R2(sp)		# result
 
 n64_syscall_exit:
@@ -80,6 +82,7 @@ n64_syscall_exit:
 	and	t0, a2, t0
 	bnez	t0, n64_syscall_exit_work
 
+	MSA_USER
 	j	restore_partial
 
 n64_syscall_exit_work:
@@ -91,8 +94,7 @@ syscall_trace_entry:
 	SAVE_STATIC
 	move	s0, t2
 	move	a0, sp
-	li	a1, 0
-	jal	do_syscall_trace
+	jal	syscall_trace_enter
 
 	move	t0, s0
 	RESTORE_STATIC
@@ -109,8 +111,9 @@ syscall_trace_entry:
 	sd	t0, PT_R7(sp)		# set error flag
 	beqz	t0, 1f
 
+	ld	t1, PT_R2(sp)		# syscall number
 	dnegu	v0			# error
-	sd	v0, PT_R0(sp)		# set flag for syscall restarting
+	sd	t1, PT_R0(sp)		# save it for syscall restarting
 1:	sd	v0, PT_R2(sp)		# result
 
 	j	syscall_exit
@@ -125,7 +128,8 @@ illegal_syscall:
 	END(handle_sys64)
 
 	.align	3
-sys_call_table:
+	.type	sys_call_table, @object
+EXPORT(sys_call_table)
 	PTR	sys_read			/* 5000 */
 	PTR	sys_write
 	PTR	sys_open
@@ -299,7 +303,7 @@ sys_call_table:
 	PTR	sys_ni_syscall			/* 5170, was get_kernel_syms */
 	PTR	sys_ni_syscall			/* was query_module */
 	PTR	sys_quotactl
-	PTR	sys_nfsservctl
+	PTR	sys_ni_syscall			/* was nfsservctl */
 	PTR	sys_ni_syscall			/* res. for getpmsg */
 	PTR	sys_ni_syscall			/* 5175  for putpmsg */
 	PTR	sys_ni_syscall			/* res. for afs_syscall */
@@ -403,7 +407,7 @@ sys_call_table:
 	PTR	sys_ioprio_get
 	PTR	sys_utimensat			/* 5275 */
 	PTR	sys_signalfd
-	PTR	sys_ni_syscall
+	PTR	sys_ni_syscall			/* was timerfd */
 	PTR	sys_eventfd
 	PTR	sys_fallocate
 	PTR	sys_timerfd_create		/* 5280 */
@@ -416,8 +420,21 @@ sys_call_table:
 	PTR	sys_pipe2
 	PTR	sys_inotify_init1
 	PTR	sys_preadv
-	PTR	sys_pwritev			/* 5390 */
+	PTR	sys_pwritev			/* 5290 */
 	PTR	sys_rt_tgsigqueueinfo
 	PTR	sys_perf_event_open
 	PTR	sys_accept4
+	PTR	sys_recvmmsg
+	PTR	sys_fanotify_init		/* 5295 */
+	PTR	sys_fanotify_mark
+	PTR	sys_prlimit64
+	PTR	sys_name_to_handle_at
+	PTR	sys_open_by_handle_at
+	PTR	sys_clock_adjtime		/* 5300 */
+	PTR	sys_syncfs
+	PTR	sys_sendmmsg
+	PTR	sys_setns
+	PTR	sys_process_vm_readv
+	PTR	sys_process_vm_writev		/* 5305 */
+	PTR	sys_msa
 	.size	sys_call_table,.-sys_call_table

@@ -62,7 +62,9 @@
  */
 static void shrink_liability(struct ubifs_info *c, int nr_to_write)
 {
-	writeback_inodes_sb(c->vfs_sb);
+	down_read(&c->vfs_sb->s_umount);
+	writeback_inodes_sb(c->vfs_sb, WB_REASON_FS_FREE_SPACE);
+	up_read(&c->vfs_sb->s_umount);
 }
 
 /**
@@ -145,7 +147,7 @@ static int make_free_space(struct ubifs_info *c)
 		if (liab2 < liab1)
 			return -EAGAIN;
 
-		dbg_budg("new liability %lld (not shrinked)", liab2);
+		dbg_budg("new liability %lld (not shrunk)", liab2);
 
 		/* Liability did not shrink again, try GC */
 		dbg_budg("Run GC");

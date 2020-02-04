@@ -15,14 +15,17 @@
  * binaries.
  */
 #include <linux/compiler.h>
+#include <linux/elf.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
+#include <linux/regset.h>
 #include <linux/smp.h>
 #include <linux/user.h>
 #include <linux/security.h>
+#include <linux/tracehook.h>
 #include <linux/audit.h>
 #include <linux/seccomp.h>
 
@@ -34,7 +37,6 @@
 #include <asm/mipsmtregs.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/bootinfo.h>
 #include <asm/reg.h>
@@ -176,12 +178,14 @@ int ptrace_get_watch_regs(struct task_struct *child,
 			  struct pt_watch_regs __user *addr)
 {
 	enum pt_watch_style style;
-	int i;
+	unsigned int num_valid;
+	u16 watch_reg_masks[NUM_WATCH_REGS];
+	int i, rv;
 
-	if (!cpu_has_watch || current_cpu_data.watch_reg_use_cnt == 0)
+	if (!cpu_has_watch)
 		return -EIO;
 	if (!access_ok(VERIFY_WRITE, addr, sizeof(struct pt_watch_regs)))
-		return -EIO;
+		return -EFAULT;
 
 #ifdef CONFIG_32BIT
 	style = pt_watch_style_mips32;
@@ -191,41 +195,76 @@ int ptrace_get_watch_regs(struct task_struct *child,
 #define WATCH_STYLE mips64
 #endif
 
-	__put_user(style, &addr->style);
-	__put_user(current_cpu_data.watch_reg_use_cnt,
-		   &addr->WATCH_STYLE.num_valid);
-	for (i = 0; i < current_cpu_data.watch_reg_use_cnt; i++) {
-		__put_user(child->thread.watch.mips3264.watchlo[i],
-			   &addr->WATCH_STYLE.watchlo[i]);
-		__put_user(child->thread.watch.mips3264.watchhi[i] & 0xfff,
-			   &addr->WATCH_STYLE.watchhi[i]);
-		__put_user(current_cpu_data.watch_reg_masks[i],
-			   &addr->WATCH_STYLE.watch_masks[i]);
+	preempt_disable();
+	num_valid = current_cpu_data.watch_reg_use_cnt;
+	memcpy(watch_reg_masks, current_cpu_data.watch_reg_masks,
+	       sizeof(watch_reg_masks));
+	preempt_enable();
+
+	if (num_valid == 0)
+		return -EIO;
+
+	rv = __put_user(style, &addr->style);
+	if (rv)
+		goto out;
+	rv = __put_user(num_valid, &addr->WATCH_STYLE.num_valid);
+	if (rv)
+		goto out;
+	for (i = 0; i < num_valid; i++) {
+		rv = __put_user(child->thread.watch.mips3264.watchlo[i],
+				&addr->WATCH_STYLE.watchlo[i]);
+		if (rv)
+			goto out;
+		rv = __put_user(child->thread.watch.mips3264.watchhi[i] & 0xfff,
+				&addr->WATCH_STYLE.watchhi[i]);
+		if (rv)
+			goto out;
+		rv = __put_user(watch_reg_masks[i],
+				&addr->WATCH_STYLE.watch_masks[i]);
+		if (rv)
+			goto out;
 	}
 	for (; i < 8; i++) {
-		__put_user(0, &addr->WATCH_STYLE.watchlo[i]);
-		__put_user(0, &addr->WATCH_STYLE.watchhi[i]);
-		__put_user(0, &addr->WATCH_STYLE.watch_masks[i]);
+		rv = __put_user(0, &addr->WATCH_STYLE.watchlo[i]);
+		if (rv)
+			goto out;
+		rv = __put_user(0, &addr->WATCH_STYLE.watchhi[i]);
+		if (rv)
+			goto out;
+		rv = __put_user(0, &addr->WATCH_STYLE.watch_masks[i]);
+		if (rv)
+			goto out;
 	}
-
-	return 0;
+out:
+	return rv;
 }
 
 int ptrace_set_watch_regs(struct task_struct *child,
 			  struct pt_watch_regs __user *addr)
 {
-	int i;
+	int i, rv;
+	unsigned int num_valid;
 	int watch_active = 0;
 	unsigned long lt[NUM_WATCH_REGS];
 	u16 ht[NUM_WATCH_REGS];
 
-	if (!cpu_has_watch || current_cpu_data.watch_reg_use_cnt == 0)
+	if (!cpu_has_watch)
 		return -EIO;
 	if (!access_ok(VERIFY_READ, addr, sizeof(struct pt_watch_regs)))
+		return -EFAULT;
+
+	preempt_disable();
+	num_valid = current_cpu_data.watch_reg_use_cnt;
+	preempt_enable();
+
+	if (num_valid == 0)
 		return -EIO;
+
 	/* Check the values. */
-	for (i = 0; i < current_cpu_data.watch_reg_use_cnt; i++) {
-		__get_user(lt[i], &addr->WATCH_STYLE.watchlo[i]);
+	for (i = 0; i < num_valid; i++) {
+		rv = __get_user(lt[i], &addr->WATCH_STYLE.watchlo[i]);
+		if (rv)
+			return rv;
 #ifdef CONFIG_32BIT
 		if (lt[i] & __UA_LIMIT)
 			return -EINVAL;
@@ -238,12 +277,14 @@ int ptrace_set_watch_regs(struct task_struct *child,
 				return -EINVAL;
 		}
 #endif
-		__get_user(ht[i], &addr->WATCH_STYLE.watchhi[i]);
+		rv = __get_user(ht[i], &addr->WATCH_STYLE.watchhi[i]);
+		if (rv)
+			return rv;
 		if (ht[i] & ~0xff8)
 			return -EINVAL;
 	}
 	/* Install them. */
-	for (i = 0; i < current_cpu_data.watch_reg_use_cnt; i++) {
+	for (i = 0; i < num_valid; i++) {
 		if (lt[i] & 7)
 			watch_active = 1;
 		child->thread.watch.mips3264.watchlo[i] = lt[i];
@@ -259,16 +300,147 @@ int ptrace_set_watch_regs(struct task_struct *child,
 	return 0;
 }
 
-long arch_ptrace(struct task_struct *child, long request, long addr, long data)
+/* regset get/set implementations */
+
+static int gpr_get(struct task_struct *target,
+		   const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   void *kbuf, void __user *ubuf)
+{
+	struct pt_regs *regs = task_pt_regs(target);
+
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				   regs, 0, sizeof(*regs));
+}
+
+static int gpr_set(struct task_struct *target,
+		   const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   const void *kbuf, const void __user *ubuf)
+{
+	struct pt_regs newregs;
+	int ret;
+
+	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				 &newregs,
+				 0, sizeof(newregs));
+	if (ret)
+		return ret;
+
+	*task_pt_regs(target) = newregs;
+
+	return 0;
+}
+
+static int fpr_get(struct task_struct *target,
+		   const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   void *kbuf, void __user *ubuf)
+{
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				   &target->thread.fpu,
+				   0, sizeof(elf_fpregset_t));
+	/* XXX fcr31  */
+}
+
+static int fpr_set(struct task_struct *target,
+		   const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   const void *kbuf, const void __user *ubuf)
+{
+	return user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				  &target->thread.fpu,
+				  0, sizeof(elf_fpregset_t));
+	/* XXX fcr31  */
+}
+
+enum mips_regset {
+	REGSET_GPR,
+	REGSET_FPR,
+};
+
+static const struct user_regset mips_regsets[] = {
+	[REGSET_GPR] = {
+		.core_note_type	= NT_PRSTATUS,
+		.n		= ELF_NGREG,
+		.size		= sizeof(unsigned int),
+		.align		= sizeof(unsigned int),
+		.get		= gpr_get,
+		.set		= gpr_set,
+	},
+	[REGSET_FPR] = {
+		.core_note_type	= NT_PRFPREG,
+		.n		= ELF_NFPREG,
+		.size		= sizeof(elf_fpreg_t),
+		.align		= sizeof(elf_fpreg_t),
+		.get		= fpr_get,
+		.set		= fpr_set,
+	},
+};
+
+static const struct user_regset_view user_mips_view = {
+	.name		= "mips",
+	.e_machine	= ELF_ARCH,
+	.ei_osabi	= ELF_OSABI,
+	.regsets	= mips_regsets,
+	.n		= ARRAY_SIZE(mips_regsets),
+};
+
+static const struct user_regset mips64_regsets[] = {
+	[REGSET_GPR] = {
+		.core_note_type	= NT_PRSTATUS,
+		.n		= ELF_NGREG,
+		.size		= sizeof(unsigned long),
+		.align		= sizeof(unsigned long),
+		.get		= gpr_get,
+		.set		= gpr_set,
+	},
+	[REGSET_FPR] = {
+		.core_note_type	= NT_PRFPREG,
+		.n		= ELF_NFPREG,
+		.size		= sizeof(elf_fpreg_t),
+		.align		= sizeof(elf_fpreg_t),
+		.get		= fpr_get,
+		.set		= fpr_set,
+	},
+};
+
+static const struct user_regset_view user_mips64_view = {
+	.name		= "mips",
+	.e_machine	= ELF_ARCH,
+	.ei_osabi	= ELF_OSABI,
+	.regsets	= mips64_regsets,
+	.n		= ARRAY_SIZE(mips_regsets),
+};
+
+const struct user_regset_view *task_user_regset_view(struct task_struct *task)
+{
+#ifdef CONFIG_32BIT
+	return &user_mips_view;
+#endif
+
+#ifdef CONFIG_MIPS32_O32
+		if (test_thread_flag(TIF_32BIT_REGS))
+			return &user_mips_view;
+#endif
+
+	return &user_mips64_view;
+}
+
+long arch_ptrace(struct task_struct *child, long request,
+		 unsigned long addr, unsigned long data)
 {
 	int ret;
+	void __user *addrp = (void __user *) addr;
+	void __user *datavp = (void __user *) data;
+	unsigned long __user *datalp = (void __user *) data;
 
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
 	case PTRACE_PEEKTEXT: /* read word at location addr. */
-	case PTRACE_PEEKDATA: {
+	case PTRACE_PEEKDATA:
 		ret = -EIO;
-#if !defined(CONFIG_CAVIUM_OCTEON_USER_IO_DISABLED) && defined(CONFIG_64BIT)
+#if defined(CONFIG_CAVIUM_OCTEON_USER_IO_PER_PROCESS) || defined(CONFIG_CAVIUM_OCTEON_USER_IO)
 		/* check whether its a XKPHYS IO addr (we only allow the
 		   0x80xx.. alias) */
 		if (((unsigned long)addr >> 48) == 0x8001) {
@@ -284,7 +456,7 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 			break;
 		}
 #endif /* !defined(CONFIG_CAVIUM_OCTEON_USER_IO_DISABLED) */
-#if !defined(CONFIG_CAVIUM_OCTEON_USER_MEM_DISABLED)
+#if defined(CONFIG_CAVIUM_OCTEON_USER_MEM_PER_PROCESS) || defined(CONFIG_CAVIUM_OCTEON_USER_MEM)
 		/* check whether its a XKPHYS MEM addr */
 		if (((unsigned long)addr >> 48) == 0x8000) {
 			unsigned long tmp;
@@ -327,7 +499,6 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 
 		ret = generic_ptrace_peekdata(child, addr, data);
 		break;
-	}
 
 	/* Read the word at location addr in the USER area. */
 	case PTRACE_PEEKUSR: {
@@ -449,7 +620,7 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 			ret = -EIO;
 			goto out;
 		}
-		ret = put_user(tmp, (unsigned long __user *) data);
+		ret = put_user(tmp, datalp);
 		break;
 	}
 
@@ -541,64 +712,31 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 		}
 
 	case PTRACE_GETREGS:
-		ret = ptrace_getregs(child, (__s64 __user *) data);
+		ret = ptrace_getregs(child, datavp);
 		break;
 
 	case PTRACE_SETREGS:
-		ret = ptrace_setregs(child, (__s64 __user *) data);
+		ret = ptrace_setregs(child, datavp);
 		break;
 
 	case PTRACE_GETFPREGS:
-		ret = ptrace_getfpregs(child, (__u32 __user *) data);
+		ret = ptrace_getfpregs(child, datavp);
 		break;
 
 	case PTRACE_SETFPREGS:
-		ret = ptrace_setfpregs(child, (__u32 __user *) data);
-		break;
-
-	case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
-	case PTRACE_CONT: { /* restart after signal. */
-		ret = -EIO;
-		if (!valid_signal(data))
-			break;
-		if (request == PTRACE_SYSCALL) {
-			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		}
-		else {
-			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		}
-		child->exit_code = data;
-		wake_up_process(child);
-		ret = 0;
-		break;
-	}
-
-	/*
-	 * make the child exit.  Best I can do is send it a sigkill.
-	 * perhaps it should be put in the status that it wants to
-	 * exit.
-	 */
-	case PTRACE_KILL:
-		ret = 0;
-		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
-			break;
-		child->exit_code = SIGKILL;
-		wake_up_process(child);
+		ret = ptrace_setfpregs(child, datavp);
 		break;
 
 	case PTRACE_GET_THREAD_AREA:
-		ret = put_user(task_thread_info(child)->tp_value,
-				(unsigned long __user *) data);
+		ret = put_user(task_thread_info(child)->tp_value, datalp);
 		break;
 
 	case PTRACE_GET_WATCH_REGS:
-		ret = ptrace_get_watch_regs(child,
-					(struct pt_watch_regs __user *) addr);
+		ret = ptrace_get_watch_regs(child, addrp);
 		break;
 
 	case PTRACE_SET_WATCH_REGS:
-		ret = ptrace_set_watch_regs(child,
-					(struct pt_watch_regs __user *) addr);
+		ret = ptrace_set_watch_regs(child, addrp);
 		break;
 
 	default:
@@ -609,56 +747,35 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 	return ret;
 }
 
-static inline int audit_arch(void)
+/*
+ * Notification of system call entry/exit
+ * - triggered by current->work.syscall_trace
+ */
+asmlinkage void syscall_trace_enter(struct pt_regs *regs)
 {
-	int arch = EM_MIPS;
-#ifdef CONFIG_64BIT
-	arch |=  __AUDIT_ARCH_64BIT;
-#endif
-#if defined(__LITTLE_ENDIAN)
-	arch |=  __AUDIT_ARCH_LE;
-#endif
-	return arch;
+	long ret = 0;
+
+	/* do the secure computing check first */
+	secure_computing(regs->regs[2]);
+
+	if (test_thread_flag(TIF_SYSCALL_TRACE) &&
+	    tracehook_report_syscall_entry(regs))
+		ret = -1;
+
+	audit_syscall_entry(__syscall_get_arch(),
+			    regs->regs[2],
+			    regs->regs[4], regs->regs[5],
+			    regs->regs[6], regs->regs[7]);
 }
 
 /*
  * Notification of system call entry/exit
  * - triggered by current->work.syscall_trace
  */
-asmlinkage void do_syscall_trace(struct pt_regs *regs, int entryexit)
+asmlinkage void syscall_trace_leave(struct pt_regs *regs)
 {
-	/* do the secure computing check first */
-	if (!entryexit)
-		secure_computing(regs->regs[0]);
+	audit_syscall_exit(regs);
 
-	if (unlikely(current->audit_context) && entryexit)
-		audit_syscall_exit(AUDITSC_RESULT(regs->regs[2]),
-		                   regs->regs[2]);
-
-	if (!(current->ptrace & PT_PTRACED))
-		goto out;
-
-	if (!test_thread_flag(TIF_SYSCALL_TRACE))
-		goto out;
-
-	/* The 0x80 provides a way for the tracing parent to distinguish
-	   between a syscall stop and SIGTRAP delivery */
-	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD) ?
-	                         0x80 : 0));
-
-	/*
-	 * this isn't the same as continuing with a signal, but it will do
-	 * for normal use.  strace only continues with a signal if the
-	 * stopping signal is not SIGTRAP.  -brl
-	 */
-	if (current->exit_code) {
-		send_sig(current->exit_code, current, 1);
-		current->exit_code = 0;
-	}
-
-out:
-	if (unlikely(current->audit_context) && !entryexit)
-		audit_syscall_entry(audit_arch(), regs->regs[0],
-				    regs->regs[4], regs->regs[5],
-				    regs->regs[6], regs->regs[7]);
+	if (test_thread_flag(TIF_SYSCALL_TRACE))
+		tracehook_report_syscall_exit(regs, 0);
 }

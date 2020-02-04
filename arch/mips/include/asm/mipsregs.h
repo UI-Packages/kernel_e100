@@ -240,7 +240,7 @@
 #define PM_HUGE_MASK	PM_64M
 #elif defined(CONFIG_PAGE_SIZE_64KB)
 #define PM_HUGE_MASK	PM_256M
-#elif defined(CONFIG_HUGETLB_PAGE)
+#elif defined(CONFIG_MIPS_HUGE_TLB_SUPPORT)
 #error Bad page size configuration for hugetlbfs!
 #endif
 
@@ -422,6 +422,16 @@
 #define ST0_XX			0x80000000	/* MIPS IV naming */
 
 /*
+ * Bitfields and bit numbers in the coprocessor 0 IntCtl register. (MIPSR2)
+ *
+ * Refer to your MIPS R4xx0 manual, chapter 5 for explanation.
+ */
+#define INTCTLB_IPPCI		26
+#define INTCTLF_IPPCI		(_ULCAST_(7) << INTCTLB_IPPCI)
+#define INTCTLB_IPTI		29
+#define INTCTLF_IPTI		(_ULCAST_(7) << INTCTLB_IPTI)
+
+/*
  * Bitfields and bit numbers in the coprocessor 0 cause register.
  *
  * Refer to your MIPS R4xx0 manual, chapter 5 for explanation.
@@ -450,6 +460,8 @@
 #define  CAUSEF_IV		(_ULCAST_(1)   << 23)
 #define  CAUSEB_CE		28
 #define  CAUSEF_CE		(_ULCAST_(3)   << 28)
+#define  CAUSEB_TI		30
+#define  CAUSEF_TI		(_ULCAST_(1)   << 30)
 #define  CAUSEB_BD		31
 #define  CAUSEF_BD		(_ULCAST_(1)   << 31)
 
@@ -604,21 +616,15 @@
  * These defines are used on Octeon to implement fast access to the
  * thread pointer from userspace. Octeon uses a 64bit location in
  * CVMSEG to store the thread pointer for quick access.
+ *
+ * TLB refill uses location -16 (and below), fast access is -8 (both
+ * from the top of the area.
  */
 #ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
-#define FAST_ACCESS_THREAD_OFFSET       (CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE * 128 - 8 - 32768)
-#define FAST_ACCESS_THREAD_REGISTER     (*(unsigned long *)(FAST_ACCESS_THREAD_OFFSET))
-#endif
-
-#if defined(CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE)
-# if CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0
-/*
- * CVMSEG starts at address -32768 and extends for
- * CAVIUM_OCTEON_CVMSEG_SIZE 128 byte cache lines.
- */
-#define TEMPORARY_SCRATCHPAD_FOR_KERNEL_OFFSET(i) \
-	(CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE * 128 - (8 * ((i) + 2)) - 32768)
-# endif
+#define FAST_ACCESS_THREAD_OFFSET			\
+	(CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE * 128 - 8 - 32768)
+#define FAST_ACCESS_THREAD_REGISTER			\
+	(*(unsigned long *)(FAST_ACCESS_THREAD_OFFSET))
 #endif
 
 #ifndef __ASSEMBLY__
@@ -931,7 +937,7 @@ do {									\
 #define write_c0_config7(val)	__write_32bit_c0_register($16, 7, val)
 
 /*
- * The WatchLo register.  There may be upto 8 of them.
+ * The WatchLo register.  There may be up to 8 of them.
  */
 #define read_c0_watchlo0()	__read_ulong_c0_register($18, 0)
 #define read_c0_watchlo1()	__read_ulong_c0_register($18, 1)
@@ -951,7 +957,7 @@ do {									\
 #define write_c0_watchlo7(val)	__write_ulong_c0_register($18, 7, val)
 
 /*
- * The WatchHi register.  There may be upto 8 of them.
+ * The WatchHi register.  There may be up to 8 of them.
  */
 #define read_c0_watchhi0()	__read_32bit_c0_register($19, 0)
 #define read_c0_watchhi1()	__read_32bit_c0_register($19, 1)
@@ -1015,18 +1021,26 @@ do {									\
 #define write_c0_perfctrl0(val)	__write_32bit_c0_register($25, 0, val)
 #define read_c0_perfcntr0()	__read_32bit_c0_register($25, 1)
 #define write_c0_perfcntr0(val)	__write_32bit_c0_register($25, 1, val)
+#define read_c0_perfcntr0_64()	__read_64bit_c0_register($25, 1)
+#define write_c0_perfcntr0_64(val) __write_64bit_c0_register($25, 1, val)
 #define read_c0_perfctrl1()	__read_32bit_c0_register($25, 2)
 #define write_c0_perfctrl1(val)	__write_32bit_c0_register($25, 2, val)
 #define read_c0_perfcntr1()	__read_32bit_c0_register($25, 3)
 #define write_c0_perfcntr1(val)	__write_32bit_c0_register($25, 3, val)
+#define read_c0_perfcntr1_64()	__read_64bit_c0_register($25, 3)
+#define write_c0_perfcntr1_64(val) __write_64bit_c0_register($25, 3, val)
 #define read_c0_perfctrl2()	__read_32bit_c0_register($25, 4)
 #define write_c0_perfctrl2(val)	__write_32bit_c0_register($25, 4, val)
 #define read_c0_perfcntr2()	__read_32bit_c0_register($25, 5)
 #define write_c0_perfcntr2(val)	__write_32bit_c0_register($25, 5, val)
+#define read_c0_perfcntr2_64()	__read_64bit_c0_register($25, 5)
+#define write_c0_perfcntr2_64(val) __write_64bit_c0_register($25, 5, val)
 #define read_c0_perfctrl3()	__read_32bit_c0_register($25, 6)
 #define write_c0_perfctrl3(val)	__write_32bit_c0_register($25, 6, val)
 #define read_c0_perfcntr3()	__read_32bit_c0_register($25, 7)
 #define write_c0_perfcntr3(val)	__write_32bit_c0_register($25, 7, val)
+#define read_c0_perfcntr3_64()	__read_64bit_c0_register($25, 7)
+#define write_c0_perfcntr3_64(val) __write_64bit_c0_register($25, 7, val)
 
 /* RM9000 PerfCount performance counter register */
 #define read_c0_perfcount()	__read_64bit_c0_register($25, 0)
@@ -1048,6 +1062,12 @@ do {									\
 
 #define read_c0_dtaglo()	__read_32bit_c0_register($28, 2)
 #define write_c0_dtaglo(val)	__write_32bit_c0_register($28, 2, val)
+
+#define read_c0_ddatalo()	__read_32bit_c0_register($28, 3)
+#define write_c0_ddatalo(val)	__write_32bit_c0_register($28, 3, val)
+
+#define read_c0_staglo()	__read_32bit_c0_register($28, 4)
+#define write_c0_staglo(val)	__write_32bit_c0_register($28, 4, val)
 
 #define read_c0_taghi()		__read_32bit_c0_register($29, 0)
 #define write_c0_taghi(val)	__write_32bit_c0_register($29, 0, val)
@@ -1090,6 +1110,51 @@ do {									\
 
 #define read_octeon_c0_dcacheerr()	__read_64bit_c0_register($27, 1)
 #define write_octeon_c0_dcacheerr(val)	__write_64bit_c0_register($27, 1, val)
+
+/* BMIPS3300 */
+#define read_c0_brcm_config_0()		__read_32bit_c0_register($22, 0)
+#define write_c0_brcm_config_0(val)	__write_32bit_c0_register($22, 0, val)
+
+#define read_c0_brcm_bus_pll()		__read_32bit_c0_register($22, 4)
+#define write_c0_brcm_bus_pll(val)	__write_32bit_c0_register($22, 4, val)
+
+#define read_c0_brcm_reset()		__read_32bit_c0_register($22, 5)
+#define write_c0_brcm_reset(val)	__write_32bit_c0_register($22, 5, val)
+
+/* BMIPS43xx */
+#define read_c0_brcm_cmt_intr()		__read_32bit_c0_register($22, 1)
+#define write_c0_brcm_cmt_intr(val)	__write_32bit_c0_register($22, 1, val)
+
+#define read_c0_brcm_cmt_ctrl()		__read_32bit_c0_register($22, 2)
+#define write_c0_brcm_cmt_ctrl(val)	__write_32bit_c0_register($22, 2, val)
+
+#define read_c0_brcm_cmt_local()	__read_32bit_c0_register($22, 3)
+#define write_c0_brcm_cmt_local(val)	__write_32bit_c0_register($22, 3, val)
+
+#define read_c0_brcm_config_1()		__read_32bit_c0_register($22, 5)
+#define write_c0_brcm_config_1(val)	__write_32bit_c0_register($22, 5, val)
+
+#define read_c0_brcm_cbr()		__read_32bit_c0_register($22, 6)
+#define write_c0_brcm_cbr(val)		__write_32bit_c0_register($22, 6, val)
+
+/* BMIPS5000 */
+#define read_c0_brcm_config()		__read_32bit_c0_register($22, 0)
+#define write_c0_brcm_config(val)	__write_32bit_c0_register($22, 0, val)
+
+#define read_c0_brcm_mode()		__read_32bit_c0_register($22, 1)
+#define write_c0_brcm_mode(val)		__write_32bit_c0_register($22, 1, val)
+
+#define read_c0_brcm_action()		__read_32bit_c0_register($22, 2)
+#define write_c0_brcm_action(val)	__write_32bit_c0_register($22, 2, val)
+
+#define read_c0_brcm_edsp()		__read_32bit_c0_register($22, 3)
+#define write_c0_brcm_edsp(val)		__write_32bit_c0_register($22, 3, val)
+
+#define read_c0_brcm_bootvec()		__read_32bit_c0_register($22, 4)
+#define write_c0_brcm_bootvec(val)	__write_32bit_c0_register($22, 4, val)
+
+#define read_c0_brcm_sleepcount()	__read_32bit_c0_register($22, 7)
+#define write_c0_brcm_sleepcount(val)	__write_32bit_c0_register($22, 7, val)
 
 /*
  * Macros to access the floating point coprocessor control registers
@@ -1617,6 +1682,13 @@ __BUILD_SET_C0(config)
 __BUILD_SET_C0(intcontrol)
 __BUILD_SET_C0(intctl)
 __BUILD_SET_C0(srsmap)
+__BUILD_SET_C0(brcm_config_0)
+__BUILD_SET_C0(brcm_bus_pll)
+__BUILD_SET_C0(brcm_reset)
+__BUILD_SET_C0(brcm_cmt_intr)
+__BUILD_SET_C0(brcm_cmt_ctrl)
+__BUILD_SET_C0(brcm_config)
+__BUILD_SET_C0(brcm_mode)
 
 #endif /* !__ASSEMBLY__ */
 

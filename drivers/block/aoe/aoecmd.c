@@ -5,6 +5,7 @@
  */
 
 #include <linux/ata.h>
+#include <linux/slab.h>
 #include <linux/hdreg.h>
 #include <linux/blkdev.h>
 #include <linux/skbuff.h>
@@ -34,6 +35,7 @@ new_skb(ulong len)
 		skb_reset_mac_header(skb);
 		skb_reset_network_header(skb);
 		skb->protocol = __constant_htons(ETH_P_AOE);
+		skb_checksum_none_assert(skb);
 	}
 	return skb;
 }
@@ -296,8 +298,8 @@ aoecmd_cfg_pkts(ushort aoemajor, unsigned char aoeminor, struct sk_buff_head *qu
 	struct sk_buff *skb;
 	struct net_device *ifp;
 
-	read_lock(&dev_base_lock);
-	for_each_netdev(&init_net, ifp) {
+	rcu_read_lock();
+	for_each_netdev_rcu(&init_net, ifp) {
 		dev_hold(ifp);
 		if (!is_aoe_netif(ifp))
 			goto cont;
@@ -324,7 +326,7 @@ aoecmd_cfg_pkts(ushort aoemajor, unsigned char aoeminor, struct sk_buff_head *qu
 cont:
 		dev_put(ifp);
 	}
-	read_unlock(&dev_base_lock);
+	rcu_read_unlock();
 }
 
 static void
@@ -735,21 +737,6 @@ diskstats(struct gendisk *disk, struct bio *bio, ulong duration, sector_t sector
 	part_stat_unlock();
 }
 
-/*
- * Ensure we don't create aliases in VI caches
- */
-static inline void
-killalias(struct bio *bio)
-{
-	struct bio_vec *bv;
-	int i;
-
-	if (bio_data_dir(bio) == READ)
-		__bio_for_each_segment(bv, bio, i, 0) {
-			flush_dcache_page(bv->bv_page);
-		}
-}
-
 void
 aoecmd_ata_rsp(struct sk_buff *skb)
 {
@@ -871,7 +858,7 @@ aoecmd_ata_rsp(struct sk_buff *skb)
 		if (buf->flags & BUFFL_FAIL)
 			bio_endio(buf->bio, -EIO);
 		else {
-			killalias(buf->bio);
+			bio_flush_dcache_pages(buf->bio);
 			bio_endio(buf->bio, 0);
 		}
 		mempool_free(buf, d->bufpool);

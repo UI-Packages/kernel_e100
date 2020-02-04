@@ -10,15 +10,13 @@
 
 #include <linux/percpu.h>
 
-struct task_struct;
-
 struct blackfin_cpudata {
 	struct cpu cpu;
-	struct task_struct *idle;
 	unsigned int imemctl;
 	unsigned int dmemctl;
-	unsigned long dcache_invld_count;
-	unsigned long icache_invld_count;
+#ifdef CONFIG_SMP
+	struct task_struct *idle;
+#endif
 };
 
 DECLARE_PER_CPU(struct blackfin_cpudata, cpu_data);

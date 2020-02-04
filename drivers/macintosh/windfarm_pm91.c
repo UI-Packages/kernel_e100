@@ -41,7 +41,6 @@
 #include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/io.h>
-#include <asm/system.h>
 #include <asm/sections.h>
 #include <asm/smu.h>
 
@@ -687,12 +686,9 @@ static int __devexit wf_smu_remove(struct platform_device *ddev)
 		wf_put_control(cpufreq_clamp);
 
 	/* Destroy control loops state structures */
-	if (wf_smu_slots_fans)
-		kfree(wf_smu_cpu_fans);
-	if (wf_smu_drive_fans)
-		kfree(wf_smu_cpu_fans);
-	if (wf_smu_cpu_fans)
-		kfree(wf_smu_cpu_fans);
+	kfree(wf_smu_slots_fans);
+	kfree(wf_smu_drive_fans);
+	kfree(wf_smu_cpu_fans);
 
 	return 0;
 }
@@ -711,7 +707,7 @@ static int __init wf_smu_init(void)
 {
 	int rc = -ENODEV;
 
-	if (machine_is_compatible("PowerMac9,1"))
+	if (of_machine_is_compatible("PowerMac9,1"))
 		rc = wf_init_pm();
 
 	if (rc == 0) {

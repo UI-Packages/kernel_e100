@@ -29,6 +29,7 @@
 #include <asm/setup.h>
 #include <asm/mach-types.h>
 #include <asm/mach/time.h>
+#include <asm/pmu.h>
 
 #include <asm/mach/arch.h>
 #include <mach/dma.h>
@@ -47,42 +48,83 @@ HW_DECLARE_SPINLOCK(gpio)
     EXPORT_SYMBOL(bcmring_gpio_reg_lock);
 #endif
 
-/* FIXME: temporary solution */
-#define BCM_SYSCTL_REBOOT_WARM               1
-#define CTL_BCM_REBOOT                 112
-
 /* sysctl */
-int bcmring_arch_warm_reboot;	/* do a warm reboot on hard reset */
+static int bcmring_arch_warm_reboot;	/* do a warm reboot on hard reset */
+
+static void bcmring_restart(char mode, const char *cmd)
+{
+	printk("arch_reset:%c %x\n", mode, bcmring_arch_warm_reboot);
+
+	if (mode == 'h') {
+		/* Reboot configured in proc entry */
+		if (bcmring_arch_warm_reboot) {
+			printk("warm reset\n");
+			/* Issue Warm reset (do not reset ethernet switch, keep alive) */
+			chipcHw_reset(chipcHw_REG_SOFT_RESET_CHIP_WARM);
+		} else {
+			/* Force reset of everything */
+			printk("force reset\n");
+			chipcHw_reset(chipcHw_REG_SOFT_RESET_CHIP_SOFT);
+		}
+	} else {
+		/* Force reset of everything */
+		printk("force reset\n");
+		chipcHw_reset(chipcHw_REG_SOFT_RESET_CHIP_SOFT);
+	}
+}
 
 static struct ctl_table_header *bcmring_sysctl_header;
 
 static struct ctl_table bcmring_sysctl_warm_reboot[] = {
 	{
-	 .ctl_name = BCM_SYSCTL_REBOOT_WARM,
 	 .procname = "warm",
 	 .data = &bcmring_arch_warm_reboot,
 	 .maxlen = sizeof(int),
 	 .mode = 0644,
-	 .proc_handler = &proc_dointvec},
+	 .proc_handler = proc_dointvec},
 	{}
 };
 
 static struct ctl_table bcmring_sysctl_reboot[] = {
 	{
-	 .ctl_name = CTL_BCM_REBOOT,
 	 .procname = "reboot",
 	 .mode = 0555,
 	 .child = bcmring_sysctl_warm_reboot},
 	{}
 };
 
+static struct resource nand_resource[] = {
+	[0] = {
+		.start = MM_ADDR_IO_NAND,
+		.end = MM_ADDR_IO_NAND + 0x1000 - 1,
+		.flags = IORESOURCE_MEM,
+	},
+};
+
 static struct platform_device nand_device = {
 	.name = "bcm-nand",
 	.id = -1,
+	.resource = nand_resource,
+	.num_resources	= ARRAY_SIZE(nand_resource),
 };
+
+static struct resource pmu_resource = {
+	.start	= IRQ_PMUIRQ,
+	.end	= IRQ_PMUIRQ,
+	.flags	= IORESOURCE_IRQ,
+};
+
+static struct platform_device pmu_device = {
+	.name		= "arm-pmu",
+	.id		= ARM_PMU_DEVICE_CPU,
+	.resource	= &pmu_resource,
+	.num_resources	= 1,
+};
+
 
 static struct platform_device *devices[] __initdata = {
 	&nand_device,
+	&pmu_device,
 };
 
 /****************************************************************************
@@ -116,8 +158,8 @@ static void __init bcmring_init_machine(void)
 *
 *****************************************************************************/
 
-static void __init bcmring_fixup(struct machine_desc *desc,
-     struct tag *t, char **cmdline, struct meminfo *mi) {
+static void __init bcmring_fixup(struct tag *t, char **cmdline,
+	struct meminfo *mi) {
 #ifdef CONFIG_BLK_DEV_INITRD
 	printk(KERN_NOTICE "bcmring_fixup\n");
 	t->hdr.tag = ATAG_CORE;
@@ -147,11 +189,11 @@ static void __init bcmring_fixup(struct machine_desc *desc,
 
 MACHINE_START(BCMRING, "BCMRING")
 	/* Maintainer: Broadcom Corporation */
-	.phys_io = MM_IO_START,
-	.io_pg_offst = (MM_IO_BASE >> 18) & 0xfffc,
 	.fixup = bcmring_fixup,
 	.map_io = bcmring_map_io,
+	.init_early = bcmring_init_early,
 	.init_irq = bcmring_init_irq,
 	.timer = &bcmring_timer,
-	.init_machine = bcmring_init_machine
+	.init_machine = bcmring_init_machine,
+	.restart = bcmring_restart,
 MACHINE_END

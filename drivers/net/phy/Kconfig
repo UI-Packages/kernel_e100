@@ -5,7 +5,7 @@
 menuconfig PHYLIB
 	tristate "PHY Device support and infrastructure"
 	depends on !S390
-	depends on NET_ETHERNET
+	depends on NETDEVICES
 	help
 	  Ethernet controllers are usually attached to PHY
 	  devices.  This option provides infrastructure for
@@ -15,11 +15,16 @@ if PHYLIB
 
 comment "MII PHY device drivers"
 
+config AMD_PHY
+	tristate "Drivers for the AMD PHYs"
+	---help---
+	  Currently supports the am79c874
+
 config MARVELL_PHY
 	tristate "Drivers for Marvell PHYs"
 	---help---
 	  Currently has a driver for the 88E1011S
-	
+
 config DAVICOM_PHY
 	tristate "Drivers for Davicom PHYs"
 	---help---
@@ -45,6 +50,12 @@ config VITESSE_PHY
         ---help---
           Currently supports the vsc8244
 
+config VSC848X_PHY
+	tristate "Drivers for the Vitesse 10G PHYs"
+	depends on OF_MEMORY_ACCESSOR
+	--help---
+	  Currently supports the vsc8488, vsc8486 and vsc8484 phys
+
 config SMSC_PHY
 	tristate "Drivers for SMSC PHYs"
 	---help---
@@ -62,10 +73,21 @@ config BCM63XX_PHY
 	---help---
 	  Currently supports the 6348 and 6358 PHYs.
 
+config BCM87XX_PHY
+	tristate "Driver for Broadcom BCM8706 and BCM8727 PHYs"
+	help
+	  Currently supports the BCM8706 and BCM8727 10G Ethernet PHYs.
+
+config CS4318_PHY
+	tristate "Driver for Cortina cs4318 quad-10G Ethernet PHY"
+	help
+	  Currently supports only the Cortina cs4318 PHY.  This may be
+	  configured as either a quad-RXAUI or dual-XAUI device.
+
 config ICPLUS_PHY
 	tristate "Drivers for ICPlus PHYs"
 	---help---
-	  Currently supports the IP175C PHY.
+	  Currently supports the IP175C and IP1001 PHYs.
 
 config REALTEK_PHY
 	tristate "Drivers for Realtek PHYs"
@@ -78,7 +100,6 @@ config NATIONAL_PHY
 	  Currently supports the DP83865 PHY.
 
 config STE10XP
-	depends on PHYLIB
 	tristate "Driver for STMicroelectronics STe10Xp PHYs"
 	---help---
 	  This is the driver for the STe100p and STe101p PHYs.
@@ -87,6 +108,11 @@ config LSI_ET1011C_PHY
 	tristate "Driver for LSI ET1011C PHY"
 	---help---
 	  Supports the LSI ET1011C PHY.
+
+config MICREL_PHY
+	tristate "Driver for Micrel PHYs"
+	---help---
+	  Supports the KSZ9021, VSC8201, KS8001 PHYs.
 
 config FIXED_PHY
 	bool "Driver for MDIO Bus/PHY emulation with fixed speed/link PHYs"
@@ -126,4 +152,26 @@ config MDIO_OCTEON
 
 	  If in doubt, say Y.
 
+config MDIO_BUS_MUX
+	tristate
+	help
+	  This module provides a driver framework for MDIO bus
+	  multiplexers which connect one of several child MDIO busses
+	  to a parent bus.  Switching between child busses is done by
+	  device specific drivers.
+
+config MDIO_BUS_MUX_GPIO
+	tristate "Support for GPIO controlled MDIO bus multiplexers"
+	depends on OF_GPIO && OF_MDIO
+	select MDIO_BUS_MUX
+	help
+	  This module provides a driver for MDIO bus multiplexers that
+	  are controlled via GPIO lines.  The multiplexer connects one of
+	  several child MDIO busses to a parent bus.  Child bus
+	  selection is under the control of GPIO lines.
+
 endif # PHYLIB
+
+config MICREL_KS8995MA
+	tristate "Micrel KS8995MA 5-ports 10/100 managed Ethernet switch"
+	depends on SPI

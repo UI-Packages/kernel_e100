@@ -24,14 +24,43 @@ console support.
 Console Support
 ---------------
 
-The serial core provides a few helper functions.  This includes identifing
-the correct port structure (via uart_get_console) and decoding command line
-arguments (uart_parse_options).
+If the driver provides the poll functions, the serial core will
+provide most of the console handling for it.  Beyond the poll
+routines, the driver must do the following:
 
-There is also a helper function (uart_write_console) which performs a
-character by character write, translating newlines to CRLF sequences.
-Driver writers are recommended to use this function rather than implementing
-their own version.
+  * #define SUPPORT_SYSRQ before including serial_core.h if the
+    console is enabled and CONFIG_MAGIC_SYSRQ is defined.
+
+  * Add the following code (replacing xxx with your driver name):
+
+#ifdef CONFIG_SERIAL_xxx_CONSOLE
+static struct console xxx_console = {
+	.name		= "ttyS"
+};
+#define xxx_CONSOLE	&xxx_console
+#else
+#define xxx_CONSOLE	NULL
+#endif
+
+
+static struct uart_driver xxx_reg
+{
+	.....
+	.cons = xxx_CONSOLE
+}
+
+static int __init xxx_polled_init(void)
+{
+	... Set up the ports to work polled at this point in time.
+
+	uart_register_polled(&xxx_reg);
+
+	return 0;
+}
+console_initcall(xxx_polled_init);
+
+This is the preferred method, as it allows the driver to work polled
+and as a console.
 
 
 Locking
@@ -101,7 +130,7 @@ hardware.
 	Returns the current state of modem control inputs.  The state
 	of the outputs should not be returned, since the core keeps
 	track of their state.  The state information should include:
-		- TIOCM_DCD	state of DCD signal
+		- TIOCM_CAR	state of DCD signal
 		- TIOCM_CTS	state of CTS signal
 		- TIOCM_DSR	state of DSR signal
 		- TIOCM_RI	state of RI signal
@@ -307,6 +336,52 @@ hardware.
 	Locking: none.
 	Interrupts: caller dependent.
 
+  poll_startup(port,&rstate)
+	Set up the port to do polling.  The driver should go into a
+	state where it can be polled with the poll() call.  It may store
+	state information in rstate (a long value); that will be passed
+	to the corresponding poll_shutdown call.   The caller
+        must call this before calling the poll routine and this is
+	called with the port lock held and interrupts off.  The caller
+	is not allowed to release the port lock or re-enable
+	interrupts until after poll_shutdown is called.
+	If polling is not implemented, this does not need to be supplied.
+
+  poll_shutdown(port,state)
+	The driver will no longer be polled.  The state information is
+	the same value return in the rstate value of poll_startup.
+	If polling is not implemented, this does not need to be supplied.
+
+  poll(port, flags)
+	Poll the device for data.  This should work much like an
+	interrupt routine, except it should only check the flags
+	passed in, not everything.  The flags are:
+		UART_POLL_FLAGS_RX - poll for received data
+		UART_POLL_FLAGS_TX - poll for transmitted data
+		UART_POLL_FLAGS_MCTRL - poll for modem control
+	The poll routine should do the "normal" thing for received
+	data and modem control.  For transmit data, it should only
+	transmit data from the circ buffer and not do any flow
+	control or whatnot.
+	If polling is not implemented, this does not need to be supplied.
+
+  in_flow_control(port)
+	This should return true if the port is in flow control (CTS
+	is not asserted) and false if not.  This is only called from
+	a poll context.
+	If polling is not implemented, this does not need to be supplied.
+
+  port_default(port,&baud,&parity,&bits,&flow)
+	Return defaults for the console serial port.  This is so firmware
+	console settings can be transferred to the serial driver and it
+	can use the same values as the firmware.  baud and bits are number
+	values.  parity is of of the following characters: 'n', 'o', 'e'.
+	flow should be 'r' to turn on cts/rts flow control, or a space
+	to do nothing.
+	If polling or serial console is not implemented, this does not
+	need to be supplied.  It function is optional, if not supplied the
+	console will default to 9600n81.
+
 Other functions
 ---------------
 
@@ -381,6 +456,20 @@ uart_resume_port()
 uart_add_one_port()
 
 uart_remove_one_port()
+
+uart_register_polled()
+	Register a driver to work as a polled driver and possibly
+	a console (if configured as such).
+
+	Locking: none
+	Interrupts: enabled
+
+uart_unregister_polled()
+	Remove a polled registration.  If the driver was a console,
+	the next console in line will be used.
+
+	Locking: none
+	Interrupts: enabled
 
 Other notes
 -----------

@@ -26,6 +26,7 @@
  */
 
 #include <linux/crc16.h>
+#include <linux/slab.h>
 #include <linux/random.h>
 #include "ubifs.h"
 

@@ -3,7 +3,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2004-2008 Cavium Networks
+ * Copyright (C) 2004 - 2012 Cavium, Inc.
  */
 #include <linux/cpu.h>
 #include <linux/init.h>
@@ -15,15 +15,11 @@
 #include <linux/module.h>
 
 #include <asm/mmu_context.h>
-#include <asm/system.h>
 #include <asm/time.h>
+#include <asm/setup.h>
 
 #include <asm/octeon/octeon.h>
-
 #include <asm/octeon/octeon-boot-info.h>
-#include <asm/octeon/cvmx-app-hotplug.h>
-
-#include <asm/octeon/cvmx-debug.h>
 
 volatile unsigned long octeon_processor_boot = 0xff;
 volatile unsigned long octeon_processor_sp;
@@ -35,18 +31,13 @@ extern void octeon_hotplug_entry(void);
 #endif
 struct cvmx_app_hotplug_global *octeon_hotplug_global_ptr;
 
-static void octeon_reschedule_self(void)
-{
-	/* Do nothing. */
-}
-
 static void octeon_icache_flush(void)
 {
 	asm volatile ("synci 0($0)\n");
 }
 
 static octeon_message_fn_t  octeon_message_functions[8] = {
-	octeon_reschedule_self,
+	scheduler_ipi,
 	smp_call_function_interrupt,
 	octeon_icache_flush,
 };
@@ -102,13 +93,24 @@ static irqreturn_t mailbox_interrupt(int irq, void *dev_id)
 	u64 action;
 	int i;
 
-	/* Make sure the function array initialization remains correct. */
+	/*
+	 * Make sure the function array initialization remains
+	 * correct.
+	 */
 	BUILD_BUG_ON(SMP_RESCHEDULE_YOURSELF != (1 << 0));
 	BUILD_BUG_ON(SMP_CALL_FUNCTION       != (1 << 1));
 	BUILD_BUG_ON(SMP_ICACHE_FLUSH        != (1 << 2));
 
-	/* Load the mailbox register to figure out what we're supposed to do */
+	/*
+	 * Load the mailbox register to figure out what we're supposed
+	 * to do.
+	 */
 	action = cvmx_read_csr(mbox_clrx);
+
+	if (OCTEON_IS_MODEL(OCTEON_CN68XX))
+		action &= 0xff;
+	else
+		action &= 0xffff;
 
 	/* Clear the mailbox to clear the interrupt */
 	cvmx_write_csr(mbox_clrx, action);
@@ -122,7 +124,6 @@ static irqreturn_t mailbox_interrupt(int irq, void *dev_id)
 		action >>= 1;
 		i++;
 	}
-
 	return IRQ_HANDLED;
 }
 
@@ -134,13 +135,14 @@ static irqreturn_t mailbox_interrupt(int irq, void *dev_id)
 void octeon_send_ipi_single(int cpu, unsigned int action)
 {
 	int coreid = cpu_logical_map(cpu);
-	/*
-	pr_info("SMP: Mailbox send cpu=%d, coreid=%d, action=%u\n", cpu,
-	       coreid, action);
-	*/
 	cvmx_write_csr(CVMX_CIU_MBOX_SETX(coreid), action);
 }
 EXPORT_SYMBOL(octeon_send_ipi_single);
+
+void core_send_ipi(int cpu, unsigned int action)
+{
+	octeon_send_ipi_single(cpu, action);
+}
 
 static inline void octeon_send_ipi_mask(const struct cpumask *mask,
 					unsigned int action)
@@ -221,7 +223,7 @@ static void octeon_smp_setup(void)
 	}
 	memset(octeon_hotplug_global_ptr, 0, CVMX_APP_HOTPLUG_INFO_REGION_SIZE);
 
-	labi = (struct linux_app_boot_info *)PHYS_TO_XKSEG_CACHED(LABI_ADDR_IN_BOOTLOADER);
+	labi = phys_to_virt(LABI_ADDR_IN_BOOTLOADER);
 	octeon_hotplug_global_ptr->avail_coremask = labi->avail_coremask;
 
 	pr_info("Cavium Hotplug: Available coremask 0x%x\n",
@@ -244,7 +246,7 @@ static void octeon_boot_secondary(int cpu, struct task_struct *idle)
 	octeon_processor_boot = cpu_logical_map(cpu);
 	mb();
 
-	count = 100000;
+	count = 10000;
 	while (octeon_processor_sp && count) {
 		/* Waiting for processor to get the SP and GP */
 		udelay(1);
@@ -258,29 +260,19 @@ static void octeon_boot_secondary(int cpu, struct task_struct *idle)
  * After we've done initial boot, this function is called to allow the
  * board code to clean up state, if needed
  */
-static void octeon_init_secondary(void)
+static void __cpuinit octeon_init_secondary(void)
 {
-	const int coreid = cvmx_get_core_num();
-	union cvmx_ciu_intx_sum0 interrupt_enable;
+	unsigned int sr;
 
+	sr = set_c0_status(ST0_BEV);
 	write_c0_ebase((u32)ebase);
+	write_c0_status(sr);
 
 	octeon_check_cpu_bist();
 	octeon_init_cvmcount();
-	/*
-	pr_info("SMP: CPU%d (CoreId %lu) started\n", cpu, coreid);
-	*/
-	/* Enable Mailbox interrupts to this core. These are the only
-	   interrupts allowed on line 3 */
-	cvmx_write_csr(CVMX_CIU_MBOX_CLRX(coreid), 0xffffffff);
-	interrupt_enable.u64 = 0;
-	interrupt_enable.s.mbox = 0x3;
-	cvmx_write_csr(CVMX_CIU_INTX_EN0((coreid * 2)), interrupt_enable.u64);
-	cvmx_write_csr(CVMX_CIU_INTX_EN0((coreid * 2 + 1)), 0);
-	cvmx_write_csr(CVMX_CIU_INTX_EN1((coreid * 2)), 0);
-	cvmx_write_csr(CVMX_CIU_INTX_EN1((coreid * 2 + 1)), 0);
-	/* Enable core interrupt processing for 2,3 and 7 */
-	set_c0_status(0x8c01);
+
+	octeon_irq_setup_secondary();
+	raw_local_irq_enable();
 }
 
 /**
@@ -289,11 +281,12 @@ static void octeon_init_secondary(void)
  */
 void octeon_prepare_cpus(unsigned int max_cpus)
 {
+	u64 mask;
 #ifdef CONFIG_HOTPLUG_CPU
 	unsigned long t;
 	struct linux_app_boot_info *labi;
 
-	labi = (struct linux_app_boot_info *)PHYS_TO_XKSEG_CACHED(LABI_ADDR_IN_BOOTLOADER);
+	labi = phys_to_virt(LABI_ADDR_IN_BOOTLOADER);
 
 	if (labi->labi_signature != LABI_SIGNATURE)
 		panic("The bootloader version on this board is incorrect.");
@@ -305,15 +298,19 @@ void octeon_prepare_cpus(unsigned int max_cpus)
 
 	octeon_hotplug_entry_addr = (uint32_t)CKSEG0ADDR(t);
 #endif
-
-	cvmx_write_csr(CVMX_CIU_MBOX_CLRX(cvmx_get_core_num()), 0xffffffff);
-	if (request_irq(OCTEON_IRQ_MBOX0, mailbox_interrupt, IRQF_DISABLED,
-			"mailbox0", mailbox_interrupt)) {
-		panic("Cannot request_irq(OCTEON_IRQ_MBOX0)\n");
-	}
-	if (request_irq(OCTEON_IRQ_MBOX1, mailbox_interrupt, IRQF_DISABLED,
-			"mailbox1", mailbox_interrupt)) {
-		panic("Cannot request_irq(OCTEON_IRQ_MBOX1)\n");
+	/*
+	 * Only the low order mailbox bits are used for IPIs, leave
+	 * the other bits alone.
+	 */
+	if (OCTEON_IS_MODEL(OCTEON_CN68XX))
+		mask = 0xff;
+	else
+		mask = 0xffff;
+	cvmx_write_csr(CVMX_CIU_MBOX_CLRX(cvmx_get_core_num()), mask);
+	if (request_irq(OCTEON_IRQ_MBOX0, mailbox_interrupt,
+			IRQF_PERCPU | IRQF_NO_THREAD, "SMP-IPI",
+			mailbox_interrupt)) {
+		panic("Cannot request_irq(OCTEON_IRQ_MBOX0)");
 	}
 }
 
@@ -360,8 +357,6 @@ DEFINE_PER_CPU(int, cpu_state);
 
 extern void fixup_irqs(void);
 
-static DEFINE_SPINLOCK(smp_reserve_lock);
-
 static int octeon_cpu_disable(void)
 {
 	unsigned int cpu = smp_processor_id();
@@ -369,15 +364,11 @@ static int octeon_cpu_disable(void)
 	if (cpu == 0)
 		return -EBUSY;
 
-	spin_lock(&smp_reserve_lock);
-
-	cpu_clear(cpu, cpu_online_map);
+	set_cpu_online(cpu, false);
 	cpu_clear(cpu, cpu_callin_map);
 	fixup_irqs();
 	flush_cache_all();
 	local_flush_tlb_all();
-
-	spin_unlock(&smp_reserve_lock);
 
 	return 0;
 }
@@ -405,7 +396,7 @@ static void octeon_cpu_die(unsigned int cpu)
 	if (!block_desc) {
 		struct linux_app_boot_info *labi;
 
-		labi = (struct linux_app_boot_info *)PHYS_TO_XKSEG_CACHED(LABI_ADDR_IN_BOOTLOADER);
+		labi = phys_to_virt(LABI_ADDR_IN_BOOTLOADER);
 
 		labi->avail_coremask |= mask;
 		new_mask = labi->avail_coremask;
@@ -415,7 +406,8 @@ static void octeon_cpu_die(unsigned int cpu)
 
 	mb();
 
-	pr_info("Reset core %d. Available Coremask = 0x%x \n", coreid, new_mask);
+	pr_info("Reset core %d. Available Coremask = 0x%x\n",
+		coreid, new_mask);
 	cvmx_write_csr(CVMX_CIU_NMI, 1 << coreid);
 }
 
@@ -439,18 +431,16 @@ static int octeon_update_boot_vector(unsigned int cpu)
 	int coreid = cpu_logical_map(cpu);
 	unsigned int avail_coremask;
 	const struct cvmx_bootmem_named_block_desc *block_desc;
-	boot_init_vector_t *boot_vect =
-		(boot_init_vector_t *) cvmx_phys_to_ptr(0x0 +
-						  BOOTLOADER_BOOT_VECTOR);
+	struct boot_init_vector *boot_vect = phys_to_virt(BOOTLOADER_BOOT_VECTOR);
 
 	block_desc = cvmx_bootmem_find_named_block(LINUX_APP_BOOT_BLOCK_NAME);
 
 	if (!block_desc) {
 		struct linux_app_boot_info *labi;
 
-		labi = (struct linux_app_boot_info *)PHYS_TO_XKSEG_CACHED(LABI_ADDR_IN_BOOTLOADER);
+		labi = phys_to_virt(LABI_ADDR_IN_BOOTLOADER);
 
-        	avail_coremask = labi->avail_coremask;
+		avail_coremask = labi->avail_coremask;
 		labi->avail_coremask &= ~(1 << coreid);
 	} else {		       /* alternative, already initialized */
 		avail_coremask = octeon_hotplug_global_ptr->avail_coremask;
@@ -492,10 +482,8 @@ static int __cpuinit octeon_cpu_callback(struct notifier_block *nfb,
 static int __cpuinit register_cavium_notifier(void)
 {
 	hotcpu_notifier(octeon_cpu_callback, 0);
-
 	return 0;
 }
-
 late_initcall(register_cavium_notifier);
 
 #endif  /* CONFIG_HOTPLUG_CPU */

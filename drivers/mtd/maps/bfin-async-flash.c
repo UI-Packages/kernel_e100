@@ -22,6 +22,7 @@
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/physmap.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include <asm/blackfin.h>
@@ -40,9 +41,6 @@ struct async_state {
 	uint32_t flash_ambctl0, flash_ambctl1;
 	uint32_t save_ambctl0, save_ambctl1;
 	unsigned long irq_flags;
-#ifdef CONFIG_MTD_PARTITIONS
-	struct mtd_partition *parts;
-#endif
 };
 
 static void switch_to_flash(struct async_state *state)
@@ -69,7 +67,7 @@ static void switch_back(struct async_state *state)
 	local_irq_restore(state->irq_flags);
 }
 
-static map_word bfin_read(struct map_info *map, unsigned long ofs)
+static map_word bfin_flash_read(struct map_info *map, unsigned long ofs)
 {
 	struct async_state *state = (struct async_state *)map->map_priv_1;
 	uint16_t word;
@@ -85,7 +83,7 @@ static map_word bfin_read(struct map_info *map, unsigned long ofs)
 	return test;
 }
 
-static void bfin_copy_from(struct map_info *map, void *to, unsigned long from, ssize_t len)
+static void bfin_flash_copy_from(struct map_info *map, void *to, unsigned long from, ssize_t len)
 {
 	struct async_state *state = (struct async_state *)map->map_priv_1;
 
@@ -96,7 +94,7 @@ static void bfin_copy_from(struct map_info *map, void *to, unsigned long from, s
 	switch_back(state);
 }
 
-static void bfin_write(struct map_info *map, map_word d1, unsigned long ofs)
+static void bfin_flash_write(struct map_info *map, map_word d1, unsigned long ofs)
 {
 	struct async_state *state = (struct async_state *)map->map_priv_1;
 	uint16_t d;
@@ -111,7 +109,7 @@ static void bfin_write(struct map_info *map, map_word d1, unsigned long ofs)
 	switch_back(state);
 }
 
-static void bfin_copy_to(struct map_info *map, unsigned long to, const void *from, ssize_t len)
+static void bfin_flash_copy_to(struct map_info *map, unsigned long to, const void *from, ssize_t len)
 {
 	struct async_state *state = (struct async_state *)map->map_priv_1;
 
@@ -123,9 +121,7 @@ static void bfin_copy_to(struct map_info *map, unsigned long to, const void *fro
 	switch_back(state);
 }
 
-#ifdef CONFIG_MTD_PARTITIONS
 static const char *part_probe_types[] = { "cmdlinepart", "RedBoot", NULL };
-#endif
 
 static int __devinit bfin_flash_probe(struct platform_device *pdev)
 {
@@ -140,12 +136,12 @@ static int __devinit bfin_flash_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	state->map.name       = DRIVER_NAME;
-	state->map.read       = bfin_read;
-	state->map.copy_from  = bfin_copy_from;
-	state->map.write      = bfin_write;
-	state->map.copy_to    = bfin_copy_to;
+	state->map.read       = bfin_flash_read;
+	state->map.copy_from  = bfin_flash_copy_from;
+	state->map.write      = bfin_flash_write;
+	state->map.copy_to    = bfin_flash_copy_to;
 	state->map.bankwidth  = pdata->width;
-	state->map.size       = memory->end - memory->start + 1;
+	state->map.size       = resource_size(memory);
 	state->map.virt       = (void __iomem *)memory->start;
 	state->map.phys       = memory->start;
 	state->map.map_priv_1 = (unsigned long)state;
@@ -168,23 +164,8 @@ static int __devinit bfin_flash_probe(struct platform_device *pdev)
 		return -ENXIO;
 	}
 
-#ifdef CONFIG_MTD_PARTITIONS
-	ret = parse_mtd_partitions(state->mtd, part_probe_types, &pdata->parts, 0);
-	if (ret > 0) {
-		pr_devinit(KERN_NOTICE DRIVER_NAME ": Using commandline partition definition\n");
-		add_mtd_partitions(state->mtd, pdata->parts, ret);
-		state->parts = pdata->parts;
-
-	} else if (pdata->nr_parts) {
-		pr_devinit(KERN_NOTICE DRIVER_NAME ": Using board partition definition\n");
-		add_mtd_partitions(state->mtd, pdata->parts, pdata->nr_parts);
-
-	} else
-#endif
-	{
-		pr_devinit(KERN_NOTICE DRIVER_NAME ": no partition info available, registering whole flash at once\n");
-		add_mtd_device(state->mtd);
-	}
+	mtd_device_parse_register(state->mtd, part_probe_types, NULL,
+				  pdata->parts, pdata->nr_parts);
 
 	platform_set_drvdata(pdev, state);
 
@@ -195,10 +176,7 @@ static int __devexit bfin_flash_remove(struct platform_device *pdev)
 {
 	struct async_state *state = platform_get_drvdata(pdev);
 	gpio_free(state->enet_flash_pin);
-#ifdef CONFIG_MTD_PARTITIONS
-	del_mtd_partitions(state->mtd);
-	kfree(state->parts);
-#endif
+	mtd_device_unregister(state->mtd);
 	map_destroy(state->mtd);
 	kfree(state);
 	return 0;
@@ -212,17 +190,7 @@ static struct platform_driver bfin_flash_driver = {
 	},
 };
 
-static int __init bfin_flash_init(void)
-{
-	return platform_driver_register(&bfin_flash_driver);
-}
-module_init(bfin_flash_init);
-
-static void __exit bfin_flash_exit(void)
-{
-	platform_driver_unregister(&bfin_flash_driver);
-}
-module_exit(bfin_flash_exit);
+module_platform_driver(bfin_flash_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("MTD map driver for Blackfins with flash/ethernet on same async bank");

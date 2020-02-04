@@ -22,9 +22,9 @@
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/prefetch.h>
-#include <asm/system.h>
 #include <asm/bootinfo.h>
 #include <asm/mipsregs.h>
+#include <asm/sections.h>
 #include <asm/mmu_context.h>
 #include <asm/cpu.h>
 #include <asm/war.h>
@@ -36,6 +36,28 @@
 #endif
 
 #include <asm/uasm.h>
+
+#ifdef CONFIG_MAPPED_KERNEL
+/* Initialized so it is not clobbered when .bss is zeroed.  */
+unsigned long phys_to_kernel_offset = 1;
+unsigned long kernel_image_end = 1;
+#endif
+
+#ifdef CONFIG_64BIT
+unsigned long __phys_addr(unsigned long x)
+{
+#ifdef CONFIG_MAPPED_KERNEL
+	if ((char *)x >= _text && (char *)x < _end)
+		return x - phys_to_kernel_offset;
+#endif
+	if (x < CKSEG0)
+		return XPHYSADDR(x);
+	if (x < CKSSEG)
+		return CPHYSADDR(x);
+	BUG();
+}
+EXPORT_SYMBOL(__phys_addr);
+#endif /* CONFIG_64BIT */
 
 /* Registers used in the assembled routines. */
 #define ZERO 0
@@ -727,9 +749,3 @@ void copy_page(void *to, void *from)
 }
 
 #endif /* CONFIG_SIBYTE_DMA_PAGEOPS */
-
-#ifdef CONFIG_MAPPED_KERNEL
-/* Initialized so it is not clobbered when .bss is zeroed.  */
-unsigned long phys_to_kernel_offset = 1;
-unsigned long kernel_image_end = 1;
-#endif

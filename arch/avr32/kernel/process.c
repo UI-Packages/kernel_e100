@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 #include <linux/pm.h>
 #include <linux/ptrace.h>
+#include <linux/slab.h>
 #include <linux/reboot.h>
 #include <linux/tick.h>
 #include <linux/uaccess.h>
@@ -33,13 +34,13 @@ void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
 	while (1) {
-		tick_nohz_stop_sched_tick(1);
+		tick_nohz_idle_enter();
+		rcu_idle_enter();
 		while (!need_resched())
 			cpu_idle_sleep();
-		tick_nohz_restart_sched_tick();
-		preempt_enable_no_resched();
-		schedule();
-		preempt_disable();
+		rcu_idle_exit();
+		tick_nohz_idle_exit();
+		schedule_preempt_disabled();
 	}
 }
 
@@ -366,14 +367,13 @@ asmlinkage int sys_fork(struct pt_regs *regs)
 }
 
 asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp,
-			 unsigned long parent_tidptr,
-			 unsigned long child_tidptr, struct pt_regs *regs)
+		void __user *parent_tidptr, void __user *child_tidptr,
+		struct pt_regs *regs)
 {
 	if (!newsp)
 		newsp = regs->sp;
-	return do_fork(clone_flags, newsp, regs, 0,
-		       (int __user *)parent_tidptr,
-		       (int __user *)child_tidptr);
+	return do_fork(clone_flags, newsp, regs, 0, parent_tidptr,
+			child_tidptr);
 }
 
 asmlinkage int sys_vfork(struct pt_regs *regs)
@@ -382,8 +382,10 @@ asmlinkage int sys_vfork(struct pt_regs *regs)
 		       0, NULL, NULL);
 }
 
-asmlinkage int sys_execve(char __user *ufilename, char __user *__user *uargv,
-			  char __user *__user *uenvp, struct pt_regs *regs)
+asmlinkage int sys_execve(const char __user *ufilename,
+			  const char __user *const __user *uargv,
+			  const char __user *const __user *uenvp,
+			  struct pt_regs *regs)
 {
 	int error;
 	char *filename;

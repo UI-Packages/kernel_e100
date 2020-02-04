@@ -23,12 +23,12 @@
 #include <linux/signal.h>
 #include <linux/regset.h>
 #include <linux/tracehook.h>
+#include <trace/syscall.h>
 #include <linux/compat.h>
 #include <linux/elf.h>
 
 #include <asm/asi.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/psrcompat.h>
 #include <asm/visasm.h>
@@ -36,6 +36,9 @@
 #include <asm/page.h>
 #include <asm/cpudata.h>
 #include <asm/cacheflush.h>
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/syscalls.h>
 
 #include "entry.h"
 
@@ -488,6 +491,7 @@ static int genregs32_get(struct task_struct *target,
 			*k++ = regs->u_regs[pos++];
 
 		reg_window = (compat_ulong_t __user *) regs->u_regs[UREG_I6];
+		reg_window -= 16;
 		if (target == current) {
 			for (; count > 0 && pos < 32; count--) {
 				if (get_user(*k++, &reg_window[pos++]))
@@ -512,6 +516,7 @@ static int genregs32_get(struct task_struct *target,
 		}
 
 		reg_window = (compat_ulong_t __user *) regs->u_regs[UREG_I6];
+		reg_window -= 16;
 		if (target == current) {
 			for (; count > 0 && pos < 32; count--) {
 				if (get_user(reg, &reg_window[pos++]) ||
@@ -595,6 +600,7 @@ static int genregs32_set(struct task_struct *target,
 			regs->u_regs[pos++] = *k++;
 
 		reg_window = (compat_ulong_t __user *) regs->u_regs[UREG_I6];
+		reg_window -= 16;
 		if (target == current) {
 			for (; count > 0 && pos < 32; count--) {
 				if (put_user(*k++, &reg_window[pos++]))
@@ -621,6 +627,7 @@ static int genregs32_set(struct task_struct *target,
 		}
 
 		reg_window = (compat_ulong_t __user *) regs->u_regs[UREG_I6];
+		reg_window -= 16;
 		if (target == current) {
 			for (; count > 0 && pos < 32; count--) {
 				if (get_user(reg, u++) ||
@@ -961,16 +968,19 @@ struct fps {
 	unsigned long fsr;
 };
 
-long arch_ptrace(struct task_struct *child, long request, long addr, long data)
+long arch_ptrace(struct task_struct *child, long request,
+		 unsigned long addr, unsigned long data)
 {
 	const struct user_regset_view *view = task_user_regset_view(current);
 	unsigned long addr2 = task_pt_regs(current)->u_regs[UREG_I4];
 	struct pt_regs __user *pregs;
 	struct fps __user *fps;
+	void __user *addr2p;
 	int ret;
 
-	pregs = (struct pt_regs __user *) (unsigned long) addr;
-	fps = (struct fps __user *) (unsigned long) addr;
+	pregs = (struct pt_regs __user *) addr;
+	fps = (struct fps __user *) addr;
+	addr2p = (void __user *) addr2;
 
 	switch (request) {
 	case PTRACE_PEEKUSR:
@@ -1021,8 +1031,7 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 
 	case PTRACE_READTEXT:
 	case PTRACE_READDATA:
-		ret = ptrace_readdata(child, addr,
-				      (char __user *)addr2, data);
+		ret = ptrace_readdata(child, addr, addr2p, data);
 		if (ret == data)
 			ret = 0;
 		else if (ret >= 0)
@@ -1031,8 +1040,7 @@ long arch_ptrace(struct task_struct *child, long request, long addr, long data)
 
 	case PTRACE_WRITETEXT:
 	case PTRACE_WRITEDATA:
-		ret = ptrace_writedata(child, (char __user *) addr2,
-				       addr, data);
+		ret = ptrace_writedata(child, addr2p, addr, data);
 		if (ret == data)
 			ret = 0;
 		else if (ret >= 0)
@@ -1059,30 +1067,27 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
 	if (test_thread_flag(TIF_SYSCALL_TRACE))
 		ret = tracehook_report_syscall_entry(regs);
 
-	if (unlikely(current->audit_context) && !ret)
-		audit_syscall_entry((test_thread_flag(TIF_32BIT) ?
-				     AUDIT_ARCH_SPARC :
-				     AUDIT_ARCH_SPARC64),
-				    regs->u_regs[UREG_G1],
-				    regs->u_regs[UREG_I0],
-				    regs->u_regs[UREG_I1],
-				    regs->u_regs[UREG_I2],
-				    regs->u_regs[UREG_I3]);
+	if (unlikely(test_thread_flag(TIF_SYSCALL_TRACEPOINT)))
+		trace_sys_enter(regs, regs->u_regs[UREG_G1]);
+
+	audit_syscall_entry((test_thread_flag(TIF_32BIT) ?
+			     AUDIT_ARCH_SPARC :
+			     AUDIT_ARCH_SPARC64),
+			    regs->u_regs[UREG_G1],
+			    regs->u_regs[UREG_I0],
+			    regs->u_regs[UREG_I1],
+			    regs->u_regs[UREG_I2],
+			    regs->u_regs[UREG_I3]);
 
 	return ret;
 }
 
 asmlinkage void syscall_trace_leave(struct pt_regs *regs)
 {
-	if (unlikely(current->audit_context)) {
-		unsigned long tstate = regs->tstate;
-		int result = AUDITSC_SUCCESS;
+	audit_syscall_exit(regs);
 
-		if (unlikely(tstate & (TSTATE_XCARRY | TSTATE_ICARRY)))
-			result = AUDITSC_FAILURE;
-
-		audit_syscall_exit(result, regs->u_regs[UREG_I0]);
-	}
+	if (unlikely(test_thread_flag(TIF_SYSCALL_TRACEPOINT)))
+		trace_sys_exit(regs, regs->u_regs[UREG_G1]);
 
 	if (test_thread_flag(TIF_SYSCALL_TRACE))
 		tracehook_report_syscall_exit(regs, 0);

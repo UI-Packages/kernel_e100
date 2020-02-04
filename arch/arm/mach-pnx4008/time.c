@@ -24,11 +24,12 @@
 #include <linux/irq.h>
 #include <linux/io.h>
 
-#include <asm/system.h>
 #include <mach/hardware.h>
 #include <asm/leds.h>
 #include <asm/mach/time.h>
 #include <asm/errno.h>
+
+#include "time.h"
 
 /*! Note: all timers are UPCOUNTING */
 

@@ -13,7 +13,10 @@
 #include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/ipc.h>
+#include <linux/msg.h>
 #include <linux/ipc_namespace.h>
+#include <linux/utsname.h>
+#include <linux/proc_fs.h>
 #include <asm/uaccess.h>
 
 #include "util.h"
@@ -27,11 +30,8 @@ DEFINE_SPINLOCK(mq_lock);
  */
 struct ipc_namespace init_ipc_ns = {
 	.count		= ATOMIC_INIT(1),
-#ifdef CONFIG_POSIX_MQUEUE
-	.mq_queues_max   = DFLT_QUEUESMAX,
-	.mq_msg_max      = DFLT_MSGMAX,
-	.mq_msgsize_max  = DFLT_MSGSIZEMAX,
-#endif
+	.user_ns = &init_user_ns,
+	.proc_inum = PROC_IPC_INIT_INO,
 };
 
 atomic_t nr_ipc_ns = ATOMIC_INIT(1);

@@ -82,6 +82,7 @@ static int sp_stopping;
 #define MTSP_O_SHLOCK		0x0010
 #define MTSP_O_EXLOCK		0x0020
 #define MTSP_O_ASYNC		0x0040
+/* XXX: check which of these is actually O_SYNC vs O_DSYNC */
 #define MTSP_O_FSYNC		O_SYNC
 #define MTSP_O_NOFOLLOW		0x0100
 #define MTSP_O_SYNC		0x0080
@@ -250,7 +251,7 @@ void sp_work_handle_request(void)
  		memset(&tz, 0, sizeof(tz));
  		if ((ret.retval = sp_syscall(__NR_gettimeofday, (int)&tv,
 					     (int)&tz, 0, 0)) == 0)
-		ret.retval = tv.tv_sec;
+			ret.retval = tv.tv_sec;
 		break;
 
  	case MTSP_SYSCALL_EXIT:
@@ -322,10 +323,10 @@ static void sp_cleanup(void)
 	fdt = files_fdtable(files);
 	for (;;) {
 		unsigned long set;
-		i = j * __NFDBITS;
+		i = j * BITS_PER_LONG;
 		if (i >= fdt->max_fds)
 			break;
-		set = fdt->open_fds->fds_bits[j++];
+		set = fdt->open_fds[j++];
 		while (set) {
 			if (set & 1) {
 				struct file * file = xchg(&fdt->fd[i], NULL);

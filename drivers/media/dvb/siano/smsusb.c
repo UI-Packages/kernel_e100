@@ -23,6 +23,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <linux/init.h>
 #include <linux/usb.h>
 #include <linux/firmware.h>
+#include <linux/slab.h>
+#include <linux/module.h>
 
 #include "smscoreapi.h"
 #include "sms-cards.h"
@@ -287,8 +289,7 @@ static int smsusb1_setmode(void *context, int mode)
 
 static void smsusb_term_device(struct usb_interface *intf)
 {
-	struct smsusb_device_t *dev =
-		(struct smsusb_device_t *) usb_get_intfdata(intf);
+	struct smsusb_device_t *dev = usb_get_intfdata(intf);
 
 	if (dev) {
 		smsusb_stop_streaming(dev);
@@ -297,9 +298,8 @@ static void smsusb_term_device(struct usb_interface *intf)
 		if (dev->coredev)
 			smscore_unregister_device(dev->coredev);
 
-		kfree(dev);
-
 		sms_info("device %p destroyed", dev);
+		kfree(dev);
 	}
 
 	usb_set_intfdata(intf, NULL);
@@ -351,8 +351,7 @@ static int smsusb_init_device(struct usb_interface *intf, int board_id)
 	params.num_buffers = MAX_BUFFERS;
 	params.sendrequest_handler = smsusb_sendrequest;
 	params.context = dev;
-	snprintf(params.devpath, sizeof(params.devpath),
-		 "usb\\%d-%s", dev->udev->bus->busnum, dev->udev->devpath);
+	usb_make_path(dev->udev, params.devpath, sizeof(params.devpath));
 
 	/* register in smscore */
 	rc = smscore_register_device(&params, &dev->coredev);
@@ -390,7 +389,7 @@ static int smsusb_init_device(struct usb_interface *intf, int board_id)
 	return rc;
 }
 
-static int smsusb_probe(struct usb_interface *intf,
+static int __devinit smsusb_probe(struct usb_interface *intf,
 			const struct usb_device_id *id)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
@@ -445,8 +444,7 @@ static void smsusb_disconnect(struct usb_interface *intf)
 
 static int smsusb_suspend(struct usb_interface *intf, pm_message_t msg)
 {
-	struct smsusb_device_t *dev =
-		(struct smsusb_device_t *)usb_get_intfdata(intf);
+	struct smsusb_device_t *dev = usb_get_intfdata(intf);
 	printk(KERN_INFO "%s: Entering status %d.\n", __func__, msg.event);
 	smsusb_stop_streaming(dev);
 	return 0;
@@ -455,8 +453,7 @@ static int smsusb_suspend(struct usb_interface *intf, pm_message_t msg)
 static int smsusb_resume(struct usb_interface *intf)
 {
 	int rc, i;
-	struct smsusb_device_t *dev =
-		(struct smsusb_device_t *)usb_get_intfdata(intf);
+	struct smsusb_device_t *dev = usb_get_intfdata(intf);
 	struct usb_device *udev = interface_to_usbdev(intf);
 
 	printk(KERN_INFO "%s: Entering.\n", __func__);
@@ -484,7 +481,7 @@ static int smsusb_resume(struct usb_interface *intf)
 	return 0;
 }
 
-struct usb_device_id smsusb_id_table[] = {
+static const struct usb_device_id smsusb_id_table[] = {
 	{ USB_DEVICE(0x187f, 0x0010),
 		.driver_info = SMS1XXX_BOARD_SIANO_STELLAR },
 	{ USB_DEVICE(0x187f, 0x0100),
@@ -545,6 +542,10 @@ struct usb_device_id smsusb_id_table[] = {
 		.driver_info = SMS1XXX_BOARD_HAUPPAUGE_WINDHAM },
 	{ USB_DEVICE(0x2040, 0xc090),
 		.driver_info = SMS1XXX_BOARD_HAUPPAUGE_WINDHAM },
+	{ USB_DEVICE(0x2040, 0xc0a0),
+		.driver_info = SMS1XXX_BOARD_HAUPPAUGE_WINDHAM },
+	{ USB_DEVICE(0x2040, 0xf5a0),
+		.driver_info = SMS1XXX_BOARD_HAUPPAUGE_WINDHAM },
 	{ } /* Terminating entry */
 	};
 
@@ -560,26 +561,7 @@ static struct usb_driver smsusb_driver = {
 	.resume			= smsusb_resume,
 };
 
-int smsusb_module_init(void)
-{
-	int rc = usb_register(&smsusb_driver);
-	if (rc)
-		sms_err("usb_register failed. Error number %d", rc);
-
-	sms_debug("");
-
-	return rc;
-}
-
-void smsusb_module_exit(void)
-{
-	/* Regular USB Cleanup */
-	usb_deregister(&smsusb_driver);
-	sms_info("end");
-}
-
-module_init(smsusb_module_init);
-module_exit(smsusb_module_exit);
+module_usb_driver(smsusb_driver);
 
 MODULE_DESCRIPTION("Driver for the Siano SMS1xxx USB dongle");
 MODULE_AUTHOR("Siano Mobile Silicon, INC. (uris@siano-ms.com)");

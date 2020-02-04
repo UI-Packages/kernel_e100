@@ -821,7 +821,7 @@ static const struct {
 };
 
 static bool
-ipp2p_mt(const struct sk_buff *skb, const struct xt_match_param *par)
+ipp2p_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	const struct ipt_p2p_info *info = par->matchinfo;
 	const unsigned char  *haystack;
@@ -830,7 +830,7 @@ ipp2p_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 	int i = 0;
 	unsigned int hlen = ntohs(ip->tot_len) - ip_hdrlen(skb);	/* hlen = packet-data length */
 
-	*par->cvm_reserved |= SKB_CVM_RESERVED_1;
+	par->cvm_reserved |= SKB_CVM_RESERVED_1;
 
 	/* must not be a fragment */
 	if (par->fragoff != 0) {
@@ -872,8 +872,10 @@ ipp2p_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 				p2p_result = matchlist[i].function_name(haystack, hlen);
 				if (p2p_result)	{
 					if (info->debug)
-						printk("IPP2P.debug:TCP-match: %i from: %u.%u.%u.%u:%i to: %u.%u.%u.%u:%i Length: %i\n",
-						       p2p_result, NIPQUAD(ip->saddr),ntohs(tcph->source), NIPQUAD(ip->daddr),ntohs(tcph->dest),hlen);
+						printk("IPP2P.debug:TCP-match: %i from: %pI4:%i "
+						       "to: %pI4:%i Length: %i\n", p2p_result,
+						       &(ip->saddr), ntohs(tcph->source),
+						       &(ip->daddr), ntohs(tcph->dest), hlen);
 					return p2p_result;
 				}
 			}
@@ -903,8 +905,10 @@ ipp2p_mt(const struct sk_buff *skb, const struct xt_match_param *par)
 				p2p_result = udp_list[i].function_name(haystack, hlen);
 				if (p2p_result) {
 					if (info->debug)
-						printk("IPP2P.debug:UDP-match: %i from: %u.%u.%u.%u:%i to: %u.%u.%u.%u:%i Length: %i\n",
-						       p2p_result, NIPQUAD(ip->saddr), ntohs(udph->source), NIPQUAD(ip->daddr), ntohs(udph->dest), hlen);
+						printk("IPP2P.debug:UDP-match: %i from: %pI4:%i "
+						       "to: %pI4:%i Length: %i\n", p2p_result,
+						       &(ip->saddr), ntohs(udph->source),
+						       &(ip->daddr), ntohs(udph->dest), hlen);
 					return p2p_result;
 				}
 			}

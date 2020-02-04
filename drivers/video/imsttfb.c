@@ -21,7 +21,6 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -750,7 +749,7 @@ set_offset (struct fb_var_screeninfo *var, struct fb_info *info)
 {
 	struct imstt_par *par = info->par;
 	__u32 off = var->yoffset * (info->fix.line_length >> 3)
-		    + ((var->xoffset * (var->bits_per_pixel >> 3)) >> 3);
+		    + ((var->xoffset * (info->var.bits_per_pixel >> 3)) >> 3);
 	write_reg_le32(par->dc_regs, SSR, off);
 }
 

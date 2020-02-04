@@ -30,7 +30,9 @@
  */
 #include <linux/kernel.h>
 #include <linux/err.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
+#include <linux/export.h>
 
 #include "uwb-internal.h"
 
@@ -51,7 +53,7 @@ const char *__strerror[] = {
 	"cancelled",
 	"invalid state",
 	"invalid size",
-	"ack not recieved",
+	"ack not received",
 	"no more asie notification",
 };
 

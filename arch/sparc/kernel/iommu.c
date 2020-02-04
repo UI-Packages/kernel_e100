@@ -5,12 +5,14 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/errno.h>
 #include <linux/iommu-helper.h>
+#include <linux/bitmap.h>
 
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
@@ -169,7 +171,7 @@ void iommu_range_free(struct iommu *iommu, dma_addr_t dma_addr, unsigned long np
 
 	entry = (dma_addr - iommu->page_table_map_base) >> IO_PAGE_SHIFT;
 
-	iommu_area_free(arena->map, entry, npages);
+	bitmap_clear(arena->map, entry, npages);
 }
 
 int iommu_table_init(struct iommu *iommu, int tsbsize,
@@ -253,10 +255,9 @@ static inline iopte_t *alloc_npages(struct device *dev, struct iommu *iommu,
 static int iommu_alloc_ctx(struct iommu *iommu)
 {
 	int lowest = iommu->ctx_lowest_free;
-	int sz = IOMMU_NUM_CTXS - lowest;
-	int n = find_next_zero_bit(iommu->ctx_bitmap, sz, lowest);
+	int n = find_next_zero_bit(iommu->ctx_bitmap, IOMMU_NUM_CTXS, lowest);
 
-	if (unlikely(n == sz)) {
+	if (unlikely(n == IOMMU_NUM_CTXS)) {
 		n = find_next_zero_bit(iommu->ctx_bitmap, lowest, 1);
 		if (unlikely(n == lowest)) {
 			printk(KERN_WARNING "IOMMU: Ran out of contexts.\n");
@@ -279,7 +280,8 @@ static inline void iommu_free_ctx(struct iommu *iommu, int ctx)
 }
 
 static void *dma_4u_alloc_coherent(struct device *dev, size_t size,
-				   dma_addr_t *dma_addrp, gfp_t gfp)
+				   dma_addr_t *dma_addrp, gfp_t gfp,
+				   struct dma_attrs *attrs)
 {
 	unsigned long flags, order, first_page;
 	struct iommu *iommu;
@@ -329,16 +331,14 @@ static void *dma_4u_alloc_coherent(struct device *dev, size_t size,
 }
 
 static void dma_4u_free_coherent(struct device *dev, size_t size,
-				 void *cpu, dma_addr_t dvma)
+				 void *cpu, dma_addr_t dvma,
+				 struct dma_attrs *attrs)
 {
 	struct iommu *iommu;
-	iopte_t *iopte;
 	unsigned long flags, order, npages;
 
 	npages = IO_PAGE_ALIGN(size) >> IO_PAGE_SHIFT;
 	iommu = dev->archdata.iommu;
-	iopte = iommu->page_table +
-		((dvma - iommu->page_table_map_base) >> IO_PAGE_SHIFT);
 
 	spin_lock_irqsave(&iommu->lock, flags);
 
@@ -827,8 +827,8 @@ static void dma_4u_sync_sg_for_cpu(struct device *dev,
 }
 
 static struct dma_map_ops sun4u_dma_ops = {
-	.alloc_coherent		= dma_4u_alloc_coherent,
-	.free_coherent		= dma_4u_free_coherent,
+	.alloc			= dma_4u_alloc_coherent,
+	.free			= dma_4u_free_coherent,
 	.map_page		= dma_4u_map_page,
 	.unmap_page		= dma_4u_unmap_page,
 	.map_sg			= dma_4u_map_sg,
@@ -861,13 +861,3 @@ int dma_supported(struct device *dev, u64 device_mask)
 	return 0;
 }
 EXPORT_SYMBOL(dma_supported);
-
-int dma_set_mask(struct device *dev, u64 dma_mask)
-{
-#ifdef CONFIG_PCI
-	if (dev->bus == &pci_bus_type)
-		return pci_set_dma_mask(to_pci_dev(dev), dma_mask);
-#endif
-	return -EINVAL;
-}
-EXPORT_SYMBOL(dma_set_mask);

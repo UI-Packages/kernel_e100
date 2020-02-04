@@ -35,7 +35,7 @@
 #include <linux/moduleparam.h>
 #include <linux/ipmi.h>
 #include <linux/ipmi_smi.h>
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
 #include <linux/watchdog.h>
 #include <linux/miscdevice.h>
 #include <linux/init.h>
@@ -52,7 +52,7 @@
 #include <linux/string.h>
 #include <linux/ctype.h>
 #include <linux/delay.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #ifdef CONFIG_X86
 /*
@@ -65,6 +65,7 @@
  * mechanism for it at that time.
  */
 #include <asm/kdebug.h>
+#include <asm/nmi.h>
 #define HAVE_DIE_NMI
 #endif
 
@@ -138,6 +139,8 @@
 #define IPMI_WDOG_SET_TIMER		0x24
 #define IPMI_WDOG_GET_TIMER		0x25
 
+#define IPMI_WDOG_TIMER_NOT_INIT_RESP	0x80
+
 /* These are here until the real ones get into the watchdog.h interface. */
 #ifndef WDIOC_GETTIMEOUT
 #define	WDIOC_GETTIMEOUT        _IOW(WATCHDOG_IOCTL_BASE, 20, int)
@@ -149,7 +152,8 @@
 #define	WDIOC_GET_PRETIMEOUT     _IOW(WATCHDOG_IOCTL_BASE, 22, int)
 #endif
 
-static int nowayout = WATCHDOG_NOWAYOUT;
+static DEFINE_MUTEX(ipmi_watchdog_mutex);
+static bool nowayout = WATCHDOG_NOWAYOUT;
 
 static ipmi_user_t watchdog_user;
 static int watchdog_ifnum;
@@ -196,7 +200,7 @@ static void ipmi_unregister_watchdog(int ipmi_intf);
  */
 static int start_now;
 
-static int set_param_int(const char *val, struct kernel_param *kp)
+static int set_param_timeout(const char *val, const struct kernel_param *kp)
 {
 	char *endp;
 	int  l;
@@ -215,10 +219,11 @@ static int set_param_int(const char *val, struct kernel_param *kp)
 	return rv;
 }
 
-static int get_param_int(char *buffer, struct kernel_param *kp)
-{
-	return sprintf(buffer, "%i", *((int *)kp->arg));
-}
+static struct kernel_param_ops param_ops_timeout = {
+	.set = set_param_timeout,
+	.get = param_get_int,
+};
+#define param_check_timeout param_check_int
 
 typedef int (*action_fn)(const char *intval, char *outval);
 
@@ -227,7 +232,7 @@ static int preaction_op(const char *inval, char *outval);
 static int preop_op(const char *inval, char *outval);
 static void check_parms(void);
 
-static int set_param_str(const char *val, struct kernel_param *kp)
+static int set_param_str(const char *val, const struct kernel_param *kp)
 {
 	action_fn  fn = (action_fn) kp->arg;
 	int        rv = 0;
@@ -251,7 +256,7 @@ static int set_param_str(const char *val, struct kernel_param *kp)
 	return rv;
 }
 
-static int get_param_str(char *buffer, struct kernel_param *kp)
+static int get_param_str(char *buffer, const struct kernel_param *kp)
 {
 	action_fn fn = (action_fn) kp->arg;
 	int       rv;
@@ -263,7 +268,7 @@ static int get_param_str(char *buffer, struct kernel_param *kp)
 }
 
 
-static int set_param_wdog_ifnum(const char *val, struct kernel_param *kp)
+static int set_param_wdog_ifnum(const char *val, const struct kernel_param *kp)
 {
 	int rv = param_set_int(val, kp);
 	if (rv)
@@ -276,27 +281,38 @@ static int set_param_wdog_ifnum(const char *val, struct kernel_param *kp)
 	return 0;
 }
 
-module_param_call(ifnum_to_use, set_param_wdog_ifnum, get_param_int,
-		  &ifnum_to_use, 0644);
+static struct kernel_param_ops param_ops_wdog_ifnum = {
+	.set = set_param_wdog_ifnum,
+	.get = param_get_int,
+};
+
+#define param_check_wdog_ifnum param_check_int
+
+static struct kernel_param_ops param_ops_str = {
+	.set = set_param_str,
+	.get = get_param_str,
+};
+
+module_param(ifnum_to_use, wdog_ifnum, 0644);
 MODULE_PARM_DESC(ifnum_to_use, "The interface number to use for the watchdog "
 		 "timer.  Setting to -1 defaults to the first registered "
 		 "interface");
 
-module_param_call(timeout, set_param_int, get_param_int, &timeout, 0644);
+module_param(timeout, timeout, 0644);
 MODULE_PARM_DESC(timeout, "Timeout value in seconds.");
 
-module_param_call(pretimeout, set_param_int, get_param_int, &pretimeout, 0644);
+module_param(pretimeout, timeout, 0644);
 MODULE_PARM_DESC(pretimeout, "Pretimeout value in seconds.");
 
-module_param_call(action, set_param_str, get_param_str, action_op, 0644);
+module_param_cb(action, &param_ops_str, action_op, 0644);
 MODULE_PARM_DESC(action, "Timeout action. One of: "
 		 "reset, none, power_cycle, power_off.");
 
-module_param_call(preaction, set_param_str, get_param_str, preaction_op, 0644);
+module_param_cb(preaction, &param_ops_str, preaction_op, 0644);
 MODULE_PARM_DESC(preaction, "Pretimeout action.  One of: "
 		 "pre_none, pre_smi, pre_nmi, pre_int.");
 
-module_param_call(preop, set_param_str, get_param_str, preop_op, 0644);
+module_param_cb(preop, &param_ops_str, preop_op, 0644);
 MODULE_PARM_DESC(preop, "Pretimeout driver operation.  One of: "
 		 "preop_none, preop_panic, preop_give_data.");
 
@@ -304,7 +320,7 @@ module_param(start_now, int, 0444);
 MODULE_PARM_DESC(start_now, "Set to 1 to start the watchdog as"
 		 "soon as the driver is loaded.");
 
-module_param(nowayout, int, 0644);
+module_param(nowayout, bool, 0644);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started "
 		 "(default=CONFIG_WATCHDOG_NOWAYOUT)");
 
@@ -504,6 +520,7 @@ static void panic_halt_ipmi_heartbeat(void)
 	msg.cmd = IPMI_WDOG_RESET_TIMER;
 	msg.data = NULL;
 	msg.data_len = 0;
+	atomic_add(2, &panic_done_count);
 	rv = ipmi_request_supply_msgs(watchdog_user,
 				      (struct ipmi_addr *) &addr,
 				      0,
@@ -512,8 +529,8 @@ static void panic_halt_ipmi_heartbeat(void)
 				      &panic_halt_heartbeat_smi_msg,
 				      &panic_halt_heartbeat_recv_msg,
 				      1);
-	if (!rv)
-		atomic_add(2, &panic_done_count);
+	if (rv)
+		atomic_sub(2, &panic_done_count);
 }
 
 static struct ipmi_smi_msg panic_halt_smi_msg = {
@@ -537,18 +554,36 @@ static void panic_halt_ipmi_set_timeout(void)
 	/* Wait for the messages to be free. */
 	while (atomic_read(&panic_done_count) != 0)
 		ipmi_poll_interface(watchdog_user);
+	atomic_add(2, &panic_done_count);
 	rv = i_ipmi_set_timeout(&panic_halt_smi_msg,
 				&panic_halt_recv_msg,
 				&send_heartbeat_now);
-	if (!rv) {
-		atomic_add(2, &panic_done_count);
-		if (send_heartbeat_now)
-			panic_halt_ipmi_heartbeat();
-	} else
+	if (rv) {
+		atomic_sub(2, &panic_done_count);
 		printk(KERN_WARNING PFX
 		       "Unable to extend the watchdog timeout.");
+	} else {
+		if (send_heartbeat_now)
+			panic_halt_ipmi_heartbeat();
+	}
 	while (atomic_read(&panic_done_count) != 0)
 		ipmi_poll_interface(watchdog_user);
+}
+
+/*
+ * Do a delayed shutdown, with the delay in milliseconds.  If power_off is
+ * false, do a reset.  If power_off is true, do a power down.  This is
+ * primarily for the IMB code's shutdown.
+ */
+void ipmi_delayed_shutdown(long delay, int power_off)
+{
+	ipmi_ignore_heartbeat = 1;
+	if (power_off)
+		ipmi_watchdog_state = WDOG_TIMEOUT_POWER_DOWN;
+	else
+		ipmi_watchdog_state = WDOG_TIMEOUT_RESET;
+	timeout = delay;
+	ipmi_set_timeout(IPMI_SET_TIMEOUT_HB_IF_NECESSARY);
 }
 
 /*
@@ -582,6 +617,7 @@ static int ipmi_heartbeat(void)
 	struct kernel_ipmi_msg            msg;
 	int                               rv;
 	struct ipmi_system_interface_addr addr;
+	int				  timeout_retries = 0;
 
 	if (ipmi_ignore_heartbeat)
 		return 0;
@@ -602,6 +638,7 @@ static int ipmi_heartbeat(void)
 
 	mutex_lock(&heartbeat_lock);
 
+restart:
 	atomic_set(&heartbeat_tofree, 2);
 
 	/*
@@ -639,7 +676,33 @@ static int ipmi_heartbeat(void)
 	/* Wait for the heartbeat to be sent. */
 	wait_for_completion(&heartbeat_wait);
 
-	if (heartbeat_recv_msg.msg.data[0] != 0) {
+	if (heartbeat_recv_msg.msg.data[0] == IPMI_WDOG_TIMER_NOT_INIT_RESP)  {
+		timeout_retries++;
+		if (timeout_retries > 3) {
+			printk(KERN_ERR PFX ": Unable to restore the IPMI"
+			       " watchdog's settings, giving up.\n");
+			rv = -EIO;
+			goto out_unlock;
+		}
+
+		/*
+		 * The timer was not initialized, that means the BMC was
+		 * probably reset and lost the watchdog information.  Attempt
+		 * to restore the timer's info.  Note that we still hold
+		 * the heartbeat lock, to keep a heartbeat from happening
+		 * in this process, so must say no heartbeat to avoid a
+		 * deadlock on this mutex.
+		 */
+		rv = ipmi_set_timeout(IPMI_SET_TIMEOUT_NO_HB);
+		if (rv) {
+			printk(KERN_ERR PFX ": Unable to send the command to"
+			       " set the watchdog's settings, giving up.\n");
+			goto out_unlock;
+		}
+
+		/* We might need a new heartbeat, so do it now */
+		goto restart;
+	} else if (heartbeat_recv_msg.msg.data[0] != 0) {
 		/*
 		 * Got an error in the heartbeat response.  It was already
 		 * reported in ipmi_wdog_msg_handler, but we should return
@@ -648,6 +711,7 @@ static int ipmi_heartbeat(void)
 		rv = -EINVAL;
 	}
 
+out_unlock:
 	mutex_unlock(&heartbeat_lock);
 
 	return rv;
@@ -659,7 +723,7 @@ static struct watchdog_info ident = {
 	.identity	= "IPMI"
 };
 
-static int ipmi_ioctl(struct inode *inode, struct file *file,
+static int ipmi_ioctl(struct file *file,
 		      unsigned int cmd, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
@@ -728,6 +792,19 @@ static int ipmi_ioctl(struct inode *inode, struct file *file,
 	default:
 		return -ENOIOCTLCMD;
 	}
+}
+
+static long ipmi_unlocked_ioctl(struct file *file,
+				unsigned int cmd,
+				unsigned long arg)
+{
+	int ret;
+
+	mutex_lock(&ipmi_watchdog_mutex);
+	ret = ipmi_ioctl(file, cmd, arg);
+	mutex_unlock(&ipmi_watchdog_mutex);
+
+	return ret;
 }
 
 static ssize_t ipmi_write(struct file *file,
@@ -819,7 +896,6 @@ static int ipmi_open(struct inode *ino, struct file *filep)
 		if (test_and_set_bit(0, &ipmi_wdog_open))
 			return -EBUSY;
 
-		cycle_kernel_lock();
 
 		/*
 		 * Don't start the timer now, let it start on the
@@ -880,10 +956,11 @@ static const struct file_operations ipmi_wdog_fops = {
 	.read    = ipmi_read,
 	.poll    = ipmi_poll,
 	.write   = ipmi_write,
-	.ioctl   = ipmi_ioctl,
+	.unlocked_ioctl = ipmi_unlocked_ioctl,
 	.open    = ipmi_open,
 	.release = ipmi_close,
 	.fasync  = ipmi_fasync,
+	.llseek  = no_llseek,
 };
 
 static struct miscdevice ipmi_wdog_miscdev = {
@@ -895,11 +972,15 @@ static struct miscdevice ipmi_wdog_miscdev = {
 static void ipmi_wdog_msg_handler(struct ipmi_recv_msg *msg,
 				  void                 *handler_data)
 {
-	if (msg->msg.data[0] != 0) {
+	if (msg->msg.cmd == IPMI_WDOG_RESET_TIMER &&
+			msg->msg.data[0] == IPMI_WDOG_TIMER_NOT_INIT_RESP)
+		printk(KERN_INFO PFX "response: The IPMI controller appears"
+		       " to have been reset, will attempt to reinitialize"
+		       " the watchdog timer\n");
+	else if (msg->msg.data[0] != 0)
 		printk(KERN_ERR PFX "response: Error %x on cmd %x\n",
 		       msg->msg.data[0],
 		       msg->msg.cmd);
-	}
 
 	ipmi_free_recv_msg(msg);
 }
@@ -1051,17 +1132,8 @@ static void ipmi_unregister_watchdog(int ipmi_intf)
 
 #ifdef HAVE_DIE_NMI
 static int
-ipmi_nmi(struct notifier_block *self, unsigned long val, void *data)
+ipmi_nmi(unsigned int val, struct pt_regs *regs)
 {
-	struct die_args *args = data;
-
-	if (val != DIE_NMI)
-		return NOTIFY_OK;
-
-	/* Hack, if it's a memory or I/O error, ignore it. */
-	if (args->err & 0xc0)
-		return NOTIFY_OK;
-
 	/*
 	 * If we get here, it's an NMI that's not a memory or I/O
 	 * error.  We can't truly tell if it's from IPMI or not
@@ -1071,15 +1143,15 @@ ipmi_nmi(struct notifier_block *self, unsigned long val, void *data)
 
 	if (testing_nmi) {
 		testing_nmi = 2;
-		return NOTIFY_STOP;
+		return NMI_HANDLED;
 	}
 
 	/* If we are not expecting a timeout, ignore it. */
 	if (ipmi_watchdog_state == WDOG_TIMEOUT_NONE)
-		return NOTIFY_OK;
+		return NMI_DONE;
 
 	if (preaction_val != WDOG_PRETIMEOUT_NMI)
-		return NOTIFY_OK;
+		return NMI_DONE;
 
 	/*
 	 * If no one else handled the NMI, we assume it was the IPMI
@@ -1094,12 +1166,8 @@ ipmi_nmi(struct notifier_block *self, unsigned long val, void *data)
 			panic(PFX "pre-timeout");
 	}
 
-	return NOTIFY_STOP;
+	return NMI_HANDLED;
 }
-
-static struct notifier_block ipmi_nmi_handler = {
-	.notifier_call = ipmi_nmi
-};
 #endif
 
 static int wdog_reboot_handler(struct notifier_block *this,
@@ -1115,7 +1183,7 @@ static int wdog_reboot_handler(struct notifier_block *this,
 		if (code == SYS_POWER_OFF || code == SYS_HALT) {
 			/* Disable the WDT if we are shutting down. */
 			ipmi_watchdog_state = WDOG_TIMEOUT_NONE;
-			panic_halt_ipmi_set_timeout();
+			ipmi_set_timeout(IPMI_SET_TIMEOUT_NO_HB);
 		} else if (ipmi_watchdog_state != WDOG_TIMEOUT_NONE) {
 			/* Set a long timer to let the reboot happens, but
 			   reboot if it hangs, but only if the watchdog
@@ -1123,7 +1191,7 @@ static int wdog_reboot_handler(struct notifier_block *this,
 			timeout = 120;
 			pretimeout = 0;
 			ipmi_watchdog_state = WDOG_TIMEOUT_RESET;
-			panic_halt_ipmi_set_timeout();
+			ipmi_set_timeout(IPMI_SET_TIMEOUT_NO_HB);
 		}
 	}
 	return NOTIFY_OK;
@@ -1264,7 +1332,8 @@ static void check_parms(void)
 		}
 	}
 	if (do_nmi && !nmi_handler_registered) {
-		rv = register_die_notifier(&ipmi_nmi_handler);
+		rv = register_nmi_handler(NMI_UNKNOWN, ipmi_nmi, 0,
+						"ipmi");
 		if (rv) {
 			printk(KERN_WARNING PFX
 			       "Can't register nmi handler\n");
@@ -1272,7 +1341,7 @@ static void check_parms(void)
 		} else
 			nmi_handler_registered = 1;
 	} else if (!do_nmi && nmi_handler_registered) {
-		unregister_die_notifier(&ipmi_nmi_handler);
+		unregister_nmi_handler(NMI_UNKNOWN, "ipmi");
 		nmi_handler_registered = 0;
 	}
 #endif
@@ -1310,7 +1379,7 @@ static int __init ipmi_wdog_init(void)
 	if (rv) {
 #ifdef HAVE_DIE_NMI
 		if (nmi_handler_registered)
-			unregister_die_notifier(&ipmi_nmi_handler);
+			unregister_nmi_handler(NMI_UNKNOWN, "ipmi");
 #endif
 		atomic_notifier_chain_unregister(&panic_notifier_list,
 						 &wdog_panic_notifier);
@@ -1331,7 +1400,7 @@ static void __exit ipmi_wdog_exit(void)
 
 #ifdef HAVE_DIE_NMI
 	if (nmi_handler_registered)
-		unregister_die_notifier(&ipmi_nmi_handler);
+		unregister_nmi_handler(NMI_UNKNOWN, "ipmi");
 #endif
 
 	atomic_notifier_chain_unregister(&panic_notifier_list,
@@ -1340,6 +1409,9 @@ static void __exit ipmi_wdog_exit(void)
 }
 module_exit(ipmi_wdog_exit);
 module_init(ipmi_wdog_init);
+
+EXPORT_SYMBOL(ipmi_delayed_shutdown);
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Corey Minyard <minyard@mvista.com>");
 MODULE_DESCRIPTION("watchdog timer based upon the IPMI interface.");

@@ -109,11 +109,6 @@ SECTIONS
 		__ptov_table_begin = .;
 		*(.ptov_fixup);
 		__ptov_table_end = .;
-#ifdef CONFIG_PPC_ISERIES
-		__dt_strings_start = .;
-		*(.dt_strings);
-		__dt_strings_end = .;
-#endif
 	}
 
 	.init.setup : AT(ADDR(.init.setup) - LOAD_OFFSET) {
@@ -160,7 +155,7 @@ SECTIONS
 		INIT_RAM_FS
 	}
 
-	PERCPU(PAGE_SIZE)
+	PERCPU_SECTION(L1_CACHE_BYTES)
 
 	. = ALIGN(8);
 	.machine.desc : AT(ADDR(.machine.desc) - LOAD_OFFSET) {
@@ -170,7 +165,13 @@ SECTIONS
 	}
 #ifdef CONFIG_RELOCATABLE
 	. = ALIGN(8);
-	.dynsym : AT(ADDR(.dynsym) - LOAD_OFFSET) { *(.dynsym) }
+	.dynsym : AT(ADDR(.dynsym) - LOAD_OFFSET)
+	{
+#ifdef CONFIG_RELOCATABLE_PPC32
+		__dynamic_symtab = .;
+#endif
+		*(.dynsym)
+	}
 	.dynstr : AT(ADDR(.dynstr) - LOAD_OFFSET) { *(.dynstr) }
 	.dynamic : AT(ADDR(.dynamic) - LOAD_OFFSET)
 	{
@@ -223,19 +224,17 @@ SECTIONS
 #endif
 
 	/* The initial task and kernel stack */
-	.data.init_task : AT(ADDR(.data.init_task) - LOAD_OFFSET) {
-		INIT_TASK_DATA(THREAD_SIZE)
-	}
+	INIT_TASK_DATA_SECTION(THREAD_SIZE)
 
-	.data.page_aligned : AT(ADDR(.data.page_aligned) - LOAD_OFFSET) {
+	.data..page_aligned : AT(ADDR(.data..page_aligned) - LOAD_OFFSET) {
 		PAGE_ALIGNED_DATA(PAGE_SIZE)
 	}
 
-	.data.cacheline_aligned : AT(ADDR(.data.cacheline_aligned) - LOAD_OFFSET) {
+	.data..cacheline_aligned : AT(ADDR(.data..cacheline_aligned) - LOAD_OFFSET) {
 		CACHELINE_ALIGNED_DATA(L1_CACHE_BYTES)
 	}
 
-	.data.read_mostly : AT(ADDR(.data.read_mostly) - LOAD_OFFSET) {
+	.data..read_mostly : AT(ADDR(.data..read_mostly) - LOAD_OFFSET) {
 		READ_MOSTLY_DATA(L1_CACHE_BYTES)
 	}
 

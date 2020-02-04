@@ -4,9 +4,10 @@
  * for more details.
  *
  * Copyright (C) 2007 by Ralf Baechle
- * Copyright (C) 2009, 2010 Cavium Networks, Inc.
+ * Copyright (C) 2009, 2012 Cavium, Inc.
  */
 #include <linux/clocksource.h>
+#include <linux/export.h>
 #include <linux/init.h>
 #include <linux/smp.h>
 
@@ -68,13 +69,13 @@ void octeon_init_cvmcount(void)
 	while (loops--) {
 		u64 ipd_clk_count = cvmx_read_csr(CVMX_IPD_CLK_COUNT);
 		if (rdiv != 0) {
-			ipd_clk_count = ipd_clk_count * rdiv;
+			ipd_clk_count *= rdiv;
 			if (f != 0) {
 				asm("dmultu\t%[cnt],%[f]\n\t"
 				    "mfhi\t%[cnt]"
 				    : [cnt] "+r" (ipd_clk_count)
-				    :  [f] "r" (f)
-				    :  "hi", "lo");
+				    : [f] "r" (f)
+				    : "hi", "lo");
 			}
 		}
 		write_c0_cvmcount(ipd_clk_count);
@@ -97,7 +98,6 @@ static struct clocksource clocksource_mips = {
 unsigned long long notrace sched_clock(void)
 {
 	/* 64-bit arithmatic can overflow, so use 128-bit.  */
-#if (__GNUC__ < 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ <= 3))
 	u64 t1, t2, t3;
 	unsigned long long rv;
 	u64 mult = clocksource_mips.mult;
@@ -117,20 +117,12 @@ unsigned long long notrace sched_clock(void)
 		: [cnt] "r" (cnt), [mult] "r" (mult), [shift] "r" (shift)
 		: "hi", "lo");
 	return rv;
-#else
-	/* GCC > 4.3 do it the easy way.  */
-	unsigned int __attribute__((mode(TI))) t;
-	t = read_c0_cvmcount();
-	t = t * clocksource_mips.mult;
-	return (unsigned long long)(t >> clocksource_mips.shift);
-#endif
 }
 
 void __init plat_time_init(void)
 {
 	clocksource_mips.rating = 300;
-	clocksource_set_clock(&clocksource_mips, octeon_get_clock_rate());
-	clocksource_register(&clocksource_mips);
+	clocksource_register_hz(&clocksource_mips, octeon_get_clock_rate());
 }
 
 void __udelay(unsigned int us)

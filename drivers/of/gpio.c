@@ -11,16 +11,19 @@
  * (at your option) any later version.
  */
 
-#include <linux/kernel.h>
+#include <linux/device.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/of_gpio.h>
-#include <asm/prom.h>
+#include <linux/slab.h>
 
 /**
- * of_get_gpio_flags - Get a GPIO number and flags to use with GPIO API
+ * of_get_named_gpio_flags() - Get a GPIO number and flags to use with GPIO API
  * @np:		device node to get GPIO from
+ * @propname:	property name containing gpio specifier(s)
  * @index:	index of the GPIO
  * @flags:	a flags pointer to fill in
  *
@@ -28,36 +31,31 @@
  * value on the error condition. If @flags is not NULL the function also fills
  * in flags for the GPIO.
  */
-int of_get_gpio_flags(struct device_node *np, int index,
-		      enum of_gpio_flags *flags)
+int of_get_named_gpio_flags(struct device_node *np, const char *propname,
+                           int index, enum of_gpio_flags *flags)
 {
 	int ret;
-	struct device_node *gc;
-	struct of_gpio_chip *of_gc = NULL;
-	int size;
-	const void *gpio_spec;
-	const u32 *gpio_cells;
+	struct gpio_chip *gc;
+	struct of_phandle_args gpiospec;
 
-	ret = of_parse_phandles_with_args(np, "gpios", "#gpio-cells", index,
-					  &gc, &gpio_spec);
+	ret = of_parse_phandle_with_args(np, propname, "#gpio-cells", index,
+					 &gpiospec);
 	if (ret) {
 		pr_debug("%s: can't parse gpios property\n", __func__);
 		goto err0;
 	}
 
-	of_gc = gc->data;
-	if (!of_gc) {
+	gc = of_node_to_gpiochip(gpiospec.np);
+	if (!gc) {
 		pr_debug("%s: gpio controller %s isn't registered\n",
-			 np->full_name, gc->full_name);
+			 np->full_name, gpiospec.np->full_name);
 		ret = -ENODEV;
 		goto err1;
 	}
 
-	gpio_cells = of_get_property(gc, "#gpio-cells", &size);
-	if (!gpio_cells || size != sizeof(*gpio_cells) ||
-			*gpio_cells != of_gc->gpio_cells) {
+	if (gpiospec.args_count != gc->of_gpio_n_cells) {
 		pr_debug("%s: wrong #gpio-cells for %s\n",
-			 np->full_name, gc->full_name);
+			 np->full_name, gpiospec.np->full_name);
 		ret = -EINVAL;
 		goto err1;
 	}
@@ -66,22 +64,23 @@ int of_get_gpio_flags(struct device_node *np, int index,
 	if (flags)
 		*flags = 0;
 
-	ret = of_gc->xlate(of_gc, np, gpio_spec, flags);
+	ret = gc->of_xlate(gc, &gpiospec, flags);
 	if (ret < 0)
 		goto err1;
 
-	ret += of_gc->gc.base;
+	ret += gc->base;
 err1:
-	of_node_put(gc);
+	of_node_put(gpiospec.np);
 err0:
 	pr_debug("%s exited with status %d\n", __func__, ret);
 	return ret;
 }
-EXPORT_SYMBOL(of_get_gpio_flags);
+EXPORT_SYMBOL(of_get_named_gpio_flags);
 
 /**
- * of_gpio_count - Count GPIOs for a device
+ * of_gpio_named_count - Count GPIOs for a device
  * @np:		device node to count GPIOs for
+ * @propname:	property name containing gpio specifier(s)
  *
  * The function returns the count of GPIOs specified for a node.
  *
@@ -95,15 +94,15 @@ EXPORT_SYMBOL(of_get_gpio_flags);
  * defines four GPIOs (so this function will return 4), two of which
  * are not specified.
  */
-unsigned int of_gpio_count(struct device_node *np)
+unsigned int of_gpio_named_count(struct device_node *np, const char* propname)
 {
 	unsigned int cnt = 0;
 
 	do {
 		int ret;
 
-		ret = of_parse_phandles_with_args(np, "gpios", "#gpio-cells",
-						  cnt, NULL, NULL);
+		ret = of_parse_phandle_with_args(np, propname, "#gpio-cells",
+						 cnt, NULL);
 		/* A hole in the gpios = <> counts anyway. */
 		if (ret < 0 && ret != -EEXIST)
 			break;
@@ -111,11 +110,11 @@ unsigned int of_gpio_count(struct device_node *np)
 
 	return cnt;
 }
-EXPORT_SYMBOL(of_gpio_count);
+EXPORT_SYMBOL(of_gpio_named_count);
 
 /**
  * of_gpio_simple_xlate - translate gpio_spec to the GPIO number and flags
- * @of_gc:	pointer to the of_gpio_chip structure
+ * @gc:		pointer to the gpio_chip structure
  * @np:		device node of the GPIO chip
  * @gpio_spec:	gpio specifier as found in the device tree
  * @flags:	a flags pointer to fill in
@@ -124,29 +123,30 @@ EXPORT_SYMBOL(of_gpio_count);
  * gpio chips. This function performs only one sanity check: whether gpio
  * is less than ngpios (that is specified in the gpio_chip).
  */
-int of_gpio_simple_xlate(struct of_gpio_chip *of_gc, struct device_node *np,
-			 const void *gpio_spec, enum of_gpio_flags *flags)
+int of_gpio_simple_xlate(struct gpio_chip *gc,
+			 const struct of_phandle_args *gpiospec, u32 *flags)
 {
-	const u32 *gpio = gpio_spec;
-
 	/*
 	 * We're discouraging gpio_cells < 2, since that way you'll have to
 	 * write your own xlate function (that will have to retrive the GPIO
 	 * number and the flags from a single gpio cell -- this is possible,
 	 * but not recommended).
 	 */
-	if (of_gc->gpio_cells < 2) {
+	if (gc->of_gpio_n_cells < 2) {
 		WARN_ON(1);
 		return -EINVAL;
 	}
 
-	if (*gpio > of_gc->gc.ngpio)
+	if (WARN_ON(gpiospec->args_count < gc->of_gpio_n_cells))
+		return -EINVAL;
+
+	if (gpiospec->args[0] >= gc->ngpio)
 		return -EINVAL;
 
 	if (flags)
-		*flags = gpio[1];
+		*flags = gpiospec->args[1];
 
-	return *gpio;
+	return gpiospec->args[0];
 }
 EXPORT_SYMBOL(of_gpio_simple_xlate);
 
@@ -159,10 +159,8 @@ EXPORT_SYMBOL(of_gpio_simple_xlate);
  *
  * 1) In the gpio_chip structure:
  *    - all the callbacks
- *
- * 2) In the of_gpio_chip structure:
- *    - gpio_cells
- *    - xlate callback (optional)
+ *    - of_gpio_n_cells
+ *    - of_xlate callback (optional)
  *
  * 3) In the of_mm_gpio_chip structure:
  *    - save_regs callback (optional)
@@ -175,8 +173,7 @@ int of_mm_gpiochip_add(struct device_node *np,
 		       struct of_mm_gpio_chip *mm_gc)
 {
 	int ret = -ENOMEM;
-	struct of_gpio_chip *of_gc = &mm_gc->of_gc;
-	struct gpio_chip *gc = &of_gc->gc;
+	struct gpio_chip *gc = &mm_gc->gc;
 
 	gc->label = kstrdup(np->full_name, GFP_KERNEL);
 	if (!gc->label)
@@ -188,26 +185,17 @@ int of_mm_gpiochip_add(struct device_node *np,
 
 	gc->base = -1;
 
-	if (!of_gc->xlate)
-		of_gc->xlate = of_gpio_simple_xlate;
-
 	if (mm_gc->save_regs)
 		mm_gc->save_regs(mm_gc);
 
-	np->data = of_gc;
+	mm_gc->gc.of_node = np;
 
 	ret = gpiochip_add(gc);
 	if (ret)
 		goto err2;
 
-	/* We don't want to lose the node and its ->data */
-	of_node_get(np);
-
-	pr_debug("%s: registered as generic GPIO chip, base is %d\n",
-		 np->full_name, gc->base);
 	return 0;
 err2:
-	np->data = NULL;
 	iounmap(mm_gc->regs);
 err1:
 	kfree(gc->label);
@@ -217,3 +205,36 @@ err0:
 	return ret;
 }
 EXPORT_SYMBOL(of_mm_gpiochip_add);
+
+void of_gpiochip_add(struct gpio_chip *chip)
+{
+	if ((!chip->of_node) && (chip->dev))
+		chip->of_node = chip->dev->of_node;
+
+	if (!chip->of_node)
+		return;
+
+	if (!chip->of_xlate) {
+		chip->of_gpio_n_cells = 2;
+		chip->of_xlate = of_gpio_simple_xlate;
+	}
+
+	of_node_get(chip->of_node);
+}
+
+void of_gpiochip_remove(struct gpio_chip *chip)
+{
+	if (chip->of_node)
+		of_node_put(chip->of_node);
+}
+
+/* Private function for resolving node pointer to gpio_chip */
+static int of_gpiochip_is_match(struct gpio_chip *chip, const void *data)
+{
+	return chip->of_node == data;
+}
+
+struct gpio_chip *of_node_to_gpiochip(struct device_node *np)
+{
+	return gpiochip_find(np, of_gpiochip_is_match);
+}

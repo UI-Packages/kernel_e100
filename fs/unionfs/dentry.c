@@ -192,6 +192,9 @@ validate_lowers:
 	bend = dbend(dentry);
 	BUG_ON(bstart == -1);
 	for (bindex = bstart; bindex <= bend; bindex++) {
+		int err;
+		struct nameidata lower_nd;
+
 		lower_dentry = unionfs_lower_dentry_idx(dentry, bindex);
 		if (!lower_dentry || !lower_dentry->d_op
 		    || !lower_dentry->d_op->d_revalidate)
@@ -204,8 +207,14 @@ validate_lowers:
 		 * invariants).  We will open lower files as and when needed
 		 * later on.
 		 */
-		if (!lower_dentry->d_op->d_revalidate(lower_dentry, NULL))
+		err = init_lower_nd(&lower_nd, LOOKUP_OPEN);
+		if (unlikely(err < 0)) {
 			valid = false;
+			break;
+		}
+		if (!lower_dentry->d_op->d_revalidate(lower_dentry, &lower_nd))
+			valid = false;
+		release_lower_nd(&lower_nd, err);
 	}
 
 	if (!dentry->d_inode ||
@@ -275,7 +284,7 @@ bool is_newer_lower(const struct dentry *dentry)
 			     inode->i_mtime.tv_sec) > UNIONFS_MIN_CC_TIME) {
 				pr_debug("unionfs: new lower inode mtime "
 					 "(bindex=%d, name=%s)\n", bindex,
-					 dentry->d_name.name);
+					dentry->d_name.name);
 				show_dinode_times(dentry);
 			}
 			return true;
@@ -286,7 +295,7 @@ bool is_newer_lower(const struct dentry *dentry)
 			     inode->i_ctime.tv_sec) > UNIONFS_MIN_CC_TIME) {
 				pr_debug("unionfs: new lower inode ctime "
 					 "(bindex=%d, name=%s)\n", bindex,
-					 dentry->d_name.name);
+					dentry->d_name.name);
 				show_dinode_times(dentry);
 			}
 			return true;
@@ -306,11 +315,14 @@ bool is_newer_lower(const struct dentry *dentry)
 }
 
 static int unionfs_d_revalidate(struct dentry *dentry,
-				struct nameidata *nd_unused)
+				struct nameidata *nd)
 {
 	bool valid = true;
 	int err = 1;		/* 1 means valid for the VFS */
 	struct dentry *parent;
+
+	if (nd && nd->flags & LOOKUP_RCU)
+		return -ECHILD;
 
 	unionfs_read_lock(dentry->d_sb, UNIONFS_SMUTEX_CHILD);
 	parent = unionfs_lock_parent(dentry, UNIONFS_DMUTEX_PARENT);

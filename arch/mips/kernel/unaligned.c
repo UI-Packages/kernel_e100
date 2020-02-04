@@ -73,17 +73,18 @@
  *       Undo the partial store in this case.
  */
 #include <linux/mm.h>
-#include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/smp.h>
 #include <linux/sched.h>
 #include <linux/debugfs.h>
+#include <linux/perf_event.h>
+
 #include <asm/asm.h>
 #include <asm/branch.h>
 #include <asm/byteorder.h>
+#include <asm/cop2.h>
 #include <asm/inst.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 
 #define STR(x)  __STR(x)
 #define __STR(x)  #x
@@ -108,7 +109,7 @@ static void emulate_load_store_insn(struct pt_regs *regs,
 	unsigned long value;
 	unsigned int res;
 
-	regs->regs[0] = 0;
+	perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS, 1, regs, 0);
 
 	/*
 	 * This load never faults.
@@ -451,17 +452,27 @@ static void emulate_load_store_insn(struct pt_regs *regs,
 		 */
 		goto sigbus;
 
+	/*
+	 * COP2 is available to implementor for application specific use.
+	 * It's up to applications to register a notifier chain and do
+	 * whatever they have to do, including possible sending of signals.
+	 */
 	case lwc2_op:
+		cu2_notifier_call_chain(CU2_LWC2_OP, regs);
+		break;
+
 	case ldc2_op:
+		cu2_notifier_call_chain(CU2_LDC2_OP, regs);
+		break;
+
 	case swc2_op:
+		cu2_notifier_call_chain(CU2_SWC2_OP, regs);
+		break;
+
 	case sdc2_op:
-		/*
-		 * These are the coprocessor 2 load/stores.  The current
-		 * implementations don't use cp2 and cp2 should always be
-		 * disabled in c0_status.  So send SIGILL.
-                 * (No longer true: The Sony Praystation uses cp2 for
-                 * 3D matrix operations.  Dunno if that thingy has a MMU ...)
-		 */
+		cu2_notifier_call_chain(CU2_SDC2_OP, regs);
+		break;
+
 	default:
 		/*
 		 * Pheeee...  We encountered an yet unknown instruction or
@@ -503,51 +514,50 @@ asmlinkage void do_ade(struct pt_regs *regs)
 	mm_segment_t seg;
 
 #if defined(CONFIG_CPU_CAVIUM_OCTEON) && (CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0)
-	{
-		/*
-		 * This section of code allows tasks to access CVMSEG
-		 * addresses. These are special addresses into the
-		 * Octeon L1 Cache that can be used as fast scratch
-		 * memory. By default access to this memory is
-		 * disabled so we don't have to save it on context
-		 * switch. When a userspace task references one of
-		 * these addresses, we enable the region and size it
-		 * to match the app.
-		 */
-		const unsigned long CVMSEG_BASE	= 0xffffffffffff8000ul;
-		const unsigned long CVMSEG_IO	= 0xffffffffffffa200ul;
-		uint64_t cvmmemctl		= __read_64bit_c0_register($11, 7);
-		unsigned long cvmseg_size	= (cvmmemctl & 0x3f) * 128;
+	/*
+	 * Allows tasks to access CVMSEG addresses. These are special
+	 * addresses into the Octeon L1 Cache that can be used as fast
+	 * scratch memory. By default access to this memory is
+	 * disabled so we don't have to save it on context
+	 * switch. When a userspace task references one of these
+	 * addresses, we enable the region and size it to match the
+	 * app.
+	 */
+	const unsigned long CVMSEG_BASE	= 0xffffffffffff8000ul;
+	const unsigned long CVMSEG_IO	= 0xffffffffffffa200ul;
+	u64 cvmmemctl			= __read_64bit_c0_register($11, 7);
+	unsigned long cvmseg_size	= (cvmmemctl & 0x3f) * 128;
 
-		if ((regs->cp0_badvaddr == CVMSEG_IO) ||
-			((regs->cp0_badvaddr >= CVMSEG_BASE) && (regs->cp0_badvaddr < CVMSEG_BASE + cvmseg_size))) {
-			preempt_disable();
-			cvmmemctl = __read_64bit_c0_register($11, 7);
-			/* Make sure all async operations are done */
-			asm volatile ("synciobdma" ::: "memory");
-			/* Enable userspace access to CVMSEG */
-			cvmmemctl |= 1<<6;
-			__write_64bit_c0_register($11, 7, cvmmemctl);
-
-			/* printk("Enabling CVMSEG access for task %p (%lu lines)\n", current, cvmmemctl&0x3f); */
-
+	if ((regs->cp0_badvaddr == CVMSEG_IO) ||
+	    ((regs->cp0_badvaddr >= CVMSEG_BASE) &&
+	     (regs->cp0_badvaddr < CVMSEG_BASE + cvmseg_size))) {
+		preempt_disable();
+		cvmmemctl = __read_64bit_c0_register($11, 7);
+		/* Make sure all async operations are done */
+		asm volatile ("synciobdma" ::: "memory");
+		/* Enable userspace access to CVMSEG */
+		cvmmemctl |= 1 << 6;
+		__write_64bit_c0_register($11, 7, cvmmemctl);
 # ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
-			/*
-			 * Restore the processes CVMSEG data. Leave
-			 * off the last 8 bytes since the kernel
-			 * stores the thread pointer there.
-			 */
-			memcpy((void *)CVMSEG_BASE, current->thread.cvmseg.cvmseg, cvmseg_size - 8);
+		/*
+		 * Restore the processes CVMSEG data. Leave off the
+		 * last 8 bytes since the kernel stores the thread
+		 * pointer there.
+		 */
+		memcpy((void *)CVMSEG_BASE, current->thread.cvmseg.cvmseg,
+		       cvmseg_size - 8);
 # else
-			/* Restore the processes CVMSEG data */
-			memcpy((void *)CVMSEG_BASE, current->thread.cvmseg.cvmseg, cvmseg_size);
+		/* Restore the processes CVMSEG data */
+		memcpy((void *)CVMSEG_BASE, current->thread.cvmseg.cvmseg,
+		       cvmseg_size);
 # endif
-			preempt_enable();
-			return;
-		}
+		preempt_enable();
+		return;
 	}
 #endif
 
+	perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS,
+			1, regs, regs->cp0_badvaddr);
 	/*
 	 * Did we catch a fault trying to load an instruction?
 	 * Or are we running in MIPS16 mode?

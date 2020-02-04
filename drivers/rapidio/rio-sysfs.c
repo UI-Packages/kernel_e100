@@ -17,8 +17,11 @@
 #include <linux/capability.h>
 
 #include "rio.h"
+
 #ifdef CONFIG_CAVIUM_OCTEON_RAPIDIO
-extern int octeon_rio_dma_mem(struct rio_dev *rdev, uint64_t local_addr, uint64_t remote_addr, int size, int is_outbound);
+#include <asm/io.h>
+int octeon_rio_dma_mem(struct rio_dev *rdev, uint64_t local_addr,
+		       uint64_t remote_addr, int size, int is_outbound);
 #endif
 
 /* Sysfs support */
@@ -37,6 +40,8 @@ rio_config_attr(device_rev, "0x%08x\n");
 rio_config_attr(asm_did, "0x%04x\n");
 rio_config_attr(asm_vid, "0x%04x\n");
 rio_config_attr(asm_rev, "0x%04x\n");
+rio_config_attr(destid, "0x%04x\n");
+rio_config_attr(hopcount, "0x%02x\n");
 
 static ssize_t routes_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -56,6 +61,35 @@ static ssize_t routes_show(struct device *dev, struct device_attribute *attr, ch
 	return (str - buf);
 }
 
+static ssize_t lprev_show(struct device *dev,
+			  struct device_attribute *attr, char *buf)
+{
+	struct rio_dev *rdev = to_rio_dev(dev);
+
+	return sprintf(buf, "%s\n",
+			(rdev->prev) ? rio_name(rdev->prev) : "root");
+}
+
+static ssize_t lnext_show(struct device *dev,
+			  struct device_attribute *attr, char *buf)
+{
+	struct rio_dev *rdev = to_rio_dev(dev);
+	char *str = buf;
+	int i;
+
+	if (rdev->pef & RIO_PEF_SWITCH) {
+		for (i = 0; i < RIO_GET_TOTAL_PORTS(rdev->swpinfo); i++) {
+			if (rdev->rswitch->nextdev[i])
+				str += sprintf(str, "%s\n",
+					rio_name(rdev->rswitch->nextdev[i]));
+			else
+				str += sprintf(str, "null\n");
+		}
+	}
+
+	return str - buf;
+}
+
 struct device_attribute rio_dev_attrs[] = {
 	__ATTR_RO(did),
 	__ATTR_RO(vid),
@@ -63,13 +97,18 @@ struct device_attribute rio_dev_attrs[] = {
 	__ATTR_RO(asm_did),
 	__ATTR_RO(asm_vid),
 	__ATTR_RO(asm_rev),
+	__ATTR_RO(lprev),
+	__ATTR_RO(destid),
 	__ATTR_NULL,
 };
 
 static DEVICE_ATTR(routes, S_IRUGO, routes_show, NULL);
+static DEVICE_ATTR(lnext, S_IRUGO, lnext_show, NULL);
+static DEVICE_ATTR(hopcount, S_IRUGO, hopcount_show, NULL);
 
 static ssize_t
-rio_read_config(struct kobject *kobj, struct bin_attribute *bin_attr,
+rio_read_config(struct file *filp, struct kobject *kobj,
+		struct bin_attribute *bin_attr,
 		char *buf, loff_t off, size_t count)
 {
 	struct rio_dev *dev =
@@ -80,7 +119,7 @@ rio_read_config(struct kobject *kobj, struct bin_attribute *bin_attr,
 
 	/* Several chips lock up trying to read undefined config space */
 	if (capable(CAP_SYS_ADMIN))
-		size = bin_attr->size;
+		size = RIO_MAINT_SPACE_SZ;
 
 	if (off >= size)
 		return 0;
@@ -140,7 +179,8 @@ rio_read_config(struct kobject *kobj, struct bin_attribute *bin_attr,
 }
 
 static ssize_t
-rio_write_config(struct kobject *kobj, struct bin_attribute *bin_attr,
+rio_write_config(struct file *filp, struct kobject *kobj,
+		 struct bin_attribute *bin_attr,
 		 char *buf, loff_t off, size_t count)
 {
 	struct rio_dev *dev =
@@ -149,10 +189,10 @@ rio_write_config(struct kobject *kobj, struct bin_attribute *bin_attr,
 	loff_t init_off = off;
 	u8 *data = (u8 *) buf;
 
-	if (off >= bin_attr->size)
+	if (off >= RIO_MAINT_SPACE_SZ)
 		return 0;
-	if (off + count > bin_attr->size) {
-		size = bin_attr->size - off;
+	if (off + count > RIO_MAINT_SPACE_SZ) {
+		size = RIO_MAINT_SPACE_SZ - off;
 		count = size;
 	}
 
@@ -202,13 +242,14 @@ static struct bin_attribute rio_config_attr = {
 		 .name = "config",
 		 .mode = S_IRUGO | S_IWUSR,
 		 },
-	.size = 0x1000000, /* 16MB = 21bit dword address */
+	.size = RIO_MAINT_SPACE_SZ,
 	.read = rio_read_config,
 	.write = rio_write_config,
 };
 
 static ssize_t
-rio_read_memory(struct kobject *kobj, struct bin_attribute *bin_attr,
+rio_read_memory(struct file *_, struct kobject *kobj,
+		struct bin_attribute *bin_attr,
 		char *buf, loff_t off, size_t count)
 {
 	struct rio_dev *dev =
@@ -239,7 +280,8 @@ rio_read_memory(struct kobject *kobj, struct bin_attribute *bin_attr,
 }
 
 static ssize_t
-rio_write_memory(struct kobject *kobj, struct bin_attribute *bin_attr,
+rio_write_memory(struct file *_, struct kobject *kobj,
+		 struct bin_attribute *bin_attr,
 		 char *buf, loff_t off, size_t count)
 {
 	struct rio_dev *dev =
@@ -279,19 +321,24 @@ int rio_create_sysfs_dev_files(struct rio_dev *rdev)
 {
 	int err = 0;
 
+
 	err = device_create_bin_file(&rdev->dev, &rio_config_attr);
 
-	if (!err && rdev->rswitch) {
-		err = device_create_file(&rdev->dev, &dev_attr_routes);
+	if (!err && (rdev->pef & RIO_PEF_SWITCH)) {
+		err |= device_create_file(&rdev->dev, &dev_attr_routes);
+		err |= device_create_file(&rdev->dev, &dev_attr_lnext);
+		err |= device_create_file(&rdev->dev, &dev_attr_hopcount);
 		if (!err && rdev->rswitch->sw_sysfs)
-			err = rdev->rswitch->sw_sysfs(rdev, 1);
+			err = rdev->rswitch->sw_sysfs(rdev, RIO_SW_SYSFS_CREATE);
 	}
 
-	if (err) {
-		pr_warning("RIO: Failed to create some of the atribute" \
-			" files for %s\n", rio_name(rdev));
+	if (err)
+		pr_warning("RIO: Failed to create attribute file(s) for %s\n",
+			   rio_name(rdev));
+
+	err = sysfs_create_bin_file(&rdev->dev.kobj, &rio_config_attr);
+	if (err)
 		return err;
-	}
 
 	rdev->memory.attr.name = "memory";
 	rdev->memory.attr.mode = S_IRUGO | S_IWUSR;
@@ -312,7 +359,7 @@ int rio_create_sysfs_dev_files(struct rio_dev *rdev)
 		rdev->memory.size = 0;
 
 	if (rdev->memory.size) {
-		err = device_create_bin_file(&rdev->dev, &rdev->memory);
+		err = sysfs_create_bin_file(&rdev->dev.kobj, &rdev->memory);
 		if (err)
 			rdev->memory.size = 0;
 	}
@@ -328,14 +375,18 @@ int rio_create_sysfs_dev_files(struct rio_dev *rdev)
 void rio_remove_sysfs_dev_files(struct rio_dev *rdev)
 {
 	device_remove_bin_file(&rdev->dev, &rio_config_attr);
-	if (rdev->rswitch) {
+	if (rdev->pef & RIO_PEF_SWITCH) {
 		device_remove_file(&rdev->dev, &dev_attr_routes);
+		device_remove_file(&rdev->dev, &dev_attr_lnext);
+		device_remove_file(&rdev->dev, &dev_attr_hopcount);
 		if (rdev->rswitch->sw_sysfs)
-			rdev->rswitch->sw_sysfs(rdev, 0);
+			rdev->rswitch->sw_sysfs(rdev, RIO_SW_SYSFS_REMOVE);
 	}
 
+	sysfs_remove_bin_file(&rdev->dev.kobj, &rio_config_attr);
+
 	if (rdev->memory.size) {
-		device_remove_bin_file(&rdev->dev, &rdev->memory);
+		sysfs_remove_bin_file(&rdev->dev.kobj, &rdev->memory);
 		rdev->memory.size = 0;
 	}
 }
