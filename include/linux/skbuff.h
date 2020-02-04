@@ -529,7 +529,11 @@ enum {
 	SKB_CVM_RESERVED_2 = (1 << 2),
 	SKB_CVM_RESERVED_3 = (1 << 3),
 	SKB_CVM_RESERVED_4 = (1 << 4),
+	SKB_CVM_RESERVED_15 = (1 << 15),
 };
+
+#define SKB_DPI_SHIFT 15
+#define SKB_CVM_RESERVED_MASK ((1 << SKB_DPI_SHIFT) - 1)
 
 struct sk_buff {
 	/* These two members must be first. */
