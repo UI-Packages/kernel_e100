@@ -189,7 +189,9 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
  *      * If Octeon IPSEC Acceleration module has been loaded
  *      * call it, otherwise, follow the software path
  *      */
-        if (cavium_ipsec_process) {
+	// If Octeon IPSec Acceleration module is not able to handle the Ciher at any instance,
+	// Use the Software Path to hadnle it
+        if ((cavium_ipsec_process) && (x->sa_handle != NULL)) {
 		if (x->props.replay_window && x->repl->check(x, skb, seq) ) {
 			XFRM_INC_STATS(net, LINUX_MIB_XFRMINSTATESEQERROR);
 			goto drop_unlock;

@@ -112,7 +112,21 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
                 err = -ENOMEM;
                 goto error;
             }
-            err = cavium_ipsec_process(x, skb, 0, 1 /*ENCRYPT*/);
+            // If Octeon IPSec Acceleration module is not able to handle the Ciher at any instance,
+            // Use the Software Path to hadnle it
+            if (x->sa_handle != NULL)
+            {
+                err = cavium_ipsec_process(x, skb, 0, 1 /*ENCRYPT*/);
+                if (err != 0)
+                {
+                    err = x->type->output(x, skb);   
+                }
+            }
+            else
+            {
+                err = x->type->output(x, skb);
+            }
+
         }
         else
         {

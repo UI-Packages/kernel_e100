@@ -79,7 +79,11 @@
 #define REUSE_SKBUFFS_WITHOUT_FREE  1
 #endif
 
-#define USE_HW_TCPUDP_CHECKSUM      1
+/* 
+ * Disable hardware L4-checksum because it forces checksum 
+ * recalculation of corrupted packets when doing forwarding.
+ */
+#define USE_HW_TCPUDP_CHECKSUM     0 
 
 /* Enable Random Early Dropping under load */
 #define USE_RED                     1
